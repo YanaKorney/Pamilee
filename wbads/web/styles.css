@@ -92,7 +92,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-.wrap { max-width: 1240px; margin: 0 auto; padding: 20px 20px 64px; }
+.wrap { max-width: 1440px; margin: 0 auto; padding: 20px 20px 64px; }
 
 /* ── шапка ─────────────────────────────────────────────────────────────── */
 
@@ -209,7 +209,7 @@ input[type="date"], input[type="number"] {
 
 .camp {
   border: 1px solid var(--border); border-radius: var(--radius);
-  margin-bottom: 10px; background: var(--surface-1); overflow: hidden;
+  margin-bottom: 6px; background: var(--surface-1); overflow: hidden;
 }
 .camp.critical { border-left: 4px solid var(--status-critical); }
 .camp.warning  { border-left: 4px solid var(--status-warning); }
@@ -217,15 +217,34 @@ input[type="date"], input[type="number"] {
 .camp.ok    { border-left: 4px solid var(--border-strong); }
 .camp.info, .camp.idle { border-left: 4px solid var(--border-strong); opacity: .82; }
 
+/* Общая сетка колонок: шапка и строки обязаны совпадать, поэтому
+   ширины заданы одной переменной. */
+.camp-table {
+  --cols: minmax(320px, 1.6fr) 84px 70px 58px 64px 70px 66px 58px 86px 92px 62px 18px;
+}
+.camp-scroll { overflow-x: auto; }
+.camp-scroll > * { min-width: 1200px; }
+
+.camp-header {
+  display: grid; grid-template-columns: var(--cols); gap: 10px;
+  padding: 0 16px 8px; border-left: 4px solid transparent;
+  border-bottom: 1px solid var(--border); margin-bottom: 8px;
+}
+.camp-header div {
+  font-size: 11px; color: var(--text-muted); text-align: right;
+  line-height: 1.25; align-self: end;
+}
+.camp-header div:first-child { text-align: left; }
+
 .camp-head {
-  display: grid; grid-template-columns: 1fr auto; gap: 14px;
-  padding: 13px 16px; cursor: pointer; align-items: center;
+  display: grid; grid-template-columns: var(--cols); gap: 10px;
+  padding: 11px 16px; cursor: pointer; align-items: center;
 }
 .camp-head:hover { background: var(--surface-2); }
-.camp-title { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.camp-title { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
 .camp-title .name { font-weight: 640; font-size: 14.5px; }
 .badge {
-  font-size: 11.5px; padding: 2px 8px; border-radius: 20px;
+  font-size: 11px; padding: 2px 7px; border-radius: 20px;
   border: 1px solid var(--border-strong); color: var(--text-secondary);
   background: var(--surface-2); white-space: nowrap;
 }
@@ -240,12 +259,14 @@ input[type="date"], input[type="number"] {
   line-height: 1.45;
 }
 
-.camp-metrics { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
-.camp-metrics .m { text-align: right; min-width: 74px; }
-.camp-metrics .m .k { font-size: 11px; color: var(--text-muted); }
-.camp-metrics .m .v { font-size: 14px; font-weight: 620; font-variant-numeric: tabular-nums; }
-.camp-metrics .m .v.bad { color: var(--status-critical); }
-.camp-metrics .m .v.good { color: var(--status-good); }
+.cell {
+  text-align: right; font-size: 13.5px; font-weight: 600;
+  font-variant-numeric: tabular-nums; line-height: 1.3;
+}
+.cell.bad { color: var(--status-critical); }
+.cell.good { color: var(--status-good); }
+.cell .was { display: block; font-size: 10.5px; font-weight: 400; color: var(--text-muted); }
+.cell.dim { color: var(--text-muted); font-weight: 500; }
 
 .spark { width: 92px; height: 30px; display: block; }
 
@@ -273,12 +294,14 @@ table.data th, table.data td { padding: 7px 9px; text-align: right; border-botto
 table.data th:first-child, table.data td:first-child { text-align: left; }
 table.data th { color: var(--text-muted); font-weight: 550; font-size: 11.5px; white-space: nowrap; }
 table.data td { font-variant-numeric: tabular-nums; }
+table.data td.bad { color: var(--status-critical); font-weight: 620; }
+table.data td.good { color: var(--status-good); font-weight: 620; }
 table.data tr.bad td:first-child { border-left: 3px solid var(--status-critical); padding-left: 7px; }
 table.data tr.watch td:first-child { border-left: 3px solid var(--status-warning); padding-left: 7px; }
 table.data tr.star td:first-child { border-left: 3px solid var(--status-good); padding-left: 7px; }
 
 .subhead { font-size: 13px; font-weight: 650; margin: 18px 0 2px; }
-.mini-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; margin-top: 12px; }
+.mini-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 16px; margin-top: 12px; }
 
 .empty { text-align: center; padding: 40px 20px; color: var(--text-muted); }
 .err {
@@ -286,3 +309,50 @@ table.data tr.star td:first-child { border-left: 3px solid var(--status-good); p
   color: var(--status-critical); padding: 12px 14px; border-radius: 8px; margin-bottom: 16px;
 }
 .foot { color: var(--text-muted); font-size: 12.5px; text-align: center; padding-top: 8px; }
+
+
+/* ── воронка: показы → клики → корзина → заказы ────────────────────────── */
+
+.funnel {
+  display: flex; align-items: stretch; gap: 4px; flex-wrap: wrap;
+}
+.funnel .stage {
+  flex: 1 1 130px; background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 9px; padding: 12px 14px;
+}
+.funnel .stage .k { font-size: 11.5px; color: var(--text-muted); }
+.funnel .stage .v {
+  font-size: 22px; font-weight: 640; letter-spacing: -.01em;
+  font-variant-numeric: tabular-nums; margin: 4px 0 2px;
+}
+.funnel .stage .d { font-size: 12px; color: var(--text-secondary); }
+
+/* Шаг между этапами — сама конверсия. Это главное число блока,
+   поэтому оно, а не счётчики, несёт цвет состояния. */
+.funnel .step {
+  flex: 0 1 128px; display: flex; flex-direction: column; justify-content: center;
+  align-items: center; text-align: center; padding: 6px 4px;
+}
+.funnel .step .arrow { color: var(--border-strong); font-size: 15px; line-height: 1; }
+.funnel .step .k { font-size: 11px; color: var(--text-muted); margin-top: 3px; }
+.funnel .step .v {
+  font-size: 17px; font-weight: 650; font-variant-numeric: tabular-nums;
+  margin: 1px 0; display: flex; align-items: center; gap: 5px;
+}
+.funnel .step .v.bad { color: var(--status-critical); }
+.funnel .step .v.good { color: var(--status-good); }
+.funnel .step .d { font-size: 11.5px; color: var(--text-secondary); }
+
+.funnel-note {
+  margin-top: 14px; padding-top: 13px; border-top: 1px solid var(--border);
+  display: flex; flex-wrap: wrap; gap: 22px; font-size: 13px;
+  color: var(--text-secondary);
+}
+.funnel-note b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.funnel-note b.warn { color: var(--status-critical); }
+
+/* Малые графики конверсий: у каждой свой масштаб, поэтому три полотна,
+   а не три линии на одном — иначе CTR около 2% не разглядеть рядом с 30%. */
+.conv-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 18px; }
+.conv-charts .title { font-size: 13px; font-weight: 620; margin-bottom: 2px; }
+.conv-charts .sub { font-size: 12px; color: var(--text-muted); margin-bottom: 6px; }

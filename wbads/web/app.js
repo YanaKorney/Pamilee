@@ -277,10 +277,144 @@ function render() {
 
   renderTodo(r);
   renderKpis(r);
+  renderFunnel(r);
+  renderConvCharts(r);
   renderCharts(r);
+  renderCampHeader();
   renderFilters(r);
   renderCampaigns(r);
   renderFoot(r);
+}
+
+/* ── воронка и конверсии ──────────────────────────────────────────────── */
+
+/* Порог для каждого шага воронки берётся из настроек: ниже него шаг
+   считается проблемным, заметно выше — сильным. */
+function convClass(value, floor) {
+  if (!floor || !isFinite(value)) return '';
+  if (value < floor) return 'bad';
+  if (value >= floor * 2) return 'good';
+  return '';
+}
+
+function floors(r) {
+  return {
+    ctr: r.thresholds.ctr_floor,
+    cr_cart: r.thresholds.cr_cart_floor,
+    cr_order: r.thresholds.cr_order_floor,
+  };
+}
+
+const FUNNEL_STEPS = [
+  { key: 'ctr', label: 'CTR', hint: 'показ → клик' },
+  { key: 'cr_cart', label: 'В корзину', hint: 'клик → корзина' },
+  { key: 'cr_order', label: 'В заказ', hint: 'корзина → заказ' },
+];
+
+function renderFunnel(r) {
+  const t = r.totals, c = r.compare, f = floors(r);
+  const stages = [
+    { key: 'views', label: 'Показы' },
+    { key: 'clicks', label: 'Клики' },
+    { key: 'atbs', label: 'В корзине' },
+    { key: 'orders', label: 'Заказы' },
+  ];
+
+  const host = document.getElementById('funnel');
+  host.innerHTML = '';
+
+  stages.forEach((stage, i) => {
+    const box = el('div', 'stage');
+    const d = c[stage.key].delta_pct;
+    box.innerHTML =
+      `<div class="k">${stage.label}</div>` +
+      `<div class="v">${num(t[stage.key])}</div>` +
+      `<div class="d">${signed(d)} к прошлому периоду</div>`;
+    host.appendChild(box);
+
+    const step = FUNNEL_STEPS[i];
+    if (!step) return;
+    const value = t[step.key];
+    const cls = convClass(value, f[step.key]);
+    const conv = el('div', 'step');
+    conv.innerHTML =
+      `<div class="arrow">→</div>` +
+      `<div class="k">${step.hint}</div>` +
+      `<div class="v ${cls}">${pct(value, 2)}</div>` +
+      `<div class="d">было ${pct(c[step.key].previous, 2)} · ${signed(c[step.key].delta_pct)}</div>`;
+    host.appendChild(conv);
+  });
+
+  const note = document.getElementById('funnel-note');
+  const parts = [
+    `Сквозная конверсия клик → заказ: <b>${pct(t.cr_click_order, 2)}</b>`,
+    `Показ → заказ: <b>${pct(safeDiv(t.orders, t.views) * 100, 3)}</b>`,
+    `Средний чек: <b>${money(t.aov)}</b>`,
+  ];
+
+  /* Средняя по кабинету прячет провалы: воронка целиком может быть в норме,
+     пока отдельные кампании валятся. Поэтому считаем не только общий
+     показатель, но и сколько кампаний не дотягивает на каждом шаге. */
+  const active = r.campaigns.filter((c) => c.metrics.clicks >= 50);
+  const weak = FUNNEL_STEPS
+    .map((step) => ({
+      step,
+      count: active.filter((c) => c.metrics[step.key] < f[step.key]).length,
+    }))
+    .filter((x) => x.count > 0)
+    .sort((a, b) => b.count - a.count);
+
+  if (weak.length) {
+    parts.push(weak.map((w) =>
+      `<b class="warn">${w.count}</b> ${plural(w.count, 'кампания', 'кампании', 'кампаний')} ` +
+      `ниже порога на шаге «${w.step.hint}»`).join(' · '));
+  } else if (active.length) {
+    parts.push('Ни одна кампания не проваливает пороги воронки');
+  }
+  note.innerHTML = parts.map((x) => `<span>${x}</span>`).join('');
+}
+
+const safeDiv = (a, b) => (b ? a / b : 0);
+
+function renderConvCharts(r) {
+  const host = document.getElementById('conv-charts');
+  host.innerHTML = '';
+  const dates = r.series.map((p) => p.date);
+  const f = floors(r);
+  const color = cssVar('--series-1');
+
+  FUNNEL_STEPS.forEach((step) => {
+    const box = el('div');
+    box.appendChild(el('div', 'title', `${step.label} · ${pct(r.totals[step.key], 2)}`));
+    box.appendChild(el('div', 'sub', step.hint));
+    const chartHost = el('div', 'chart-host');
+    box.appendChild(chartHost);
+    host.appendChild(box);
+
+    const values = r.series.map((p) => p[step.key]);
+    const digits = Math.max(...values, f[step.key]) < 10 ? 1 : 0;
+
+    requestAnimationFrame(() => {
+      lineChart(chartHost, {
+        dates, height: 165,
+        series: [{ name: step.label, values, color, fill: true }],
+        format: (v) => pct(v, 2),
+        axisFormat: (v) => v.toFixed(digits).replace('.', ',') + '%',
+        target: { value: f[step.key], label: `порог ${pct(f[step.key], 1)}` },
+        ariaLabel: `${step.label} по дням, ${step.hint}`,
+      });
+    });
+  });
+}
+
+/* ── шапка таблицы кампаний ───────────────────────────────────────────── */
+
+const CAMP_COLUMNS = ['Кампания', 'Расход по дням', 'Показы', 'CTR', 'Клики',
+                      '→ корзина', '→ заказ', 'Заказы', 'Расход', 'Выручка', 'ДРР', ''];
+
+function renderCampHeader() {
+  const host = document.getElementById('camp-header');
+  host.innerHTML = CAMP_COLUMNS.map((label) => `<div>${label}</div>`).join('');
 }
 
 function renderTodo(r) {
@@ -439,7 +573,9 @@ function campaignCard(c, r) {
     `<span class="name">${c.verdict_icon} ${escapeHtml(c.name)}</span>` +
     `<span class="badge ${c.verdict}">${c.verdict_label}</span>` +
     `<span class="badge">${escapeHtml(c.type_name)}</span>` +
-    `<span class="badge">${escapeHtml(c.status_name)}</span>`;
+    /* Статус показываем, только когда он необычный: «идут показы» стоит
+       почти у всех и лишь засоряет строку. */
+    (c.status === 9 ? '' : `<span class="badge">${escapeHtml(c.status_name)}</span>`);
   titleBox.appendChild(title);
 
   /* Что именно не так — видно, не раскрывая карточку */
@@ -453,15 +589,22 @@ function campaignCard(c, r) {
 
   const drrBad = m.revenue > 0 && m.drr > target;
   const drrGood = m.revenue > 0 && m.drr > 0 && m.drr <= target;
-  const metrics = el('div', 'camp-metrics');
-  metrics.innerHTML =
+  const f = floors(r);
+  const delta = (key) => (c.compare ? c.compare[key].delta_pct : null);
+
+  head.insertAdjacentHTML('beforeend',
     sparkline(c.series.map((p) => p.spend), cssVar('--series-2')) +
-    metric('Расход', money(m.spend)) +
-    metric('Выручка', money(m.revenue)) +
-    metric('ДРР', drrText(m), drrBad ? 'bad' : (drrGood ? 'good' : '')) +
-    metric('Заказы', num(m.orders)) +
-    `<span class="chev">${state.open.has(c.advert_id) ? '▲' : '▼'}</span>`;
-  head.appendChild(metrics);
+    cell(num(m.views), '', delta('views')) +
+    cell(pct(m.ctr, 2), convClass(m.ctr, f.ctr), delta('ctr')) +
+    cell(num(m.clicks), '', delta('clicks')) +
+    cell(pct(m.cr_cart, 1), convClass(m.cr_cart, f.cr_cart), delta('cr_cart')) +
+    cell(pct(m.cr_order, 1), convClass(m.cr_order, f.cr_order), delta('cr_order')) +
+    cell(num(m.orders), '', delta('orders')) +
+    cell(money(m.spend)) +
+    cell(money(m.revenue)) +
+    cell(drrText(m), drrBad ? 'bad' : (drrGood ? 'good' : ''),
+         m.revenue > 0 ? delta('drr') : null) +
+    `<span class="chev">${state.open.has(c.advert_id) ? '▲' : '▼'}</span>`);
 
   const body = el('div', 'camp-body');
   const toggle = () => {
@@ -479,11 +622,16 @@ function campaignCard(c, r) {
   return card;
 }
 
-function metric(key, value, cls = '') {
-  return `<div class="m"><div class="k">${key}</div><div class="v ${cls}">${value}</div></div>`;
+/* Ячейка таблицы: значение и, если есть с чем сравнить, изменение к прошлому периоду. */
+function cell(value, cls = '', deltaPct = null) {
+  const change = (deltaPct === null || deltaPct === undefined || !isFinite(deltaPct))
+    ? '' : `<span class="was">${signed(deltaPct)}</span>`;
+  return `<div class="cell ${cls}">${value}${change}</div>`;
 }
 
 function fillBody(body, c, r) {
+  const m = c.metrics;
+
   /* находки с рекомендациями */
   if (c.findings.length) {
     c.findings.forEach((f) => {
@@ -501,6 +649,31 @@ function fillBody(body, c, r) {
   } else {
     body.appendChild(el('div', 'finding', 'Проблем не найдено — кампания работает в пределах ваших порогов.'));
   }
+
+  /* воронка кампании: где именно теряются люди */
+  body.appendChild(el('div', 'subhead', 'Воронка кампании'));
+  const f = floors(r);
+  const cm = c.compare || {};
+  const funnel = el('div', 'funnel');
+  const stages = [['views', 'Показы'], ['clicks', 'Клики'],
+                  ['atbs', 'В корзине'], ['orders', 'Заказы']];
+  stages.forEach(([key, label], i) => {
+    const box = el('div', 'stage');
+    box.innerHTML = `<div class="k">${label}</div><div class="v">${num(m[key])}</div>` +
+      (cm[key] ? `<div class="d">${signed(cm[key].delta_pct)}</div>` : '');
+    funnel.appendChild(box);
+    const step = FUNNEL_STEPS[i];
+    if (!step) return;
+    const conv = el('div', 'step');
+    conv.innerHTML =
+      `<div class="arrow">→</div><div class="k">${step.hint}</div>` +
+      `<div class="v ${convClass(m[step.key], f[step.key])}">${pct(m[step.key], 2)}</div>` +
+      (cm[step.key]
+        ? `<div class="d">было ${pct(cm[step.key].previous, 2)}</div>`
+        : `<div class="d">порог ${pct(f[step.key], 1)}</div>`);
+    funnel.appendChild(conv);
+  });
+  body.appendChild(funnel);
 
   /* графики кампании */
   body.appendChild(el('div', 'subhead', 'Динамика кампании'));
@@ -534,6 +707,18 @@ function fillBody(body, c, r) {
   cpcBox.appendChild(cpcHost);
   charts.appendChild(cpcBox);
 
+  /* каждая конверсия — своё полотно: масштабы у них несопоставимы */
+  const convHosts = FUNNEL_STEPS.map((step) => {
+    const box = el('div');
+    box.appendChild(el('div', 'legend',
+      `<span><i class="swatch" style="background:${c1}"></i> ${step.label}</span>` +
+      `<span><i class="swatch" style="background:${cssVar('--border-strong')}"></i> Порог</span>`));
+    const host = el('div', 'chart-host');
+    box.appendChild(host);
+    charts.appendChild(box);
+    return { step, host };
+  });
+
   /* размеры контейнеров известны только после вставки в документ */
   requestAnimationFrame(() => {
     lineChart(moneyHost, {
@@ -564,6 +749,19 @@ function fillBody(body, c, r) {
       axisFormat: (v) => v.toFixed(0) + '₽',
       ariaLabel: 'Цена клика по дням',
     });
+    convHosts.forEach(({ step, host }) => {
+      lineChart(host, {
+        dates, height: 170,
+        series: [{ name: step.label, values: c.series.map((p) => p[step.key]),
+                   color: c1, fill: true }],
+        format: (v) => pct(v, 2),
+        axisFormat: (v) => v.toFixed(
+          Math.max(...c.series.map((q) => q[step.key]), f[step.key]) < 10 ? 1 : 0
+        ).replace('.', ',') + '%',
+        target: { value: f[step.key], label: 'порог' },
+        ariaLabel: `${step.label} кампании по дням`,
+      });
+    });
   });
 
   /* артикулы внутри кампании */
@@ -574,16 +772,21 @@ function fillBody(body, c, r) {
     const table = el('table', 'data');
     table.innerHTML =
       '<thead><tr><th>Артикул</th><th>Показы</th><th>Клики</th><th>CTR</th>' +
-      '<th>Цена клика</th><th>В корзину</th><th>Заказы</th><th>Расход</th>' +
-      '<th>Выручка</th><th>ДРР</th></tr></thead>';
+      '<th>В корзине</th><th>→ корзина</th><th>Заказы</th><th>→ заказ</th>' +
+      '<th>Цена клика</th><th>Расход</th><th>Выручка</th><th>ДРР</th></tr></thead>';
     const tbody = el('tbody');
     c.nm_items.forEach((it) => {
       const tr = el('tr', it.flag);
       tr.innerHTML =
         `<td>${escapeHtml(it.name)}<br><span style="color:var(--text-muted);font-size:11px">${it.nm_id}</span></td>` +
-        `<td>${num(it.views)}</td><td>${num(it.clicks)}</td><td>${pct(it.ctr, 2)}</td>` +
-        `<td>${money(it.cpc, 2)}</td><td>${num(it.atbs)}</td><td>${num(it.orders)}</td>` +
-        `<td>${money(it.spend)}</td><td>${money(it.revenue)}</td><td>${drrText(it)}</td>`;
+        `<td>${num(it.views)}</td><td>${num(it.clicks)}</td>` +
+        `<td class="${convClass(it.ctr, f.ctr)}">${pct(it.ctr, 2)}</td>` +
+        `<td>${num(it.atbs)}</td>` +
+        `<td class="${convClass(it.cr_cart, f.cr_cart)}">${pct(it.cr_cart, 1)}</td>` +
+        `<td>${num(it.orders)}</td>` +
+        `<td class="${convClass(it.cr_order, f.cr_order)}">${pct(it.cr_order, 1)}</td>` +
+        `<td>${money(it.cpc, 2)}</td><td>${money(it.spend)}</td>` +
+        `<td>${money(it.revenue)}</td><td>${drrText(it)}</td>`;
       tbody.appendChild(tr);
     });
     table.appendChild(tbody);
@@ -605,6 +808,14 @@ function renderFoot(r) {
 }
 
 /* ── утилиты ──────────────────────────────────────────────────────────── */
+
+/* Русское склонение: 1 кампания, 2 кампании, 5 кампаний. */
+function plural(n, one, few, many) {
+  const mod10 = n % 10, mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
+}
 
 function escapeHtml(value) {
   return String(value === null || value === undefined ? '' : value)

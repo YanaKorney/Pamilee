@@ -40,6 +40,30 @@ class TestDerive(unittest.TestCase):
         self.assertEqual(kpi["drr"], 0)
         self.assertEqual(kpi["roas"], 0)
 
+    def test_full_funnel_conversions(self):
+        """Все три шага воронки считаются независимо друг от друга."""
+        kpi = derive({"views": 100000, "clicks": 2000, "atbs": 200, "orders": 50,
+                      "shks": 60, "spend": 16000, "revenue": 100000})
+        self.assertAlmostEqual(kpi["ctr"], 2.0)          # показ → клик
+        self.assertAlmostEqual(kpi["cr_cart"], 10.0)     # клик → корзина
+        self.assertAlmostEqual(kpi["cr_order"], 25.0)    # корзина → заказ
+        self.assertAlmostEqual(kpi["cr_click_order"], 2.5)  # сквозная клик → заказ
+
+    def test_conversion_steps_multiply_to_end_to_end(self):
+        """Произведение шагов воронки обязано давать сквозную конверсию."""
+        kpi = derive({"views": 50000, "clicks": 1500, "atbs": 180, "orders": 36,
+                      "shks": 40, "spend": 9000, "revenue": 60000})
+        chained = kpi["cr_cart"] / 100 * kpi["cr_order"] / 100 * 100
+        self.assertAlmostEqual(chained, kpi["cr_click_order"], places=6)
+
+    def test_conversion_without_base_is_zero(self):
+        """Кликов не было — конверсии в корзину нет, а не деления на ноль."""
+        kpi = derive({"views": 1000, "clicks": 0, "atbs": 0, "orders": 0,
+                      "shks": 0, "spend": 0, "revenue": 0})
+        self.assertEqual(kpi["cr_cart"], 0)
+        self.assertEqual(kpi["cr_order"], 0)
+        self.assertEqual(kpi["cr_click_order"], 0)
+
     def test_safe_div(self):
         self.assertEqual(safe_div(10, 0), 0.0)
         self.assertEqual(safe_div(10, 0, default=1), 1)

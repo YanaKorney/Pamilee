@@ -43,7 +43,20 @@
 
   <section class="kpis" id="kpis" aria-label="Ключевые показатели за период"></section>
 
-  <div class="charts" style="margin-top:18px">
+  <section class="card" style="margin-top:18px">
+    <h2>Воронка за период</h2>
+    <p class="hint">Каждый шаг — своя конверсия и своя причина потерь. Под стрелкой показано, сколько было в прошлом периоде.</p>
+    <div class="funnel" id="funnel"></div>
+    <div class="funnel-note" id="funnel-note"></div>
+  </section>
+
+  <section class="card">
+    <h2>Конверсии по дням</h2>
+    <p class="hint">У каждой конверсии свой масштаб, поэтому три отдельных графика. Линия — ваш порог: ниже неё шаг воронки считается проблемным.</p>
+    <div class="conv-charts" id="conv-charts"></div>
+  </section>
+
+  <div class="charts">
     <section class="card">
       <h2>Расход и выручка по дням</h2>
       <p class="hint">Обе линии в рублях — на одной шкале, поэтому разрыв между ними виден напрямую.</p>
@@ -62,7 +75,12 @@
     <h2>Кампании</h2>
     <p class="hint">Сначала те, где на кону больше денег. Нажмите на кампанию, чтобы увидеть разбор, графики и артикулы внутри.</p>
     <div class="filters" id="filters"></div>
-    <div id="campaigns"></div>
+    <div class="camp-scroll">
+      <div class="camp-table">
+        <div class="camp-header" id="camp-header"></div>
+        <div id="campaigns"></div>
+      </div>
+    </div>
   </section>
 
   <p class="foot" id="foot"></p>

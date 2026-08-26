@@ -177,6 +177,20 @@ class TestApi(unittest.TestCase):
         self.assertEqual(len(lines), len(demo.CAMPAIGNS) + 1)
         self.assertIn(";", lines[1])  # разделитель, который понимает русский Excel
 
+    def test_csv_has_full_funnel(self):
+        """В выгрузке должна быть вся воронка, а не только деньги и ДРР."""
+        content, _ = handle_export(self.conn, self.cfg, {"days": ["7"]})
+        header = content.splitlines()[0]
+        for column in ("Показы", "CTR %", "Клики", "В корзине", "CR в корзину %",
+                       "Заказы", "CR в заказ %", "CR клик-заказ %"):
+            self.assertIn(column, header)
+
+    def test_csv_uses_comma_decimal(self):
+        """Русский Excel не понимает точку как разделитель дробной части."""
+        content, _ = handle_export(self.conn, self.cfg, {"days": ["7"]})
+        row = content.splitlines()[1].split(";")
+        self.assertNotIn(".", "".join(row[6:20]))
+
 
 if __name__ == "__main__":
     unittest.main()

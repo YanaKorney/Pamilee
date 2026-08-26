@@ -116,6 +116,16 @@ def cmd_report(args: argparse.Namespace) -> int:
     print(f"  Заказы  {t['orders']:>14.0f}   ({signed_pct(cmp_['orders']['delta_pct'])})")
     print(f"  CPO     {money(t['cpo']):>14}   ROAS {t['roas']:.1f}")
     print()
+    print("  Воронка")
+    print(f"  {t['views']:>10,.0f} показов".replace(",", " ") +
+          f"  → CTR {pct(t['ctr'], 2)} ({signed_pct(cmp_['ctr']['delta_pct'])})")
+    print(f"  {t['clicks']:>10,.0f} кликов".replace(",", " ") +
+          f"   → в корзину {pct(t['cr_cart'])} ({signed_pct(cmp_['cr_cart']['delta_pct'])})")
+    print(f"  {t['atbs']:>10,.0f} в корзине".replace(",", " ") +
+          f" → в заказ {pct(t['cr_order'])} ({signed_pct(cmp_['cr_order']['delta_pct'])})")
+    print(f"  {t['orders']:>10,.0f} заказов".replace(",", " ") +
+          f"   · сквозная клик → заказ {pct(t['cr_click_order'], 2)}")
+    print()
     print(f"  🔴 {s['critical']} требуют действий   🟡 {s['warning']} под наблюдением   "
           f"🚀 {s['opportunity']} можно масштабировать   🟢 {s['healthy']} в норме")
     if s["money_at_risk"] > 0:
@@ -127,9 +137,11 @@ def cmd_report(args: argparse.Namespace) -> int:
             continue
         drr = pct(c["metrics"]["drr"]) if c["metrics"]["revenue"] else "—"
         print(f"  {c['verdict_icon']} {c['name']}")
-        print(f"     расход {money(c['metrics']['spend'])} · выручка "
-              f"{money(c['metrics']['revenue'])} · ДРР {drr} · "
-              f"заказов {c['metrics']['orders']:.0f}")
+        m = c["metrics"]
+        print(f"     расход {money(m['spend'])} · выручка {money(m['revenue'])} · "
+              f"ДРР {drr} · заказов {m['orders']:.0f}")
+        print(f"     CTR {pct(m['ctr'], 2)} · в корзину {pct(m['cr_cart'])} · "
+              f"в заказ {pct(m['cr_order'])} · клик → заказ {pct(m['cr_click_order'], 2)}")
         for finding in c["findings"][: (None if args.all else 2)]:
             print(f"     • {finding['title']}")
             for action in finding["actions"][:1]:

@@ -113,10 +113,17 @@ def handle_export(conn: sqlite3.Connection, cfg: Config,
 
     buffer = io.StringIO()
     writer = csv.writer(buffer, delimiter=";")
+    def dec(value: float, digits: int = 2) -> str:
+        """Excel в русской локали ждёт запятую как разделитель дробной части."""
+        return f"{value:.{digits}f}".replace(".", ",")
+
     writer.writerow([
         "Кампания", "ID", "Тип", "Статус", "Вердикт", "Здоровье",
-        "Показы", "Клики", "CTR %", "CPC руб", "В корзину", "Заказы",
-        "Расход руб", "Выручка руб", "ДРР %", "CPO руб", "ROAS",
+        # воронка целиком: счётчики и конверсия на каждом шаге
+        "Показы", "CTR %", "Клики", "В корзине", "CR в корзину %",
+        "Заказы", "CR в заказ %", "CR клик-заказ %",
+        "CPC руб", "CPO руб", "Средний чек руб",
+        "Расход руб", "Выручка руб", "ДРР %", "ROAS",
         "Проблемы",
     ])
     for c in report["campaigns"]:
@@ -124,11 +131,11 @@ def handle_export(conn: sqlite3.Connection, cfg: Config,
         writer.writerow([
             c["name"], c["advert_id"], c["type_name"], c["status_name"],
             c["verdict_label"], c["health"],
-            round(m["views"]), round(m["clicks"]), f'{m["ctr"]:.2f}'.replace(".", ","),
-            f'{m["cpc"]:.2f}'.replace(".", ","), round(m["atbs"]), round(m["orders"]),
-            f'{m["spend"]:.2f}'.replace(".", ","), f'{m["revenue"]:.2f}'.replace(".", ","),
-            f'{m["drr"]:.1f}'.replace(".", ","), f'{m["cpo"]:.2f}'.replace(".", ","),
-            f'{m["roas"]:.2f}'.replace(".", ","),
+            round(m["views"]), dec(m["ctr"]), round(m["clicks"]),
+            round(m["atbs"]), dec(m["cr_cart"], 1),
+            round(m["orders"]), dec(m["cr_order"], 1), dec(m["cr_click_order"]),
+            dec(m["cpc"]), dec(m["cpo"]), dec(m["aov"]),
+            dec(m["spend"]), dec(m["revenue"]), dec(m["drr"], 1), dec(m["roas"]),
             " | ".join(f["title"] for f in c["findings"]),
         ])
     filename = f"wb-reklama-{date_from}_{date_to}.csv"
