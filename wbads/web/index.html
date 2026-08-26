@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Реклама Wildberries — аналитика в динамике</title>
+<link rel="stylesheet" href="/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>📊</text></svg>">
+</head>
+<body>
+<div class="wrap">
+
+  <header class="topbar">
+    <div>
+      <h1>Реклама Wildberries — аналитика в динамике</h1>
+      <div class="sub" id="subtitle">Загружаем данные…</div>
+    </div>
+    <div class="controls">
+      <div class="seg" id="period-seg" role="group" aria-label="Период анализа">
+        <button data-days="7"  aria-pressed="true">7 дней</button>
+        <button data-days="14" aria-pressed="false">14 дней</button>
+        <button data-days="30" aria-pressed="false">30 дней</button>
+      </div>
+      <input type="date" id="date-from" aria-label="Начало периода">
+      <input type="date" id="date-to" aria-label="Конец периода">
+      <label class="btn" title="Доля рекламных расходов, выше которой кампания считается проблемной">
+        Цель ДРР
+        <input type="number" id="target-drr" min="1" max="90" step="1" style="width:56px">
+        %
+      </label>
+      <a class="btn" id="export" href="/api/export.csv" download>Выгрузить в CSV</a>
+      <button class="btn" id="theme">Тема</button>
+    </div>
+  </header>
+
+  <div id="error" class="err" hidden></div>
+
+  <section class="card" id="todo-card" hidden>
+    <h2>Что сделать сегодня</h2>
+    <p class="hint">Самые дорогие проблемы периода — сверху. Разбор каждой ниже.</p>
+    <ol class="todo" id="todo"></ol>
+  </section>
+
+  <section class="kpis" id="kpis" aria-label="Ключевые показатели за период"></section>
+
+  <div class="charts" style="margin-top:18px">
+    <section class="card">
+      <h2>Расход и выручка по дням</h2>
+      <p class="hint">Обе линии в рублях — на одной шкале, поэтому разрыв между ними виден напрямую.</p>
+      <div class="legend" id="legend-money"></div>
+      <div class="chart-host" id="chart-money"></div>
+    </section>
+    <section class="card">
+      <h2>ДРР по дням</h2>
+      <p class="hint">Доля рекламных расходов в выручке. Линия цели — ваш порог.</p>
+      <div class="legend" id="legend-drr"></div>
+      <div class="chart-host" id="chart-drr"></div>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>Кампании</h2>
+    <p class="hint">Сначала те, где на кону больше денег. Нажмите на кампанию, чтобы увидеть разбор, графики и артикулы внутри.</p>
+    <div class="filters" id="filters"></div>
+    <div id="campaigns"></div>
+  </section>
+
+  <p class="foot" id="foot"></p>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

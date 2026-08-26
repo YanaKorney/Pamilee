@@ -1,0 +1,20 @@
+# секреты
+.env
+
+# база и выгрузки
+*.db
+*.db-journal
+*.sqlite
+data/
+exports/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# ос
+.DS_Store
+Thumbs.db

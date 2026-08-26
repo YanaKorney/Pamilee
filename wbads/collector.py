@@ -1,0 +1,186 @@
+"""Сбор данных из кабинета WB в локальную базу.
+
+Запускается вручную или по расписанию. Каждый запуск дописывает историю:
+статистика за уже сохранённые дни обновляется, новая — добавляется.
+Так у вас копится динамика, которой в кабинете нет.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from datetime import date, datetime, timedelta
+from typing import Any, Callable, Sequence
+
+from . import db
+from .rules import STATUS_NAMES, TYPE_NAMES
+from .wb_client import WBAdvertClient, WBError
+
+Progress = Callable[[str], None]
+
+
+def _log(on_progress: Progress | None, message: str) -> None:
+    if on_progress:
+        on_progress(message)
+
+
+def _day(value: Any) -> str:
+    """WB отдаёт дату как «2026-08-26T00:00:00+03:00» — берём только дату."""
+    return str(value)[:10]
+
+
+def _num(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _int(value: Any) -> int:
+    return int(round(_num(value)))
+
+
+def normalize_campaign(raw: dict[str, Any], now: str) -> dict[str, Any]:
+    """Карточка кампании из API → строка нашей таблицы."""
+    type_code = _int(raw.get("type"))
+    status_code = _int(raw.get("status"))
+    return {
+        "advert_id": _int(raw.get("advertId")),
+        "name": (raw.get("name") or "").strip(),
+        "type": type_code,
+        "type_name": TYPE_NAMES.get(type_code, f"Тип {type_code}"),
+        "status": status_code,
+        "status_name": STATUS_NAMES.get(status_code, f"Статус {status_code}"),
+        "daily_budget": _num(raw.get("dailyBudget")),
+        "create_time": raw.get("createTime"),
+        "change_time": raw.get("changeTime"),
+        "start_time": raw.get("startTime"),
+        "end_time": raw.get("endTime"),
+        "updated_at": now,
+    }
+
+
+def normalize_stats(raw: dict[str, Any], now: str
+                    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Ответ fullstats по одной кампании → строки по дням и по артикулам.
+
+    Соответствие полей WB нашим:
+        sum → расход, sum_price → выручка с рекламы,
+        atbs → добавления в корзину, shks → заказано штук.
+    """
+    advert_id = _int(raw.get("advertId"))
+    daily: list[dict[str, Any]] = []
+    nm_daily: list[dict[str, Any]] = []
+
+    for day_row in raw.get("days") or []:
+        day = _day(day_row.get("date"))
+        daily.append({
+            "advert_id": advert_id, "date": day,
+            "views": _int(day_row.get("views")),
+            "clicks": _int(day_row.get("clicks")),
+            "atbs": _int(day_row.get("atbs")),
+            "orders": _int(day_row.get("orders")),
+            "shks": _int(day_row.get("shks")),
+            "spend": round(_num(day_row.get("sum")), 2),
+            "revenue": round(_num(day_row.get("sum_price")), 2),
+            "collected_at": now,
+        })
+
+        # Внутри дня статистика разбита по площадкам (apps), а внутри — по артикулам.
+        # Один и тот же артикул встречается в нескольких площадках, поэтому суммируем.
+        per_nm: dict[int, dict[str, Any]] = {}
+        for app in day_row.get("apps") or []:
+            for nm in app.get("nm") or []:
+                nm_id = _int(nm.get("nmId"))
+                if not nm_id:
+                    continue
+                item = per_nm.setdefault(nm_id, {
+                    "advert_id": advert_id, "date": day, "nm_id": nm_id,
+                    "name": (nm.get("name") or "").strip(),
+                    "views": 0, "clicks": 0, "atbs": 0, "orders": 0,
+                    "shks": 0, "spend": 0.0, "revenue": 0.0,
+                })
+                if nm.get("name"):
+                    item["name"] = str(nm["name"]).strip()
+                item["views"] += _int(nm.get("views"))
+                item["clicks"] += _int(nm.get("clicks"))
+                item["atbs"] += _int(nm.get("atbs"))
+                item["orders"] += _int(nm.get("orders"))
+                item["shks"] += _int(nm.get("shks"))
+                item["spend"] += _num(nm.get("sum"))
+                item["revenue"] += _num(nm.get("sum_price"))
+        for item in per_nm.values():
+            item["spend"] = round(item["spend"], 2)
+            item["revenue"] = round(item["revenue"], 2)
+            nm_daily.append(item)
+
+    return daily, nm_daily
+
+
+def collect(conn: sqlite3.Connection, token: str, days: int = 30,
+            end: date | None = None, advert_ids: Sequence[int] | None = None,
+            on_progress: Progress | None = None) -> dict[str, Any]:
+    """Забирает кампании, баланс и статистику за период и пишет всё в базу."""
+    end = end or date.today()
+    start = end - timedelta(days=days - 1)
+    date_from, date_to = start.isoformat(), end.isoformat()
+    now = datetime.now().isoformat(timespec="seconds")
+
+    client = WBAdvertClient(token)
+    log_id = db.start_collect(conn, "wb-api", now, date_from, date_to)
+    conn.commit()
+
+    try:
+        _log(on_progress, "Забираем баланс кабинета…")
+        try:
+            balance = client.balance()
+            db.save_balance(conn, now, balance["balance"], balance["bonus"], balance["net"])
+        except WBError as exc:
+            # Баланс — приятное дополнение; без него сбор продолжаем
+            _log(on_progress, f"Баланс получить не вышло: {exc}")
+
+        _log(on_progress, "Получаем список кампаний…")
+        ids = list(advert_ids) if advert_ids else client.campaign_ids()
+        if not ids:
+            db.finish_collect(conn, log_id, datetime.now().isoformat(timespec="seconds"),
+                              0, 0, "ok", "В кабинете нет рекламных кампаний")
+            conn.commit()
+            return {"campaigns": 0, "rows": 0, "message": "В кабинете нет рекламных кампаний"}
+
+        _log(on_progress, f"Кампаний найдено: {len(ids)}. Забираем карточки…")
+        details = client.campaign_details(ids)
+        campaign_rows = [normalize_campaign(r, now) for r in details]
+        campaign_rows = [r for r in campaign_rows if r["advert_id"]]
+        db.upsert_campaigns(conn, campaign_rows)
+        conn.commit()
+
+        _log(on_progress, f"Забираем статистику за {date_from} — {date_to}. "
+                          "Метод медленный: WB отдаёт её раз в минуту.")
+        stats = client.fullstats(ids, date_from, date_to, on_progress=on_progress)
+
+        daily_all: list[dict[str, Any]] = []
+        nm_all: list[dict[str, Any]] = []
+        for raw in stats:
+            daily, nm_daily = normalize_stats(raw, now)
+            daily_all.extend(daily)
+            nm_all.extend(nm_daily)
+
+        db.upsert_daily(conn, daily_all)
+        db.upsert_nm_daily(conn, nm_all)
+        db.finish_collect(conn, log_id, datetime.now().isoformat(timespec="seconds"),
+                          len(campaign_rows), len(daily_all))
+        conn.commit()
+
+        _log(on_progress, f"Готово: {len(campaign_rows)} кампаний, {len(daily_all)} дней статистики.")
+        return {
+            "campaigns": len(campaign_rows),
+            "rows": len(daily_all),
+            "nm_rows": len(nm_all),
+            "date_from": date_from,
+            "date_to": date_to,
+        }
+
+    except Exception as exc:
+        db.finish_collect(conn, log_id, datetime.now().isoformat(timespec="seconds"),
+                          0, 0, "error", str(exc))
+        conn.commit()
+        raise
