@@ -59,21 +59,61 @@ def cmd_collect(args: argparse.Namespace) -> int:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
+    """Проверяет токен по всем методам, которые нужны сервису.
+
+    Отвечает на вопрос «хватает ли моему токену доступа»: если какой-то
+    метод закрыт, видно ровно какой, а не общее «не работает».
+    """
     cfg = load_config()
     if not cfg.has_token:
         _print("Токен не найден. Впишите WB_API_TOKEN в файл .env.")
+        _print("Кабинет WB → Настройки → Доступ к API → Создать новый токен,")
+        _print("категория «Продвижение» — она единственная, что нужна сервису.")
         return 1
-    try:
-        client = WBAdvertClient(cfg.token)
-        balance = client.balance()
-        ids = client.campaign_ids()
-    except WBError as exc:
-        _print(f"Токен не работает: {exc}")
+
+    client = WBAdvertClient(cfg.token)
+    _print("Проверяем доступ к API продвижения (advert-api.wildberries.ru)…")
+    print()
+
+    failures: list[str] = []
+    ids: list[int] = []
+
+    def probe(label: str, method: str, call) -> object:
+        nonlocal failures
+        try:
+            result = call()
+        except WBError as exc:
+            print(f"  ✗ {label:<26} {method}")
+            print(f"    {exc}")
+            failures.append(label)
+            return None
+        print(f"  ✓ {label:<26} {method}")
+        return result
+
+    balance = probe("Баланс кабинета", "GET  /adv/v1/balance", client.balance)
+    found = probe("Список кампаний", "GET  /adv/v1/promotion/count", client.campaign_ids)
+    if found:
+        ids = found
+        probe("Карточки кампаний", "POST /adv/v1/promotion/adverts",
+              lambda: client.campaign_details(ids[:1]))
+        probe("Статистика по дням", "POST /adv/v2/fullstats",
+              lambda: client.fullstats(ids[:1], date.today().isoformat(),
+                                       date.today().isoformat()))
+    print()
+
+    if failures:
+        _print(f"Закрыто методов: {len(failures)}.")
+        _print("Проверьте в кабинете, что у токена отмечена категория «Продвижение».")
+        _print("Если она есть, а доступа нет — выпустите токен без галочки")
+        _print("«Только на чтение»: статистика запрашивается методом POST.")
         return 1
-    _print("Токен работает.")
-    _print(f"Баланс кабинета: {money(balance['net'])} "
-           f"(счёт {money(balance['balance'])}, бонусы {money(balance['bonus'])})")
+
+    _print("Токен работает, доступа хватает.")
+    if balance:
+        _print(f"Баланс кабинета: {money(balance['net'])} "
+               f"(счёт {money(balance['balance'])}, бонусы {money(balance['bonus'])})")
     _print(f"Кампаний в кабинете: {len(ids)}")
+    _print("Дальше: python3 run.py collect --days 30")
     return 0
 
 
