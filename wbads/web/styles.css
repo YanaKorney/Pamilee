@@ -171,7 +171,11 @@ input[type="date"], input[type="number"] {
   border-radius: var(--radius); padding: 13px 12px; box-shadow: var(--shadow);
 }
 .kpi .label { color: var(--text-muted); font-size: 12px; letter-spacing: .01em; }
-.kpi .value { font-size: 25px; font-weight: 640; letter-spacing: -.02em; margin: 5px 0 3px; }
+.kpi .value {
+  font-size: 21px; font-weight: 640; letter-spacing: -.02em; margin: 5px 0 3px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;   /* «2 444 581 ₽» не должно разрываться перед знаком рубля */
+}
 .kpi .delta {
   font-size: 12px; color: var(--text-secondary);
   display: flex; align-items: baseline; gap: 4px; flex-wrap: wrap;

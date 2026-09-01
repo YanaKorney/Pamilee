@@ -17,10 +17,12 @@ const state = {
 
 const nf = new Intl.NumberFormat('ru-RU');
 
+/* Неразрывный пробел перед знаком рубля: иначе «2 444 581» и «₽»
+   расходятся по разным строкам в узкой плитке. */
 const money = (v, digits = 0) =>
   new Intl.NumberFormat('ru-RU', {
     minimumFractionDigits: digits, maximumFractionDigits: digits,
-  }).format(v || 0) + ' ₽';
+  }).format(v || 0) + '\u00A0₽';
 
 const num = (v) => nf.format(Math.round(v || 0));
 const pct = (v, d = 1) => (v || 0).toFixed(d).replace('.', ',') + '%';
