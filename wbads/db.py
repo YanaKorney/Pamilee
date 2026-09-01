@@ -85,6 +85,30 @@ CREATE TABLE IF NOT EXISTS collect_log (
     error       TEXT
 );
 
+-- Заказы кабинета — построчно, а не агрегатами.
+-- Так отмена, приехавшая на следующий день, исправляет уже собранный день:
+-- строка обновляется по своему srid. С агрегатами это было бы невозможно.
+CREATE TABLE IF NOT EXISTS orders_raw (
+    srid             TEXT    PRIMARY KEY,   -- уникальный идентификатор заказа в WB
+    date             TEXT    NOT NULL,      -- дата заказа, YYYY-MM-DD
+    last_change      TEXT,
+    nm_id            INTEGER NOT NULL,
+    supplier_article TEXT,
+    brand            TEXT,
+    subject          TEXT,
+    warehouse        TEXT,
+    region           TEXT,
+    total_price      REAL    DEFAULT 0,     -- цена до скидки продавца
+    discount_percent REAL    DEFAULT 0,
+    price_with_disc  REAL    DEFAULT 0,     -- сумма заказа после скидки продавца
+    finished_price   REAL    DEFAULT 0,     -- что фактически заплатил покупатель (с СПП)
+    is_cancel        INTEGER DEFAULT 0,
+    cancel_date      TEXT,
+    collected_at     TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_orders_date ON orders_raw(date);
+CREATE INDEX IF NOT EXISTS idx_orders_nm ON orders_raw(date, nm_id);
+
 -- Пороги и настройки, изменённые из дашборда
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
@@ -174,6 +198,38 @@ def upsert_nm_daily(conn: sqlite3.Connection, rows: Iterable[dict]) -> int:
     return len(rows)
 
 
+def upsert_orders(conn: sqlite3.Connection, rows: Iterable[dict]) -> int:
+    """Пишет заказы по ключу srid: повторный сбор обновляет, а не дублирует.
+
+    Именно так до нас доезжают отмены — заказ приходит второй раз
+    с is_cancel = 1 и перезаписывает прежнюю строку.
+    """
+    sql = """
+        INSERT INTO orders_raw (srid, date, last_change, nm_id, supplier_article,
+                                brand, subject, warehouse, region, total_price,
+                                discount_percent, price_with_disc, finished_price,
+                                is_cancel, cancel_date, collected_at)
+        VALUES (:srid, :date, :last_change, :nm_id, :supplier_article,
+                :brand, :subject, :warehouse, :region, :total_price,
+                :discount_percent, :price_with_disc, :finished_price,
+                :is_cancel, :cancel_date, :collected_at)
+        ON CONFLICT(srid) DO UPDATE SET
+            date=excluded.date, last_change=excluded.last_change,
+            nm_id=excluded.nm_id, supplier_article=excluded.supplier_article,
+            brand=excluded.brand, subject=excluded.subject,
+            warehouse=excluded.warehouse, region=excluded.region,
+            total_price=excluded.total_price,
+            discount_percent=excluded.discount_percent,
+            price_with_disc=excluded.price_with_disc,
+            finished_price=excluded.finished_price,
+            is_cancel=excluded.is_cancel, cancel_date=excluded.cancel_date,
+            collected_at=excluded.collected_at
+    """
+    rows = list(rows)
+    conn.executemany(sql, rows)
+    return len(rows)
+
+
 def save_balance(conn: sqlite3.Connection, taken_at: str, balance: float,
                  bonus: float, net: float) -> None:
     conn.execute(
@@ -238,6 +294,60 @@ def nm_rows(conn: sqlite3.Connection, advert_id: int, date_from: str,
         " ORDER BY date",
         (advert_id, date_from, date_to),
     ))
+
+
+def orders_by_nm(conn: sqlite3.Connection, date_from: str, date_to: str,
+                 price_field: str = "price_with_disc") -> list[sqlite3.Row]:
+    """Заказы, свёрнутые по «артикул + день». Отменённые не считаем.
+
+    price_field выбирает, какую цену брать за сумму заказа:
+    price_with_disc — после скидки продавца (по умолчанию, сопоставимо
+    с рекламным отчётом), finished_price — что заплатил покупатель с учётом СПП.
+    """
+    if price_field not in ("price_with_disc", "finished_price", "total_price"):
+        price_field = "price_with_disc"
+    return list(conn.execute(f"""
+        SELECT date, nm_id,
+               COUNT(*)            AS orders,
+               SUM({price_field})  AS revenue,
+               MAX(supplier_article) AS supplier_article,
+               MAX(brand)          AS brand,
+               MAX(subject)        AS subject
+        FROM orders_raw
+        WHERE date BETWEEN ? AND ? AND is_cancel = 0
+        GROUP BY date, nm_id
+    """, (date_from, date_to)))
+
+
+def orders_totals(conn: sqlite3.Connection, date_from: str, date_to: str,
+                  price_field: str = "price_with_disc") -> dict[str, float]:
+    """Итог по кабинету за период: заказы, их сумма и отмены."""
+    if price_field not in ("price_with_disc", "finished_price", "total_price"):
+        price_field = "price_with_disc"
+    row = conn.execute(f"""
+        SELECT
+            SUM(CASE WHEN is_cancel = 0 THEN 1 ELSE 0 END)             AS orders,
+            SUM(CASE WHEN is_cancel = 0 THEN {price_field} ELSE 0 END) AS revenue,
+            SUM(CASE WHEN is_cancel = 1 THEN 1 ELSE 0 END)             AS cancels,
+            SUM(CASE WHEN is_cancel = 1 THEN {price_field} ELSE 0 END) AS cancel_revenue
+        FROM orders_raw WHERE date BETWEEN ? AND ?
+    """, (date_from, date_to)).fetchone()
+    return {
+        "orders": float(row["orders"] or 0),
+        "revenue": float(row["revenue"] or 0),
+        "cancels": float(row["cancels"] or 0),
+        "cancel_revenue": float(row["cancel_revenue"] or 0),
+    }
+
+
+def has_orders(conn: sqlite3.Connection) -> bool:
+    """Есть ли вообще данные о заказах — от этого зависит, показывать ли общий ДРР."""
+    return conn.execute("SELECT 1 FROM orders_raw LIMIT 1").fetchone() is not None
+
+
+def orders_range(conn: sqlite3.Connection) -> tuple[str | None, str | None]:
+    row = conn.execute("SELECT MIN(date) AS lo, MAX(date) AS hi FROM orders_raw").fetchone()
+    return (row["lo"], row["hi"]) if row else (None, None)
 
 
 def data_range(conn: sqlite3.Connection) -> tuple[str | None, str | None]:

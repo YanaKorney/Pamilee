@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping, Sequence
 from .config import Thresholds
 from .metrics import (
     compare,
+    safe_div,
     days_with_activity,
     derive,
     trailing_zero_days,
@@ -118,11 +119,21 @@ class Context:
     previous: Mapping[str, float]
     thresholds: Thresholds
     nm_items: Sequence[Mapping[str, Any]] = field(default_factory=list)
+    # Оборот по ВСЕМ заказам артикулов кампании, доля которых приходится
+    # на неё. Нужен для общего ДРР; без категории «Статистика» его нет.
+    total_revenue: float = 0.0
+    prev_total_revenue: float = 0.0
+    orders_available: bool = False
 
     def __post_init__(self) -> None:
         self.cur = derive(self.current)
         self.prev = derive(self.previous)
         self.cmp = compare(self.current, self.previous)
+        # Общий ДРР: расход против всей выручки артикулов, а не только рекламной
+        self.total_drr = safe_div(self.cur["spend"], self.total_revenue) * 100
+        self.prev_total_drr = safe_div(self.prev["spend"], self.prev_total_revenue) * 100
+        self.organic_revenue = max(0.0, self.total_revenue - self.cur["revenue"])
+        self.organic_share = safe_div(self.organic_revenue, self.total_revenue) * 100
 
     def delta_pct(self, key: str) -> float | None:
         return self.cmp.get(key, {}).get("delta_pct")
@@ -583,6 +594,100 @@ def scale_up(ctx: Context) -> Finding | None:
 
 
 @rule
+def total_drr_high(ctx: Context) -> Finding | None:
+    """Общий ДРР выше цели: реклама съедает слишком много всего оборота.
+
+    Считается только когда есть заказы кабинета — то есть у токена
+    отмечена категория «Статистика».
+    """
+    t = ctx.thresholds
+    if not ctx.orders_available or not ctx.significant or ctx.total_revenue <= 0:
+        return None
+    if ctx.total_drr <= t.target_drr:
+        return None
+    critical = ctx.total_drr >= t.target_drr * t.drr_critical_multiplier
+    return Finding(
+        code="total_drr_high",
+        priority=35,
+        severity=CRITICAL if critical else WARNING,
+        title=f"Общий ДРР {pct(ctx.total_drr)} при цели {pct(t.target_drr, 0)}",
+        why=(
+            f"Расход {money(ctx.cur['spend'])} против всего оборота артикулов "
+            f"{money(ctx.total_revenue)} — включая заказы, пришедшие без рекламы. "
+            f"Даже с учётом органики реклама не укладывается в цель."
+        ),
+        actions=[
+            "Это не вопрос атрибуции: органика уже учтена, а ДРР всё равно выше цели.",
+            "Снижайте ставку до тех пор, пока общий ДРР не вернётся к цели.",
+            f"Чтобы уложиться в {pct(t.target_drr, 0)}, расход не должен превышать "
+            f"{money(ctx.total_revenue * t.target_drr / 100)} при текущем обороте.",
+        ],
+    )
+
+
+@rule
+def ads_lift_organic(ctx: Context) -> Finding | None:
+    """Рекламный ДРР пугает, а общий в норме — резать нельзя.
+
+    Частая и дорогая ошибка: кампанию отключают по рекламному ДРР, не заметив,
+    что она тащит органические заказы, и оборот проседает вслед за ней.
+    """
+    t = ctx.thresholds
+    if not ctx.orders_available or not ctx.significant or ctx.total_revenue <= 0:
+        return None
+    if ctx.cur["drr"] <= t.target_drr or ctx.total_drr > t.target_drr:
+        return None
+    if ctx.organic_share < 40:
+        return None
+    return Finding(
+        code="ads_lift_organic",
+        priority=20,
+        severity=OPPORTUNITY,
+        title=f"Рекламный ДРР {pct(ctx.cur['drr'])}, а общий — {pct(ctx.total_drr)}",
+        why=(
+            f"По рекламному отчёту кампания выглядит дорогой, но {pct(ctx.organic_share, 0)} "
+            f"оборота этих артикулов ({money(ctx.organic_revenue)}) приходит без клика "
+            "по рекламе. С учётом органики кампания укладывается в цель."
+        ),
+        actions=[
+            "Не режьте эту кампанию по рекламному ДРР — вместе с ней просядет и органика.",
+            "Ориентируйтесь здесь на общий ДРР: он и есть настоящая нагрузка на оборот.",
+            "Проверить можно так: снизьте ставку на неделю и посмотрите на общий оборот "
+            "артикулов, а не на заказы в рекламном отчёте.",
+        ],
+    )
+
+
+@rule
+def no_organic(ctx: Context) -> Finding | None:
+    """Заказы идут только с рекламы — товар не продаётся сам."""
+    t = ctx.thresholds
+    if not ctx.orders_available or not ctx.significant or ctx.total_revenue <= 0:
+        return None
+    if ctx.cur["orders"] == 0 or ctx.organic_share >= 15:
+        return None
+    return Finding(
+        code="no_organic",
+        priority=60,
+        severity=WARNING,
+        title=f"Органики почти нет — {pct(ctx.organic_share, 0)} оборота",
+        why=(
+            f"Из {money(ctx.total_revenue)} оборота артикулов кампании "
+            f"{money(ctx.cur['revenue'])} принесла реклама. Без неё продажи "
+            "почти остановятся: рекламный и общий ДРР практически совпадают."
+        ),
+        actions=[
+            "Пока карточка не набрала органику, отключение рекламы обнулит продажи — "
+            "закладывайте это в план.",
+            "Работайте над позициями в органической выдаче: отзывы, рейтинг, "
+            "заполненность карточки, стабильные остатки.",
+            "Проверьте, не рекламируетесь ли вы по запросам, по которым карточка "
+            "не может ранжироваться органически.",
+        ],
+    )
+
+
+@rule
 def not_enough_data(ctx: Context) -> Finding | None:
     """Мало открутки — выводы делать рано."""
     t = ctx.thresholds
@@ -718,6 +823,12 @@ def diagnose(ctx: Context) -> dict[str, Any]:
         "critical_count": sum(1 for f in findings if f.severity == CRITICAL),
         "warning_count": sum(1 for f in findings if f.severity == WARNING),
         "metrics": ctx.cur,
+        "total_drr": ctx.total_drr,
+        "total_revenue": ctx.total_revenue,
+        "prev_total_drr": ctx.prev_total_drr,
+        "organic_revenue": ctx.organic_revenue,
+        "organic_share": ctx.organic_share,
+        "orders_available": ctx.orders_available,
         "previous": ctx.prev,
         "compare": ctx.cmp,
         "series": list(ctx.series),

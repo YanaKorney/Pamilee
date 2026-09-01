@@ -54,7 +54,8 @@ def handle_report(conn: sqlite3.Connection, cfg: Config,
                   query: dict[str, list[str]]) -> dict[str, Any]:
     date_from, date_to = _period(conn, query)
     thresholds = analytics.load_thresholds(conn, cfg.thresholds)
-    return analytics.build_report(conn, date_from, date_to, thresholds)
+    return analytics.build_report(conn, date_from, date_to, thresholds,
+                                  price_field=cfg.order_price_field)
 
 
 def handle_campaign(conn: sqlite3.Connection, cfg: Config,
@@ -62,7 +63,8 @@ def handle_campaign(conn: sqlite3.Connection, cfg: Config,
     advert_id = int((query.get("id") or ["0"])[0] or 0)
     date_from, date_to = _period(conn, query)
     thresholds = analytics.load_thresholds(conn, cfg.thresholds)
-    detail = analytics.campaign_detail(conn, advert_id, date_from, date_to, thresholds)
+    detail = analytics.campaign_detail(conn, advert_id, date_from, date_to, thresholds,
+                                       price_field=cfg.order_price_field)
     if detail is None:
         return {"error": f"Кампания {advert_id} не найдена"}
     return detail
@@ -73,8 +75,12 @@ def handle_meta(conn: sqlite3.Connection, cfg: Config,
     lo, hi = db.data_range(conn)
     thresholds = analytics.load_thresholds(conn, cfg.thresholds)
     last = db.last_collect(conn)
+    orders_lo, orders_hi = db.orders_range(conn)
     return {
         "has_token": cfg.has_token,
+        "has_orders": db.has_orders(conn),
+        "orders_from": orders_lo,
+        "orders_to": orders_hi,
         "has_data": bool(lo),
         "data_from": lo,
         "data_to": hi,
@@ -109,7 +115,8 @@ def handle_export(conn: sqlite3.Connection, cfg: Config,
     """Выгрузка сводки по кампаниям в CSV — открывается в Excel."""
     date_from, date_to = _period(conn, query)
     thresholds = analytics.load_thresholds(conn, cfg.thresholds)
-    report = analytics.build_report(conn, date_from, date_to, thresholds, with_nm=False)
+    report = analytics.build_report(conn, date_from, date_to, thresholds, with_nm=False,
+                                    price_field=cfg.order_price_field)
 
     buffer = io.StringIO()
     writer = csv.writer(buffer, delimiter=";")
@@ -123,7 +130,8 @@ def handle_export(conn: sqlite3.Connection, cfg: Config,
         "Показы", "CTR %", "Клики", "В корзине", "CR в корзину %",
         "Заказы", "CR в заказ %", "CR клик-заказ %",
         "CPC руб", "CPO руб", "Средний чек руб",
-        "Расход руб", "Выручка руб", "ДРР %", "ROAS",
+        "Расход руб", "Выручка с рекламы руб", "Рекламный ДРР %",
+        "Весь оборот руб", "Общий ДРР %", "ROAS",
         "Проблемы",
     ])
     for c in report["campaigns"]:
@@ -135,7 +143,9 @@ def handle_export(conn: sqlite3.Connection, cfg: Config,
             round(m["atbs"]), dec(m["cr_cart"], 1),
             round(m["orders"]), dec(m["cr_order"], 1), dec(m["cr_click_order"]),
             dec(m["cpc"]), dec(m["cpo"]), dec(m["aov"]),
-            dec(m["spend"]), dec(m["revenue"]), dec(m["drr"], 1), dec(m["roas"]),
+            dec(m["spend"]), dec(m["revenue"]), dec(m["drr"], 1),
+            dec(c.get("total_revenue") or 0), dec(c.get("total_drr") or 0, 1),
+            dec(m["roas"]),
             " | ".join(f["title"] for f in c["findings"]),
         ])
     filename = f"wb-reklama-{date_from}_{date_to}.csv"

@@ -90,11 +90,19 @@ class Thresholds:
         return {k: getattr(self, k) for k in self.__dataclass_fields__}
 
 
+# Какую цену заказа считать выручкой при расчёте общего ДРР.
+#   price_with_disc — сумма после скидки продавца (сопоставимо с рекламным отчётом)
+#   finished_price  — что фактически заплатил покупатель, с учётом СПП
+#   total_price     — цена до скидок
+ORDER_PRICE_FIELDS = ("price_with_disc", "finished_price", "total_price")
+
+
 @dataclass
 class Config:
     db_path: Path = field(default_factory=lambda: ROOT / "data" / "wbads.db")
     token: str = ""
     port: int = 8000
+    order_price_field: str = "price_with_disc"
     thresholds: Thresholds = field(default_factory=Thresholds)
 
     @property
@@ -108,9 +116,13 @@ def load_config() -> Config:
     db_path = Path(db_raw)
     if not db_path.is_absolute():
         db_path = ROOT / db_path
+    price_field = os.environ.get("WBADS_ORDER_PRICE", "price_with_disc").strip()
+    if price_field not in ORDER_PRICE_FIELDS:
+        price_field = "price_with_disc"
     return Config(
         db_path=db_path,
         token=os.environ.get("WB_API_TOKEN", ""),
         port=int(_num("WBADS_PORT", 8000)),
+        order_price_field=price_field,
         thresholds=Thresholds.from_env(),
     )

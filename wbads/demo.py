@@ -162,6 +162,91 @@ CAMPAIGNS: list[dict[str, Any]] = [
 ]
 
 
+# Заказы принадлежат артикулу, а не кампании: один и тот же товар может
+# крутиться сразу в нескольких кампаниях. Поэтому органика задаётся здесь,
+# по артикулам, и генерируется один раз.
+#
+# organic — сколько заказов в день приходит без рекламы. Именно разрыв между
+# рекламными и всеми заказами и есть разница между рекламным и общим ДРР.
+ARTICLES: dict[int, dict[str, Any]] = {
+    184203311: {"price": 2390, "organic": 26},   # худи чёрный — раскачанная карточка
+    184203312: {"price": 2390, "organic": 11},
+    184203313: {"price": 2390, "organic": 9},
+    191887420: {"price": 690,  "organic": 8, "out_of_stock_last": 7},  # свеча кончилась
+    177451209: {"price": 1290, "organic": 14},
+    177451210: {"price": 1290, "organic": 6},
+    165330944: {"price": 1750, "organic": 4},    # плед — слабая карточка, слабая органика
+    165330945: {"price": 1750, "organic": 3},
+    203118876: {"price": 4290, "organic": 5},
+    158990233: {"price": 990,  "organic": 12},   # ночник продаётся и когда реклама молчит
+    199204411: {"price": 2190, "organic": 21},
+    199204412: {"price": 2190, "organic": 12},
+    144870551: {"price": 590,  "organic": 2},
+    212556033: {"price": 740,  "organic": 3},    # гель — органики почти нет
+    133445566: {"price": 1190, "organic": 5},
+}
+
+# Доля заказов, которые покупатель отменяет. Нужна, чтобы проверить,
+# что отменённые не попадают в знаменатель ДРР.
+CANCEL_RATE = 0.03
+
+
+def _build_orders(rng: random.Random, nm_rows: list[dict[str, Any]], days: int,
+                  start: date, now: str) -> list[dict[str, Any]]:
+    """Строит заказы кабинета: рекламные плюс органика, построчно.
+
+    Рекламные берём из уже посчитанной статистики по артикулам — так общий
+    ДРР и рекламный сходятся между собой, как это было бы на реальных данных.
+    """
+    ad_orders: dict[tuple[int, str], int] = {}
+    for row in nm_rows:
+        key = (row["nm_id"], row["date"])
+        ad_orders[key] = ad_orders.get(key, 0) + int(row["orders"])
+
+    orders: list[dict[str, Any]] = []
+    counter = 0
+    for nm_id, spec in ARTICLES.items():
+        price = spec["price"]
+        out_of_stock_from = days - spec["out_of_stock_last"] if spec.get("out_of_stock_last") else None
+
+        for i in range(days):
+            day = start + timedelta(days=i)
+            in_stock = out_of_stock_from is None or i < out_of_stock_from
+
+            from_ads = ad_orders.get((nm_id, day.isoformat()), 0)
+            organic = 0
+            if in_stock:
+                organic = max(0, int(round(spec["organic"] * _weekday_factor(day)
+                                           * _jitter(rng, 0.6, 1.4))))
+            total = from_ads + organic
+
+            for _ in range(total):
+                counter += 1
+                # Скидка продавца: цена до скидки выше той, что видит покупатель
+                discount = rng.choice([30, 35, 40, 45])
+                price_with_disc = round(price * _jitter(rng, 0.97, 1.03), 2)
+                total_price = round(price_with_disc / (1 - discount / 100), 2)
+                orders.append({
+                    "srid": f"demo-{nm_id}-{day.isoformat()}-{counter}",
+                    "date": day.isoformat(),
+                    "last_change": f"{day.isoformat()}T12:00:00",
+                    "nm_id": nm_id,
+                    "supplier_article": f"ART-{nm_id}",
+                    "brand": "Демо-бренд",
+                    "subject": "Демо-категория",
+                    "warehouse": rng.choice(["Коледино", "Электросталь", "Казань", "Тула"]),
+                    "region": rng.choice(["Москва", "Санкт-Петербург", "Краснодар", "Екатеринбург"]),
+                    "total_price": total_price,
+                    "discount_percent": float(discount),
+                    "price_with_disc": price_with_disc,
+                    "finished_price": round(price_with_disc * 0.93, 2),
+                    "is_cancel": 1 if rng.random() < CANCEL_RATE else 0,
+                    "cancel_date": None,
+                    "collected_at": now,
+                })
+    return orders
+
+
 def _jitter(rng: random.Random, low: float = 0.85, high: float = 1.15) -> float:
     return rng.uniform(low, high)
 
@@ -257,10 +342,13 @@ def generate(conn: sqlite3.Connection, days: int = 60,
                     "revenue": round(revenue * share * buy_k, 2),
                 })
 
+    order_rows = _build_orders(rng, nm_rows, days, start, now)
+
     log_id = db.start_collect(conn, "demo", now, start.isoformat(), end.isoformat())
     db.upsert_campaigns(conn, campaign_rows)
     db.upsert_daily(conn, daily_rows)
     db.upsert_nm_daily(conn, nm_rows)
+    db.upsert_orders(conn, order_rows)
     db.save_balance(conn, now, balance=18400.0, bonus=2300.0, net=20700.0)
     db.finish_collect(conn, log_id, datetime.now().isoformat(timespec="seconds"),
                       len(campaign_rows), len(daily_rows))
@@ -271,4 +359,5 @@ def generate(conn: sqlite3.Connection, days: int = 60,
         "days": days,
         "rows": len(daily_rows),
         "nm_rows": len(nm_rows),
+        "orders": len(order_rows),
     }

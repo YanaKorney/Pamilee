@@ -18,7 +18,7 @@ from wbads import analytics, collector, db, demo
 from wbads.api import serve
 from wbads.config import load_config
 from wbads.rules import money, pct, signed_pct
-from wbads.wb_client import WBAdvertClient, WBError
+from wbads.wb_client import WBAdvertClient, WBError, WBStatisticsClient
 
 
 def _print(message: str) -> None:
@@ -54,6 +54,11 @@ def cmd_collect(args: argparse.Namespace) -> int:
             _print(f"Ошибка: {exc}")
             return 1
     _print(f"Сохранено: {result['rows']} дней статистики по {result['campaigns']} кампаниям.")
+    if result.get("orders"):
+        _print(f"Заказов кабинета: {result['orders']} — общий ДРР будет считаться.")
+    else:
+        _print("Заказы не собраны: общий ДРР считаться не будет. "
+               "Нужна категория «Статистика» у токена.")
     _print("Дальше: python3 run.py serve")
     return 0
 
@@ -99,16 +104,32 @@ def cmd_check(args: argparse.Namespace) -> int:
         probe("Статистика по дням", "POST /adv/v2/fullstats",
               lambda: client.fullstats(ids[:1], date.today().isoformat(),
                                        date.today().isoformat()))
+
+    # Категория «Статистика» отдельная: без неё реклама считается,
+    # а общий ДРР — нет. Поэтому её отказ не валит проверку целиком.
+    print()
+    _print("Проверяем доступ к заказам (нужен для общего ДРР)…")
+    print()
+    stats_client = WBStatisticsClient(cfg.token)
+    orders_ok = probe("Заказы кабинета", "GET  /api/v1/supplier/orders",
+                      lambda: stats_client.orders(date.today().isoformat(), max_pages=1))
+    if orders_ok is None:
+        failures.remove("Заказы кабинета")
     print()
 
     if failures:
-        _print(f"Закрыто методов: {len(failures)}.")
+        _print(f"Закрыто методов рекламы: {len(failures)}.")
         _print("Проверьте в кабинете, что у токена отмечена категория «Продвижение».")
         _print("Если она есть, а доступа нет — выпустите токен без галочки")
         _print("«Только на чтение»: статистика запрашивается методом POST.")
         return 1
 
-    _print("Токен работает, доступа хватает.")
+    if orders_ok is None:
+        _print("Реклама читается, заказы — нет.")
+        _print("Рекламный ДРР считаться будет, общий — нет.")
+        _print("Чтобы появился общий ДРР, нужен токен с категорией «Статистика».")
+    else:
+        _print("Токен работает, доступа хватает — считаются оба ДРР.")
     if balance:
         _print(f"Баланс кабинета: {money(balance['net'])} "
                f"(счёт {money(balance['balance'])}, бонусы {money(balance['bonus'])})")
@@ -155,6 +176,14 @@ def cmd_report(args: argparse.Namespace) -> int:
     print(f"  ДРР     {pct(t['drr']):>14}   при цели {pct(thresholds.target_drr, 0)}")
     print(f"  Заказы  {t['orders']:>14.0f}   ({signed_pct(cmp_['orders']['delta_pct'])})")
     print(f"  CPO     {money(t['cpo']):>14}   ROAS {t['roas']:.1f}")
+
+    orders = report.get("orders") or {}
+    if orders.get("available"):
+        print()
+        print(f"  Весь оборот по заказам {money(orders['revenue']):>14}"
+              f"   ({orders['orders']:.0f} заказов, отменено {orders['cancels']:.0f})")
+        print(f"  ДРР общий              {pct(orders['total_drr']):>14}"
+              f"   реклама даёт {pct(orders['ad_share'], 0)} оборота")
     print()
     print("  Воронка")
     print(f"  {t['views']:>10,.0f} показов".replace(",", " ") +
@@ -182,6 +211,9 @@ def cmd_report(args: argparse.Namespace) -> int:
               f"ДРР {drr} · заказов {m['orders']:.0f}")
         print(f"     CTR {pct(m['ctr'], 2)} · в корзину {pct(m['cr_cart'])} · "
               f"в заказ {pct(m['cr_order'])} · клик → заказ {pct(m['cr_click_order'], 2)}")
+        if c.get("orders_available") and c.get("total_revenue"):
+            print(f"     весь оборот {money(c['total_revenue'])} · ДРР общий "
+                  f"{pct(c['total_drr'])} · без рекламы {pct(c['organic_share'], 0)}")
         for finding in c["findings"][: (None if args.all else 2)]:
             print(f"     • {finding['title']}")
             for action in finding["actions"][:1]:

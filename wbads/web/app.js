@@ -27,6 +27,11 @@ const pct = (v, d = 1) => (v || 0).toFixed(d).replace('.', ',') + '%';
 
 /* ДРР без выручки не считается — показываем прочерк, а не ноль */
 const drrText = (m) => (m.revenue > 0 ? pct(m.drr) : '—');
+const totalDrrText = (c) =>
+  (c.orders_available && c.total_revenue > 0 ? pct(c.total_drr) : '—');
+
+const pctChange = (cur, prev) =>
+  (prev ? ((cur - prev) / Math.abs(prev)) * 100 : null);
 
 const signed = (v) => {
   if (v === null || v === undefined || !isFinite(v)) return '—';
@@ -410,11 +415,19 @@ function renderConvCharts(r) {
 /* ── шапка таблицы кампаний ───────────────────────────────────────────── */
 
 const CAMP_COLUMNS = ['Кампания', 'Расход по дням', 'Показы', 'CTR', 'Клики',
-                      '→ корзина', '→ заказ', 'Заказы', 'Расход', 'Выручка', 'ДРР', ''];
+                      '→ корзина', '→ заказ', 'Заказы', 'Расход', 'Выручка',
+                      'ДРР реклам.', ''];
+const CAMP_COLUMNS_ORDERS = ['Кампания', 'Расход по дням', 'Показы', 'CTR', 'Клики',
+                             '→ корзина', '→ заказ', 'Заказы', 'Расход', 'Выручка',
+                             'ДРР реклам.', 'ДРР общий', ''];
 
 function renderCampHeader() {
-  const host = document.getElementById('camp-header');
-  host.innerHTML = CAMP_COLUMNS.map((label) => `<div>${label}</div>`).join('');
+  const hasOrders = (state.report.orders || {}).available;
+  const table = document.querySelector('.camp-table');
+  table.classList.toggle('with-total-drr', !!hasOrders);
+  const columns = hasOrders ? CAMP_COLUMNS_ORDERS : CAMP_COLUMNS;
+  document.getElementById('camp-header').innerHTML =
+    columns.map((label) => `<div>${label}</div>`).join('');
 }
 
 function renderTodo(r) {
@@ -444,14 +457,32 @@ function renderKpis(r) {
     { label: 'Расход', value: money(t.spend), delta: c.spend.delta_pct, good: null },
     { label: 'Выручка с рекламы', value: money(t.revenue), delta: c.revenue.delta_pct, good: 'up' },
     {
-      label: 'ДРР', value: t.revenue > 0 ? pct(t.drr) : '—',
+      label: 'ДРР рекламный', value: t.revenue > 0 ? pct(t.drr) : '—',
       delta: c.drr.delta_pct, good: 'down',
-      note: `цель ${pct(target, 0)}`, flagged: t.revenue > 0 && t.drr > target,
+      note: 'от заказов с рекламы', flagged: t.revenue > 0 && t.drr > target,
     },
-    { label: 'Заказы', value: num(t.orders), delta: c.orders.delta_pct, good: 'up' },
+    { label: 'Заказы с рекламы', value: num(t.orders), delta: c.orders.delta_pct, good: 'up' },
     { label: 'Цена заказа', value: t.orders > 0 ? money(t.cpo) : '—', delta: c.cpo.delta_pct, good: 'down' },
     { label: 'ROAS', value: t.spend > 0 ? t.roas.toFixed(1) : '—', delta: c.roas.delta_pct, good: 'up' },
   ];
+
+  /* Общий ДРР считается только когда собраны заказы кабинета —
+     то есть у токена есть категория «Статистика». */
+  const o = r.orders || {};
+  if (o.available) {
+    /* Порядок важен: оборот встаёт рядом с выручкой, а общий ДРР —
+       вплотную к рекламному, чтобы разрыв читался сразу. */
+    tiles.splice(2, 0, {
+      label: 'Весь оборот', value: money(o.revenue),
+      delta: pctChange(o.revenue, o.prev_revenue), good: 'up',
+      note: `реклама даёт ${pct(o.ad_share, 0)}`,
+    });
+    tiles.splice(4, 0, {
+      label: 'ДРР общий', value: o.revenue > 0 ? pct(o.total_drr) : '—',
+      delta: pctChange(o.total_drr, o.prev_total_drr), good: 'down',
+      note: 'от всех заказов', flagged: o.revenue > 0 && o.total_drr > target,
+    });
+  }
 
   const host = document.getElementById('kpis');
   host.innerHTML = '';
@@ -468,7 +499,7 @@ function renderKpis(r) {
     }
     node.appendChild(el('div', 'delta',
       `<span class="arrow ${cls}">${arrow}</span><span class="${cls}">${signed(tile.delta)}</span>` +
-      `<span class="target">${tile.note ? '· ' + tile.note : 'к прошлому периоду'}</span>`));
+      `<span class="target">${tile.note || 'к прошлому'}</span>`));
     host.appendChild(node);
   });
 
@@ -478,7 +509,7 @@ function renderKpis(r) {
     node.appendChild(el('div', 'label', 'Уходит мимо цели'));
     node.appendChild(el('div', 'value', money(s.money_at_risk)));
     node.appendChild(el('div', 'delta',
-      `<span class="target">расход сверх цели по проблемным кампаниям</span>`));
+      `<span class="target">сверх цели · база: ${s.risk_basis || 'выручка с рекламы'}</span>`));
     host.appendChild(node);
   }
 }
@@ -502,16 +533,27 @@ function renderCharts(r) {
     ariaLabel: 'Расход и выручка с рекламы по дням, рубли',
   });
 
+  /* Оба ДРР — проценты, поэтому законно живут на одной шкале.
+     Разрыв между линиями и есть вклад органики. */
+  const hasOrders = (r.orders || {}).available;
+  const drrSeries = [{
+    name: 'Рекламный', color: c1, fill: true,
+    values: r.series.map((p) => (p.revenue > 0 ? p.drr : 0)),
+  }];
+  if (hasOrders) {
+    drrSeries.push({
+      name: 'Общий', color: c2, fill: false,
+      values: r.series.map((p) => (p.total_revenue > 0 ? p.total_drr : 0)),
+    });
+  }
+
   document.getElementById('legend-drr').innerHTML =
-    `<span><i class="swatch" style="background:${c1}"></i> ДРР по дням</span>` +
+    `<span><i class="swatch" style="background:${c1}"></i> ДРР рекламный</span>` +
+    (hasOrders ? `<span><i class="swatch" style="background:${c2}"></i> ДРР общий</span>` : '') +
     `<span><i class="swatch" style="background:${cssVar('--border-strong')}"></i> Цель</span>`;
 
   lineChart(document.getElementById('chart-drr'), {
-    dates,
-    series: [{
-      name: 'ДРР', color: c1, fill: true,
-      values: r.series.map((p) => (p.revenue > 0 ? p.drr : 0)),
-    }],
+    dates, series: drrSeries,
     format: (v) => pct(v),
     axisFormat: (v) => v.toFixed(0) + '%',
     target: { value: r.thresholds.target_drr, label: `цель ${pct(r.thresholds.target_drr, 0)}` },
@@ -604,6 +646,12 @@ function campaignCard(c, r) {
     cell(money(m.revenue)) +
     cell(drrText(m), drrBad ? 'bad' : (drrGood ? 'good' : ''),
          m.revenue > 0 ? delta('drr') : null) +
+    (c.orders_available
+      ? cell(totalDrrText(c),
+             c.total_revenue > 0 && c.total_drr > target ? 'bad'
+               : (c.total_revenue > 0 && c.total_drr > 0 ? 'good' : ''),
+             c.total_revenue > 0 ? pctChange(c.total_drr, c.prev_total_drr) : null)
+      : '') +
     `<span class="chev">${state.open.has(c.advert_id) ? '▲' : '▼'}</span>`);
 
   const body = el('div', 'camp-body');
@@ -631,6 +679,7 @@ function cell(value, cls = '', deltaPct = null) {
 
 function fillBody(body, c, r) {
   const m = c.metrics;
+  const target = r.thresholds.target_drr;
 
   /* находки с рекомендациями */
   if (c.findings.length) {
@@ -648,6 +697,22 @@ function fillBody(body, c, r) {
     });
   } else {
     body.appendChild(el('div', 'finding', 'Проблем не найдено — кампания работает в пределах ваших порогов.'));
+  }
+
+  /* Реклама против всего оборота: главное, чего не видно в рекламном отчёте */
+  if (c.orders_available && c.total_revenue > 0) {
+    body.appendChild(el('div', 'subhead', 'Реклама и весь оборот'));
+    const note = el('div', 'funnel-note', '');
+    note.style.marginTop = '0';
+    note.style.borderTop = '0';
+    note.style.paddingTop = '0';
+    note.innerHTML = [
+      `Расход: <b>${money(m.spend)}</b>`,
+      `Выручка с рекламы: <b>${money(m.revenue)}</b> → ДРР рекламный <b>${drrText(m)}</b>`,
+      `Весь оборот артикулов: <b>${money(c.total_revenue)}</b> → ДРР общий <b>${totalDrrText(c)}</b>`,
+      `Без рекламы пришло: <b>${money(c.organic_revenue)}</b> (${pct(c.organic_share, 0)} оборота)`,
+    ].map((x) => `<span>${x}</span>`).join('');
+    body.appendChild(note);
   }
 
   /* воронка кампании: где именно теряются люди */
@@ -771,22 +836,31 @@ function fillBody(body, c, r) {
       'Цветная полоса слева: красная — тянет вниз, жёлтая — выше цели, зелёная — лучше цели.'));
     const table = el('table', 'data');
     table.innerHTML =
-      '<thead><tr><th>Артикул</th><th>Показы</th><th>Клики</th><th>CTR</th>' +
-      '<th>В корзине</th><th>→ корзина</th><th>Заказы</th><th>→ заказ</th>' +
-      '<th>Цена клика</th><th>Расход</th><th>Выручка</th><th>ДРР</th></tr></thead>';
+      '<thead><tr><th>Артикул</th><th>Показы</th><th>CTR</th>' +
+      '<th>→ корзина</th><th>→ заказ</th><th>Заказы<br>с рекламы</th>' +
+      '<th>Расход</th><th>Выручка<br>с рекламы</th><th>ДРР<br>реклам.</th>' +
+      (c.orders_available
+        ? '<th>Всего<br>заказов</th><th>Весь<br>оборот</th><th>ДРР<br>общий</th><th>Доля<br>органики</th>'
+        : '') +
+      '</tr></thead>';
     const tbody = el('tbody');
     c.nm_items.forEach((it) => {
       const tr = el('tr', it.flag);
       tr.innerHTML =
         `<td>${escapeHtml(it.name)}<br><span style="color:var(--text-muted);font-size:11px">${it.nm_id}</span></td>` +
-        `<td>${num(it.views)}</td><td>${num(it.clicks)}</td>` +
+        `<td>${num(it.views)}</td>` +
         `<td class="${convClass(it.ctr, f.ctr)}">${pct(it.ctr, 2)}</td>` +
-        `<td>${num(it.atbs)}</td>` +
         `<td class="${convClass(it.cr_cart, f.cr_cart)}">${pct(it.cr_cart, 1)}</td>` +
-        `<td>${num(it.orders)}</td>` +
         `<td class="${convClass(it.cr_order, f.cr_order)}">${pct(it.cr_order, 1)}</td>` +
-        `<td>${money(it.cpc, 2)}</td><td>${money(it.spend)}</td>` +
-        `<td>${money(it.revenue)}</td><td>${drrText(it)}</td>`;
+        `<td>${num(it.orders)}</td>` +
+        `<td>${money(it.spend)}</td><td>${money(it.revenue)}</td>` +
+        `<td>${drrText(it)}</td>` +
+        (c.orders_available
+          ? `<td>${num(it.total_orders)}</td><td>${money(it.total_revenue)}</td>` +
+            `<td class="${it.total_revenue > 0 && it.total_drr > target ? 'bad' : ''}">` +
+            `${it.total_revenue > 0 ? pct(it.total_drr) : '—'}</td>` +
+            `<td>${it.total_orders > 0 ? pct(it.organic_share, 0) : '—'}</td>`
+          : '');
       tbody.appendChild(tr);
     });
     table.appendChild(tbody);

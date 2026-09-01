@@ -13,7 +13,7 @@ from typing import Any, Callable, Sequence
 
 from . import db
 from .rules import STATUS_NAMES, TYPE_NAMES
-from .wb_client import WBAdvertClient, WBError
+from .wb_client import WBAdvertClient, WBError, WBStatisticsClient, _order_key
 
 Progress = Callable[[str], None]
 
@@ -116,10 +116,75 @@ def normalize_stats(raw: dict[str, Any], now: str
     return daily, nm_daily
 
 
+def normalize_order(raw: dict[str, Any], now: str) -> dict[str, Any] | None:
+    """Строка заказа из API статистики → строка нашей таблицы.
+
+    Если у заказа нет ни srid, ни номера — пропускаем: без устойчивого ключа
+    повторный сбор наплодит дублей.
+    """
+    key = _order_key(raw)
+    if not key or key.startswith("None:"):
+        return None
+
+    total = _num(raw.get("totalPrice"))
+    discount = _num(raw.get("discountPercent"))
+    # priceWithDisc WB отдаёт не всегда — тогда считаем сами
+    price_with_disc = _num(raw.get("priceWithDisc")) or round(total * (1 - discount / 100), 2)
+
+    return {
+        "srid": key,
+        "date": _day(raw.get("date")),
+        "last_change": raw.get("lastChangeDate"),
+        "nm_id": _int(raw.get("nmId")),
+        "supplier_article": (raw.get("supplierArticle") or "").strip(),
+        "brand": (raw.get("brand") or "").strip(),
+        "subject": (raw.get("subject") or "").strip(),
+        "warehouse": (raw.get("warehouseName") or "").strip(),
+        "region": (raw.get("regionName") or "").strip(),
+        "total_price": total,
+        "discount_percent": discount,
+        "price_with_disc": price_with_disc,
+        "finished_price": _num(raw.get("finishedPrice")),
+        "is_cancel": 1 if raw.get("isCancel") else 0,
+        "cancel_date": raw.get("cancelDate"),
+        "collected_at": now,
+    }
+
+
+def collect_orders(conn: sqlite3.Connection, token: str, days: int = 30,
+                   end: date | None = None,
+                   on_progress: Progress | None = None) -> dict[str, Any]:
+    """Забирает заказы кабинета — знаменатель для общего ДРР.
+
+    Требует у токена категорию «Статистика». Метод отдаётся раз в минуту,
+    поэтому сбор небыстрый; зато повторные запуски дёшевы — WB возвращает
+    только то, что изменилось.
+    """
+    end = end or date.today()
+    start = end - timedelta(days=days - 1)
+    now = datetime.now().isoformat(timespec="seconds")
+
+    client = WBStatisticsClient(token)
+    _log(on_progress, f"Забираем заказы с {start.isoformat()}…")
+    raw_rows = client.orders(start.isoformat(), on_progress=on_progress)
+
+    rows = [normalize_order(r, now) for r in raw_rows]
+    rows = [r for r in rows if r and r["nm_id"]]
+    # Заказы старше запрошенного периода WB тоже присылает — они приезжают
+    # из-за поздних изменений статуса. Оставляем: история от этого только полнее.
+    db.upsert_orders(conn, rows)
+    conn.commit()
+
+    cancels = sum(1 for r in rows if r["is_cancel"])
+    _log(on_progress, f"Заказов сохранено: {len(rows)} (из них отменённых {cancels}).")
+    return {"orders": len(rows), "cancels": cancels, "date_from": start.isoformat()}
+
+
 def collect(conn: sqlite3.Connection, token: str, days: int = 30,
             end: date | None = None, advert_ids: Sequence[int] | None = None,
-            on_progress: Progress | None = None) -> dict[str, Any]:
-    """Забирает кампании, баланс и статистику за период и пишет всё в базу."""
+            on_progress: Progress | None = None,
+            with_orders: bool = True) -> dict[str, Any]:
+    """Забирает кампании, баланс, статистику рекламы и заказы кабинета."""
     end = end or date.today()
     start = end - timedelta(days=days - 1)
     date_from, date_to = start.isoformat(), end.isoformat()
@@ -166,6 +231,19 @@ def collect(conn: sqlite3.Connection, token: str, days: int = 30,
 
         db.upsert_daily(conn, daily_all)
         db.upsert_nm_daily(conn, nm_all)
+        conn.commit()
+
+        # Заказы нужны для общего ДРР. Категории «Статистика» может не быть —
+        # тогда сбор рекламы всё равно считается успешным.
+        orders_result: dict[str, Any] = {}
+        if with_orders:
+            try:
+                orders_result = collect_orders(conn, token, days=days, end=end,
+                                               on_progress=on_progress)
+            except WBError as exc:
+                _log(on_progress, f"Заказы получить не вышло: {exc}")
+                _log(on_progress, "Общий ДРР считаться не будет, рекламный — будет.")
+
         db.finish_collect(conn, log_id, datetime.now().isoformat(timespec="seconds"),
                           len(campaign_rows), len(daily_all))
         conn.commit()
@@ -175,6 +253,7 @@ def collect(conn: sqlite3.Connection, token: str, days: int = 30,
             "campaigns": len(campaign_rows),
             "rows": len(daily_all),
             "nm_rows": len(nm_all),
+            "orders": orders_result.get("orders", 0),
             "date_from": date_from,
             "date_to": date_to,
         }
