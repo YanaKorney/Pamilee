@@ -17,9 +17,22 @@
 
 from __future__ import annotations
 
+import sys
+
+# Проверку версии держим до остальных импортов: на старом Python модули
+# сервиса не загрузятся, и человек увидит непонятную ошибку вместо совета.
+if sys.version_info < (3, 9):
+    print()
+    print("  На компьютере установлен Python "
+          f"{sys.version_info.major}.{sys.version_info.minor}, а нужен 3.9 или новее.")
+    print()
+    print("  Скачайте свежую версию: https://www.python.org/downloads/")
+    print("  На Windows при установке отметьте «Add Python to PATH».")
+    print()
+    raise SystemExit(1)
+
 import argparse
 import getpass
-import sys
 from datetime import date, datetime, timedelta
 
 from wbads import analytics, collector, db, demo
