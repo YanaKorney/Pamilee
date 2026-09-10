@@ -16,13 +16,32 @@ from datetime import date
 
 from wbads import analytics, collector, db, demo
 from wbads.api import serve
-from wbads.config import load_config
+from wbads.config import load_config, token_in_template
 from wbads.rules import money, pct, signed_pct
 from wbads.wb_client import WBAdvertClient, WBError, WBStatisticsClient
 
 
 def _print(message: str) -> None:
     print(f"  {message}", flush=True)
+
+
+def _warn_token_in_template() -> None:
+    """Предупреждает, если токен вписан в шаблон вместо .env.
+
+    Это не мелочь: .env.example лежит в репозитории, и токен из него
+    уедет на GitHub при первом push.
+    """
+    if not token_in_template():
+        return
+    print()
+    _print("⚠  Токен вписан в .env.example — это шаблон, он уходит в git.")
+    _print("   Сервис читает только .env, поэтому токен сейчас не работает,")
+    _print("   а при push уедет в репозиторий.")
+    _print("   Как исправить:")
+    _print("     cp .env.example .env      (Windows: copy .env.example .env)")
+    _print("     git checkout .env.example")
+    _print("   Токен окажется в .env — этот файл git игнорирует.")
+    print()
 
 
 def cmd_demo(args: argparse.Namespace) -> int:
@@ -37,6 +56,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
 
 def cmd_collect(args: argparse.Namespace) -> int:
     cfg = load_config()
+    _warn_token_in_template()
     if not cfg.has_token:
         _print("Не задан токен WB.")
         _print("1. Скопируйте .env.example в .env")
@@ -70,10 +90,11 @@ def cmd_check(args: argparse.Namespace) -> int:
     метод закрыт, видно ровно какой, а не общее «не работает».
     """
     cfg = load_config()
+    _warn_token_in_template()
     if not cfg.has_token:
         _print("Токен не найден. Впишите WB_API_TOKEN в файл .env.")
         _print("Кабинет WB → Настройки → Доступ к API → Создать новый токен,")
-        _print("категория «Продвижение» — она единственная, что нужна сервису.")
+        _print("категории «Продвижение» и «Статистика».")
         return 1
 
     client = WBAdvertClient(cfg.token)

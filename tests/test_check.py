@@ -12,6 +12,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import run as cli  # noqa: E402
+from wbads.config import token_in_template  # noqa: E402
 from wbads.wb_client import WBError  # noqa: E402
 
 FULL_ACCESS = {
@@ -91,6 +92,46 @@ class TestCheck(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("Доступ к API", out)
         self.assertIn("Продвижение", out)
+
+
+class TestTokenInTemplate(unittest.TestCase):
+    """Токен, вписанный в .env.example, обязан быть замечен.
+
+    Файл отслеживается git: незамеченный токен уедет в репозиторий,
+    а сервис при этом будет говорить «токен не найден».
+    """
+
+    def write(self, text: str) -> Path:
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        path = Path(self.tmp.name) / ".env.example"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_detects_filled_token(self):
+        path = self.write("# комментарий\nWB_API_TOKEN=eyJhbGciOiJFUzI1NiJ9.abc\n")
+        self.assertTrue(token_in_template(path))
+
+    def test_empty_template_is_fine(self):
+        path = self.write("# комментарий\nWB_API_TOKEN=\nWBADS_PORT=8000\n")
+        self.assertFalse(token_in_template(path))
+
+    def test_quoted_token_is_detected(self):
+        path = self.write('WB_API_TOKEN="eyJhbGciOiJFUzI1NiJ9.abc"\n')
+        self.assertTrue(token_in_template(path))
+
+    def test_commented_out_token_is_not_a_leak(self):
+        path = self.write("# WB_API_TOKEN=eyJhbGciOiJFUzI1NiJ9.abc\nWB_API_TOKEN=\n")
+        self.assertFalse(token_in_template(path))
+
+    def test_missing_file_is_fine(self):
+        self.assertFalse(token_in_template(Path("/nope/.env.example")))
+
+    def test_shipped_template_is_empty(self):
+        """Шаблон в репозитории не должен содержать токен — ни при каких правках."""
+        shipped = Path(__file__).resolve().parent.parent / ".env.example"
+        self.assertFalse(token_in_template(shipped))
 
 
 if __name__ == "__main__":

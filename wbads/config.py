@@ -32,6 +32,25 @@ def load_env(path: Path = ENV_FILE) -> None:
             os.environ[key] = value
 
 
+def token_in_template(path: Path = ROOT / ".env.example") -> bool:
+    """Не вписан ли настоящий токен в шаблон вместо .env.
+
+    Файл .env.example отслеживается git и уезжает в репозиторий — токен в нём
+    утечёт при первом же push. Сервис его оттуда не читает, поэтому ошибка
+    выглядит как «токен не найден», хотя он вроде бы вписан. Ловим явно.
+    """
+    if not path.exists():
+        return False
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if key.strip() == "WB_API_TOKEN" and value.strip().strip('"').strip("'"):
+            return True
+    return False
+
+
 def _num(name: str, default: float) -> float:
     raw = os.environ.get(name, "").strip()
     if not raw:
