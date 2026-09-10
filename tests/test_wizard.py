@@ -199,3 +199,104 @@ class TestAsk(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPortFallback(unittest.TestCase):
+    """Порт 8000 на Windows часто занят системой, и попытка его занять
+    падает с WinError 10013. Программа обязана перейти на свободный,
+    а не показывать простыню с ошибкой."""
+
+    def test_busy_port_falls_back_to_free_one(self):
+        import socket
+        from http.server import BaseHTTPRequestHandler
+        from wbads.api import _bind_server
+        from wbads.config import Config, Thresholds
+
+        blocker = socket.socket()
+        blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        blocker.bind(("127.0.0.1", 0))
+        busy = blocker.getsockname()[1]
+        blocker.listen(1)
+        self.addCleanup(blocker.close)
+
+        cfg = Config(port=busy, thresholds=Thresholds())
+        server, port = _bind_server(cfg, BaseHTTPRequestHandler)
+        self.addCleanup(server.server_close)
+        self.assertNotEqual(port, busy)
+        self.assertGreater(port, 0)
+
+    def test_free_port_is_used_as_asked(self):
+        from http.server import BaseHTTPRequestHandler
+        from wbads.api import _bind_server
+        from wbads.config import Config, Thresholds
+
+        cfg = Config(port=8937, thresholds=Thresholds())
+        server, port = _bind_server(cfg, BaseHTTPRequestHandler)
+        self.addCleanup(server.server_close)
+        self.assertEqual(port, 8937)
+
+
+class TestTokenDiagnostics(unittest.TestCase):
+    """Разбор токена на месте: помогает понять причину отказа, не гадая."""
+
+    @staticmethod
+    def jwt(payload: dict) -> str:
+        import base64
+        import json
+        enc = lambda d: base64.urlsafe_b64encode(  # noqa: E731
+            json.dumps(d).encode()).decode().rstrip("=")
+        return f"{enc({'alg': 'ES256'})}.{enc(payload)}.signature"
+
+    def test_detects_sandbox_token(self):
+        """Тестовый контур отвечает 403 сразу на всё — это надо назвать прямо."""
+        from wbads.wb_client import describe_token
+        import time
+        info = describe_token(self.jwt({"exp": int(time.time()) + 8640, "t": True}))
+        self.assertTrue(info["sandbox"])
+
+    def test_detects_production_token(self):
+        from wbads.wb_client import describe_token
+        import time
+        info = describe_token(self.jwt({"exp": int(time.time()) + 8640, "t": False}))
+        self.assertFalse(info["sandbox"])
+
+    def test_detects_expired_token(self):
+        from wbads.wb_client import describe_token
+        import time
+        info = describe_token(self.jwt({"exp": int(time.time()) - 8640, "t": False}))
+        self.assertTrue(info["expired"])
+
+    def test_truncated_paste_is_named(self):
+        """Обрезанная вставка — самая частая причина; её видно по длине."""
+        from wbads.wb_client import describe_token
+        info = describe_token("eyJhbGciOiJFUzI1NiJ9.eyJ")
+        self.assertFalse(info["looks_like_jwt"])
+        self.assertIsNotNone(info["error"])
+
+    def test_empty_token(self):
+        from wbads.wb_client import describe_token
+        info = describe_token("")
+        self.assertEqual(info["length"], 0)
+
+    def test_never_returns_the_token_itself(self):
+        """В диагностике не должно быть самого токена — её могут переслать."""
+        from wbads.wb_client import describe_token
+        import time
+        token = self.jwt({"exp": int(time.time()) + 8640, "t": False, "sid": "s1"})
+        info = describe_token(token)
+        self.assertNotIn(token, str(info))
+        self.assertLess(len(info["preview"]), 12)
+
+
+class TestCrashReport(unittest.TestCase):
+    def test_crash_prints_advice_not_traceback(self):
+        buffer = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("run.ROOT", Path(tmp)), redirect_stdout(buffer):
+                code = cli._report_crash(PermissionError("[WinError 10013] отказано"))
+            out = buffer.getvalue()
+            self.assertEqual(code, 1)
+            self.assertIn("Что-то пошло не так", out)
+            self.assertIn("WinError 10013", out)
+            self.assertNotIn("Traceback", out)
+            self.assertTrue((Path(tmp) / "ошибка.txt").exists())

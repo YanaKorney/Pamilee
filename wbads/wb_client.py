@@ -20,11 +20,13 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from typing import Any, Callable, Iterable, Sequence
 
 ADVERT_URL = "https://advert-api.wildberries.ru"
@@ -62,6 +64,56 @@ def explain_status(status: int, scope: str = "Продвижение") -> str:
         422: "WB не смог обработать данные запроса (422).",
         429: "Слишком часто (429). Сработал лимит запросов — сервис подождёт и повторит.",
     }.get(status, f"WB вернул ошибку {status}.")
+
+
+def describe_token(token: str) -> dict[str, Any]:
+    """Разбирает токен WB, не обращаясь в интернет.
+
+    Токен WB — это JWT: три части через точку, средняя содержит открытые
+    сведения о самом токене. Это не расшифровка секрета — просто чтение
+    того, что в него записано при выпуске. Помогает понять причину отказа,
+    не гадая: обрезан ли токен при вставке, не истёк ли, не выпущен ли
+    он для тестового контура.
+    """
+    token = (token or "").strip()
+    info: dict[str, Any] = {
+        "length": len(token),
+        "preview": (token[:8] + "…") if len(token) > 8 else token,
+        "looks_like_jwt": False,
+        "expires_at": None,
+        "expired": None,
+        "sandbox": None,
+        "seller_id": None,
+        "scopes_raw": None,
+        "error": None,
+    }
+    parts = token.split(".")
+    if len(parts) != 3:
+        info["error"] = "не похоже на токен WB: у него должно быть три части через точку"
+        return info
+    info["looks_like_jwt"] = True
+
+    try:
+        raw = parts[1]
+        raw += "=" * (-len(raw) % 4)          # base64 требует длину, кратную четырём
+        payload = json.loads(base64.urlsafe_b64decode(raw).decode("utf-8"))
+    except Exception as exc:
+        info["error"] = f"не удалось прочитать содержимое токена: {exc}"
+        return info
+
+    exp = payload.get("exp")
+    if isinstance(exp, (int, float)):
+        moment = datetime.fromtimestamp(exp)
+        info["expires_at"] = moment
+        info["expired"] = moment < datetime.now()
+
+    # t = true означает токен тестового контура: к боевому API он не подойдёт
+    if "t" in payload:
+        info["sandbox"] = bool(payload["t"])
+    info["seller_id"] = payload.get("sid")
+    if isinstance(payload.get("s"), int):
+        info["scopes_raw"] = payload["s"]
+    return info
 
 
 class _BaseClient:

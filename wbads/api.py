@@ -248,14 +248,60 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self._send_json({"error": "Не найдено"}, 404)
 
 
+# Запасные порты. На Windows 8000 нередко занят или зарезервирован системой
+# (диапазоны Hyper-V, WSL, службы), и попытка его занять падает с WinError 10013 —
+# «доступ запрещён», хотя порт вроде бы свободен. Перебираем варианты,
+# последний — 0: система сама выдаст любой свободный.
+FALLBACK_PORTS = (8000, 8080, 8123, 8765, 5000, 3000, 0)
+
+
+def _bind_server(config: Config, handler: type) -> tuple[ThreadingHTTPServer, int]:
+    """Занимает первый доступный порт и возвращает сервер вместе с ним."""
+    tried: list[int] = []
+    candidates = [config.port] + [p for p in FALLBACK_PORTS if p != config.port]
+
+    for port in candidates:
+        try:
+            server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+        except (PermissionError, OSError) as exc:
+            tried.append(port)
+            last = exc
+            continue
+        return server, server.server_address[1]
+
+    raise OSError(
+        "Не удалось занять ни один порт: "
+        + ", ".join(str(p) for p in tried if p)
+        + f". Последняя ошибка: {last}"
+    )
+
+
 def serve(config: Config, open_browser: bool = True) -> None:
     """Поднимает локальный дашборд на http://127.0.0.1:<порт>."""
     handler = type("BoundHandler", (DashboardHandler,), {"config": config})
-    server = ThreadingHTTPServer(("127.0.0.1", config.port), handler)
-    url = f"http://127.0.0.1:{config.port}"
+    try:
+        server, port = _bind_server(config, handler)
+    except OSError as exc:
+        print()
+        print("  Не удалось открыть дашборд: все проверенные порты заняты.")
+        print()
+        print("  Что делать:")
+        print("   1. Закройте другое окно программы, если оно ещё открыто.")
+        print("   2. Перезагрузите компьютер — это освобождает занятые порты.")
+        print("   3. Запустите с другим портом, например:")
+        print("      python run.py serve --port 9010")
+        print()
+        print(f"  Подробности: {exc}")
+        print()
+        return
+
+    url = f"http://127.0.0.1:{port}"
+    if port != config.port:
+        print(f"\n  Порт {config.port} занят системой — открываю на {port}.")
 
     print(f"\n  Дашборд запущен: {url}")
-    print("  Остановить — Ctrl+C\n")
+    print("  Ссылку можно скопировать и открыть в браузере вручную.")
+    print("  Остановить — закройте это окно или нажмите Ctrl+C\n")
 
     if open_browser:
         def _open() -> None:

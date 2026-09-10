@@ -38,6 +38,7 @@ from datetime import date, datetime, timedelta
 from wbads import analytics, collector, db, demo
 from wbads.api import serve
 from wbads.config import (
+    ROOT,
     clear_template_token,
     load_config,
     token_from_template,
@@ -45,7 +46,12 @@ from wbads.config import (
     write_token,
 )
 from wbads.rules import money, pct, signed_pct
-from wbads.wb_client import WBAdvertClient, WBError, WBStatisticsClient
+from wbads.wb_client import (
+    WBAdvertClient,
+    WBError,
+    WBStatisticsClient,
+    describe_token,
+)
 
 
 def _print(message: str) -> None:
@@ -92,6 +98,10 @@ def _ask_token() -> str:
     print()
     _print("Сейчас вставьте его сюда. Символы на экране НЕ появятся —")
     _print("так и должно быть. Вставьте и нажмите Enter.")
+    if sys.platform == "win32":
+        print()
+        _print("В этом окне Ctrl+V часто не работает: вставляйте щелчком")
+        _print("ПРАВОЙ кнопки мыши.")
     print()
     try:
         return getpass.getpass("  Токен: ").strip()
@@ -115,7 +125,7 @@ def cmd_setup(args: argparse.Namespace, quiet_tail: bool = False) -> int:
         print()
         return cmd_check(args, quiet_tail)
 
-    if cfg.has_token:
+    if cfg.has_token and not getattr(args, "force", False):
         _print("Токен уже настроен.")
         if not _ask("Заменить его на другой?", default="н"):
             print()
@@ -130,8 +140,12 @@ def cmd_setup(args: argparse.Namespace, quiet_tail: bool = False) -> int:
 
     path = write_token(token)
     clear_template_token()
+    info = describe_token(token)
     print()
     _print(f"Токен сохранён в {path.name}. Этот файл никуда не отправляется.")
+    _print(f"Сохранено {info['length']} символов, начало {info['preview']}.")
+    if info["error"]:
+        _print("Похоже, вставилось не всё — проверьте и запустите настройку заново.")
     print()
     return cmd_check(args, quiet_tail)
 
@@ -160,11 +174,32 @@ def cmd_start(args: argparse.Namespace) -> int:
                 return _start_demo(cfg)
         if cmd_setup(args, quiet_tail=True) != 0:
             print()
-            _print("Не вышло. Покажу демо-кабинет, чтобы вы не ждали.")
-            return _start_demo(cfg)
+            if _ask("Попробовать ввести токен ещё раз?"):
+                if cmd_setup(args, quiet_tail=True) != 0:
+                    print()
+                    _print("Покажу демо-кабинет, чтобы вы не ждали.")
+                    return _start_demo(cfg)
+            else:
+                _print("Покажу демо-кабинет, чтобы вы не ждали.")
+                return _start_demo(cfg)
         cfg = load_config()
     else:
-        _print("Шаг 1 из 3. Токен на месте.")
+        # Токен есть — но он мог устареть или оказаться не тем.
+        # Молча идти дальше с нерабочим токеном хуже, чем проверить.
+        _print("Шаг 1 из 3. Токен на месте, проверяю доступ.")
+        print()
+        if cmd_check(args, quiet_tail=True) != 0:
+            print()
+            if _ask("Ввести другой токен?"):
+                if cmd_setup(argparse.Namespace(force=True), quiet_tail=True) != 0:
+                    print()
+                    _print("Покажу демо-кабинет, чтобы вы не ждали.")
+                    return _start_demo(cfg)
+                cfg = load_config()
+            else:
+                print()
+                _print("Покажу демо-кабинет на придуманных данных.")
+                return _start_demo(cfg)
     print()
 
     # ── шаг 2: данные ────────────────────────────────────────────────────
@@ -263,6 +298,59 @@ def cmd_collect(args: argparse.Namespace) -> int:
     return 0
 
 
+def _describe_token_for_human(token: str) -> None:
+    """Печатает, что записано в самом токене. Помогает не гадать при отказе."""
+    info = describe_token(token)
+
+    print()
+    _print("Что записано в вашем токене:")
+    _print(f"  длина {info['length']} символов, начинается на {info['preview']}")
+
+    if info["error"]:
+        _print(f"  ✗ {info['error']}")
+        _print("  Скорее всего токен вставился не целиком.")
+        _print("  В окне Windows сочетание Ctrl+V часто не работает —")
+        _print("  вставляйте щелчком ПРАВОЙ кнопки мыши.")
+        return
+
+    if info["expires_at"]:
+        when = info["expires_at"].strftime("%d.%m.%Y")
+        if info["expired"]:
+            _print(f"  ✗ срок действия истёк {when} — нужен новый токен")
+        else:
+            _print(f"  ✓ действует до {when}")
+
+    if info["sandbox"]:
+        _print("  ✗ это токен ТЕСТОВОГО контура")
+        _print("    При создании была отмечена галочка «Тестовый контур».")
+        _print("    К настоящему кабинету такой токен не подходит — отсюда отказ")
+        _print("    сразу по всем методам. Выпустите новый БЕЗ этой галочки.")
+    elif info["sandbox"] is False:
+        _print("  ✓ токен боевой, не тестовый")
+
+    if info["seller_id"]:
+        _print(f"  кабинет: {info['seller_id']}")
+
+
+def _explain_total_denial(token: str) -> None:
+    """Отказ сразу по всем методам — это обычно не про категории."""
+    print()
+    _print("Отказано во всех методах сразу — и в рекламе, и в заказах.")
+    _print("Когда не хватает одной категории, закрывается только она,")
+    _print("поэтому дело, скорее всего, в самом токене, а не в галочках.")
+    _describe_token_for_human(token)
+    print()
+    _print("Что проверить по порядку:")
+    _print("  1. Не отмечен ли «Тестовый контур» при создании токена.")
+    _print("  2. Тот ли это кабинет — токен работает только в своём.")
+    _print("  3. Целиком ли он вставился (см. длину выше — обычно 150–250 символов).")
+    _print("  4. Не истёк ли срок.")
+    print()
+    _print("Проще всего выпустить токен заново: Настройки → Доступ к API,")
+    _print("категории «Продвижение» и «Статистика», «Тестовый контур» — снять.")
+    _print("Потом запустите программу ещё раз, она спросит новый токен.")
+
+
 def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
     """Проверяет токен по всем методам, которые нужны сервису.
 
@@ -319,10 +407,16 @@ def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
     print()
 
     if failures:
+        # Отказ и в рекламе, и в заказах означает проблему с самим токеном,
+        # а не с набором категорий — тогда советовать «проверьте галочки» вредно.
+        if orders_ok is None and len(failures) >= 2:
+            _explain_total_denial(cfg.token)
+            return 1
         _print(f"Закрыто методов рекламы: {len(failures)}.")
         _print("Проверьте в кабинете, что у токена отмечена категория «Продвижение».")
         _print("Если она есть, а доступа нет — выпустите токен без галочки")
         _print("«Только на чтение»: статистика запрашивается методом POST.")
+        _describe_token_for_human(cfg.token)
         return 1
 
     if orders_ok is None:
@@ -466,10 +560,50 @@ def main(argv: list[str] | None = None) -> int:
     p_check.set_defaults(func=cmd_check)
 
     args = parser.parse_args(argv)
-    if not args.command:
-        # Без аргументов человеку нужен не список команд, а результат
-        return cmd_start(argparse.Namespace(days=30))
-    return args.func(args)
+    try:
+        if not args.command:
+            # Без аргументов человеку нужен не список команд, а результат
+            return cmd_start(argparse.Namespace(days=30))
+        return args.func(args)
+    except KeyboardInterrupt:
+        print()
+        _print("Остановлено.")
+        return 0
+    except Exception as exc:  # noqa: BLE001 — последний рубеж перед пользователем
+        return _report_crash(exc)
+
+
+def _report_crash(exc: BaseException) -> int:
+    """Показывает понятное сообщение вместо простыни с ошибкой.
+
+    Подробности сохраняются в файл: они нужны, только если придётся
+    разбираться, и не должны пугать в самом окне.
+    """
+    import traceback
+
+    log = ROOT / "ошибка.txt"
+    try:
+        log.write_text(
+            "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+            encoding="utf-8",
+        )
+        saved = f"Подробности сохранены в файл {log.name} рядом с программой."
+    except OSError:
+        saved = ""
+
+    print()
+    _print("Что-то пошло не так, и программа остановилась.")
+    _print(f"Причина: {exc}")
+    print()
+    _print("Что можно попробовать:")
+    _print("  1. Запустить программу ещё раз — часть сбоев разовые.")
+    _print("  2. Посмотреть демо-кабинет: python run.py demo, затем python run.py serve")
+    if saved:
+        print()
+        _print(saved)
+        _print("Пришлите этот файл — по нему будет видно, в чём дело.")
+    print()
+    return 1
 
 
 if __name__ == "__main__":
