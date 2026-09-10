@@ -28,7 +28,10 @@ def load_env(path: Path = ENV_FILE) -> None:
         key, _, value = line.partition("=")
         key = key.strip()
         value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
+        # Пустая переменная окружения не должна затенять значение из .env:
+        # иначе однажды экспортированный пустой WB_API_TOKEN навсегда
+        # перекрыл бы только что сохранённый токен.
+        if key and not os.environ.get(key, "").strip():
             os.environ[key] = value
 
 
@@ -49,6 +52,63 @@ def token_in_template(path: Path = ROOT / ".env.example") -> bool:
         if key.strip() == "WB_API_TOKEN" and value.strip().strip('"').strip("'"):
             return True
     return False
+
+
+def write_token(token: str, env_path: Path = ENV_FILE,
+                template: Path = ROOT / ".env.example") -> Path:
+    """Сохраняет токен в .env, сохраняя остальные настройки.
+
+    Если .env ещё нет — создаётся из шаблона, чтобы вместе с токеном
+    приехали и комментарии с объяснениями настроек.
+    """
+    token = token.strip().strip('"').strip("'")
+    if env_path.exists():
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    elif template.exists():
+        lines = template.read_text(encoding="utf-8").splitlines()
+    else:
+        lines = ["WB_API_TOKEN="]
+
+    replaced = False
+    for i, raw in enumerate(lines):
+        if raw.strip().startswith("WB_API_TOKEN="):
+            lines[i] = f"WB_API_TOKEN={token}"
+            replaced = True
+            break
+    if not replaced:
+        lines.append(f"WB_API_TOKEN={token}")
+
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return env_path
+
+
+def clear_template_token(template: Path = ROOT / ".env.example") -> bool:
+    """Убирает токен из шаблона: этот файл уходит в репозиторий."""
+    if not template.exists():
+        return False
+    lines = template.read_text(encoding="utf-8").splitlines()
+    changed = False
+    for i, raw in enumerate(lines):
+        if raw.strip().startswith("WB_API_TOKEN=") and raw.split("=", 1)[1].strip():
+            lines[i] = "WB_API_TOKEN="
+            changed = True
+    if changed:
+        template.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return changed
+
+
+def token_from_template(template: Path = ROOT / ".env.example") -> str:
+    """Достаёт токен, ошибочно вписанный в шаблон, чтобы перенести его в .env."""
+    if not template.exists():
+        return ""
+    for raw in template.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if key.strip() == "WB_API_TOKEN":
+            return value.strip().strip('"').strip("'")
+    return ""
 
 
 def _num(name: str, default: float) -> float:

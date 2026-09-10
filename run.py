@@ -1,22 +1,36 @@
 #!/usr/bin/env python3
 """Единая точка входа сервиса аналитики рекламы Wildberries.
 
-    python3 run.py demo       — заполнить базу демо-данными (без токена)
-    python3 run.py collect    — забрать данные из вашего кабинета WB
+Если не знаете, с чего начать — запустите без аргументов:
+
+    python3 run.py            — мастер: проведёт от токена до дашборда
+
+Отдельные шаги, если нужно вручную:
+
+    python3 run.py setup      — настроить токен (спросит и сохранит сам)
+    python3 run.py check      — проверить, что доступов хватает
+    python3 run.py collect    — забрать данные из кабинета WB
     python3 run.py serve      — открыть дашборд в браузере
-    python3 run.py report     — краткий отчёт прямо в консоли
-    python3 run.py check      — проверить, что токен работает
+    python3 run.py demo       — показать демо-кабинет без токена
+    python3 run.py report     — краткий отчёт прямо в окне команд
 """
 
 from __future__ import annotations
 
 import argparse
+import getpass
 import sys
-from datetime import date
+from datetime import date, datetime, timedelta
 
 from wbads import analytics, collector, db, demo
 from wbads.api import serve
-from wbads.config import load_config, token_in_template
+from wbads.config import (
+    clear_template_token,
+    load_config,
+    token_from_template,
+    token_in_template,
+    write_token,
+)
 from wbads.rules import money, pct, signed_pct
 from wbads.wb_client import WBAdvertClient, WBError, WBStatisticsClient
 
@@ -42,6 +56,159 @@ def _warn_token_in_template() -> None:
     _print("     git checkout .env.example")
     _print("   Токен окажется в .env — этот файл git игнорирует.")
     print()
+
+
+def _ask(question: str, default: str = "д") -> bool:
+    """Вопрос «да/нет». Пустой ответ = вариант по умолчанию."""
+    hint = "Д/н" if default == "д" else "д/Н"
+    try:
+        answer = input(f"  {question} [{hint}]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    if not answer:
+        return default == "д"
+    return answer[0] in ("д", "y", "1")
+
+
+def _ask_token() -> str:
+    """Спрашивает токен. Ввод скрыт, поэтому предупреждаем заранее."""
+    print()
+    _print("Откройте кабинет WB → Настройки → Доступ к API → Создать новый токен.")
+    _print("Отметьте категории «Продвижение» и «Статистика», скопируйте токен.")
+    print()
+    _print("Сейчас вставьте его сюда. Символы на экране НЕ появятся —")
+    _print("так и должно быть. Вставьте и нажмите Enter.")
+    print()
+    try:
+        return getpass.getpass("  Токен: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return ""
+
+
+def cmd_setup(args: argparse.Namespace, quiet_tail: bool = False) -> int:
+    """Настройка токена без ручного редактирования файлов."""
+    cfg = load_config()
+
+    # Частая ошибка: токен вписан в шаблон, который уходит в репозиторий.
+    # Молча переносим его в .env и чистим шаблон.
+    stray = token_from_template()
+    if stray:
+        _print("Нашла токен в файле .env.example — это шаблон, он уходит в репозиторий.")
+        write_token(stray)
+        clear_template_token()
+        _print("Перенесла токен в файл .env, шаблон очистила. Так безопасно.")
+        print()
+        return cmd_check(args, quiet_tail)
+
+    if cfg.has_token:
+        _print("Токен уже настроен.")
+        if not _ask("Заменить его на другой?", default="н"):
+            print()
+            return cmd_check(args, quiet_tail)
+
+    token = _ask_token()
+    if not token:
+        print()
+        _print("Токен не введён. Ничего не изменила.")
+        _print("Посмотреть сервис без токена можно так: python3 run.py demo")
+        return 1
+
+    path = write_token(token)
+    clear_template_token()
+    print()
+    _print(f"Токен сохранён в {path.name}. Этот файл никуда не отправляется.")
+    print()
+    return cmd_check(args, quiet_tail)
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    """Мастер запуска: проводит от токена до открытого дашборда.
+
+    Рассчитан на то, что человек не работает с командной строкой:
+    каждый шаг объясняется, на каждой развилке задаётся вопрос.
+    """
+    cfg = load_config()
+    print()
+    print("  Аналитика рекламы Wildberries")
+    print("  " + "─" * 52)
+    print()
+
+    # ── шаг 1: токен ─────────────────────────────────────────────────────
+    if token_from_template() or not cfg.has_token:
+        _print("Шаг 1 из 3. Доступ к кабинету.")
+        print()
+        if not cfg.has_token and not token_from_template():
+            _print("Токен ещё не настроен. Без него сервис покажет демо-кабинет")
+            _print("с придуманными данными — чтобы вы увидели, как всё устроено.")
+            print()
+            if not _ask("Настроить токен сейчас?"):
+                return _start_demo(cfg)
+        if cmd_setup(args, quiet_tail=True) != 0:
+            print()
+            _print("Не вышло. Покажу демо-кабинет, чтобы вы не ждали.")
+            return _start_demo(cfg)
+        cfg = load_config()
+    else:
+        _print("Шаг 1 из 3. Токен на месте.")
+    print()
+
+    # ── шаг 2: данные ────────────────────────────────────────────────────
+    _print("Шаг 2 из 3. Данные.")
+    with db.session(cfg.db_path) as conn:
+        last, _ = db.data_range(conn)
+        fresh = _data_is_fresh(conn)
+
+    if not last:
+        _print("Данных ещё нет — заберём их из кабинета.")
+        _print("Первый сбор идёт долго: WB отдаёт статистику раз в минуту.")
+        print()
+        if not _ask("Начать сбор?"):
+            return _start_demo(cfg)
+        need_collect = True
+    elif fresh:
+        _print("Данные свежие, собирать заново не нужно.")
+        need_collect = False
+    else:
+        _print("Данные устарели.")
+        need_collect = _ask("Обновить их из кабинета?")
+
+    if need_collect:
+        print()
+        collect_args = argparse.Namespace(days=args.days)
+        if cmd_collect(collect_args) != 0:
+            print()
+            _print("Сбор не удался. Открою дашборд на том, что уже есть.")
+    print()
+
+    # ── шаг 3: дашборд ───────────────────────────────────────────────────
+    _print("Шаг 3 из 3. Открываю дашборд в браузере.")
+    return cmd_serve(argparse.Namespace(port=None, no_browser=False))
+
+
+def _data_is_fresh(conn, hours: int = 20) -> bool:
+    """Свежие ли данные — чтобы не гонять долгий сбор без нужды."""
+    last = db.last_collect(conn)
+    if not last or not last["finished_at"]:
+        return False
+    try:
+        finished = datetime.fromisoformat(str(last["finished_at"]))
+    except ValueError:
+        return False
+    return (datetime.now() - finished) < timedelta(hours=hours)
+
+
+def _start_demo(cfg) -> int:
+    """Показывает демо-кабинет, когда реальных данных нет."""
+    print()
+    _print("Показываю демо-кабинет с придуманными данными.")
+    with db.session(cfg.db_path) as conn:
+        last, _ = db.data_range(conn)
+        if not last:
+            demo.generate(conn, days=60)
+    print()
+    return cmd_serve(argparse.Namespace(port=None, no_browser=False))
 
 
 def cmd_demo(args: argparse.Namespace) -> int:
@@ -83,7 +250,7 @@ def cmd_collect(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_check(args: argparse.Namespace) -> int:
+def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
     """Проверяет токен по всем методам, которые нужны сервису.
 
     Отвечает на вопрос «хватает ли моему токену доступа»: если какой-то
@@ -155,7 +322,8 @@ def cmd_check(args: argparse.Namespace) -> int:
         _print(f"Баланс кабинета: {money(balance['net'])} "
                f"(счёт {money(balance['balance'])}, бонусы {money(balance['bonus'])})")
     _print(f"Кампаний в кабинете: {len(ids)}")
-    _print("Дальше: python3 run.py collect --days 30")
+    if not quiet_tail:
+        _print("Дальше: python3 run.py collect --days 30")
     return 0
 
 
@@ -256,6 +424,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="command")
 
+    p_start = sub.add_parser("start", help="мастер: провести от токена до дашборда")
+    p_start.add_argument("--days", type=int, default=30, help="глубина сбора в днях")
+    p_start.set_defaults(func=cmd_start)
+
+    p_setup = sub.add_parser("setup", help="настроить токен без редактирования файлов")
+    p_setup.set_defaults(func=cmd_setup)
+
     p_demo = sub.add_parser("demo", help="заполнить базу демо-данными")
     p_demo.add_argument("--days", type=int, default=60, help="сколько дней истории (по умолчанию 60)")
     p_demo.set_defaults(func=cmd_demo)
@@ -279,8 +454,8 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if not args.command:
-        parser.print_help()
-        return 0
+        # Без аргументов человеку нужен не список команд, а результат
+        return cmd_start(argparse.Namespace(days=30))
     return args.func(args)
 
 
