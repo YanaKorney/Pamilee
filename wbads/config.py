@@ -54,6 +54,34 @@ def token_in_template(path: Path = ROOT / ".env.example") -> bool:
     return False
 
 
+TOKEN_DROP_FILE = ROOT / "token.txt"
+
+
+def token_from_file(path: Path = TOKEN_DROP_FILE) -> str:
+    """Забирает токен из файла token.txt и сразу удаляет его.
+
+    Запасной путь для тех, у кого не получается вставить текст в окно
+    командной строки: вставить в Блокнот умеет каждый. Файл удаляем,
+    чтобы токен не лежал в открытом виде рядом с программой.
+    """
+    if not path.exists():
+        return ""
+    try:
+        raw = path.read_text(encoding="utf-8-sig")
+    except OSError:
+        return ""
+
+    # Из Блокнота нередко приезжают кавычки, перевод строки и лишние пробелы
+    token = raw.strip().strip('"').strip("'").strip()
+    token = "".join(token.split())
+    if token:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    return token
+
+
 def write_token(token: str, env_path: Path = ENV_FILE,
                 template: Path = ROOT / ".env.example") -> Path:
     """Сохраняет токен в .env, сохраняя остальные настройки.

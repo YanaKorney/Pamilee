@@ -89,8 +89,10 @@ class TestSetupCommand(unittest.TestCase):
                     patch("run.write_token", lambda t: write_token(t, env, tpl)), \
                     patch("run.token_from_template", lambda: token_from_template(tpl)), \
                     patch("run.clear_template_token", lambda: clear_template_token(tpl)), \
-                    patch("run.getpass.getpass", lambda prompt="": typed_token), \
+                    patch("builtins.input", lambda prompt="": typed_token), \
                     patch("run.cmd_check", lambda a, quiet_tail=False: 0), \
+                    patch("run.token_from_file", lambda: ""), \
+                    patch("run._ask", lambda q, default="д": False), \
                     redirect_stdout(buffer):
                 code = cli.cmd_setup(Namespace())
             written = env.read_text(encoding="utf-8") if env.exists() else None
@@ -109,10 +111,11 @@ class TestSetupCommand(unittest.TestCase):
         self.assertIsNone(written)
         self.assertIn("demo", out)
 
-    def test_prompt_warns_that_input_is_hidden(self):
-        """Скрытый ввод пугает: «я вставила, а ничего не появилось»."""
-        _, out, _ = self.run_setup("abc")
-        self.assertIn("НЕ появятся", out)
+    def test_prompt_shows_how_to_paste(self):
+        """Раньше ввод был скрыт, и вставку нельзя было проверить глазами."""
+        _, out, _ = self.run_setup("aaa.bbb.ccc")
+        self.assertIn("виден на экране", out)
+        self.assertIn("token.txt", out)
 
 
 class TestStartWizard(unittest.TestCase):
@@ -199,6 +202,82 @@ class TestAsk(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTokenFromFile(unittest.TestCase):
+    """Запасной путь: токен через token.txt. Нужен тем, у кого не выходит
+    вставить текст в окно командной строки — а вставить в Блокнот умеет каждый."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "token.txt"
+
+    def test_reads_and_deletes_the_file(self):
+        from wbads.config import token_from_file
+        self.path.write_text("abc.def.ghi", encoding="utf-8")
+        self.assertEqual(token_from_file(self.path), "abc.def.ghi")
+        self.assertFalse(self.path.exists(), "файл с токеном должен удаляться")
+
+    def test_survives_what_notepad_adds(self):
+        """Блокнот добавляет BOM, кавычки, перевод строки и пробелы."""
+        from wbads.config import token_from_file
+        self.path.write_text('\ufeff  "abc.def.ghi"  \n', encoding="utf-8")
+        self.assertEqual(token_from_file(self.path), "abc.def.ghi")
+
+    def test_strips_internal_line_breaks(self):
+        """При копировании из браузера токен иногда приезжает с переносами."""
+        from wbads.config import token_from_file
+        self.path.write_text("abc.\ndef.\nghi\n", encoding="utf-8")
+        self.assertEqual(token_from_file(self.path), "abc.def.ghi")
+
+    def test_missing_file_gives_empty(self):
+        from wbads.config import token_from_file
+        self.assertEqual(token_from_file(self.path), "")
+
+    def test_empty_file_is_kept(self):
+        """Пустой файл не удаляем: человек, возможно, ещё не вставил токен."""
+        from wbads.config import token_from_file
+        self.path.write_text("   \n", encoding="utf-8")
+        self.assertEqual(token_from_file(self.path), "")
+        self.assertTrue(self.path.exists())
+
+
+class TestVisibleTokenPrompt(unittest.TestCase):
+    """Ввод токена виден на экране: скрытый ввод не давал понять,
+    сработала ли вставка, и это оказалось главной причиной затыка."""
+
+    def prompt(self, typed: str, platform: str = "win32") -> str:
+        buffer = io.StringIO()
+        with patch("builtins.input", lambda p="": typed), \
+                patch("run.sys.platform", platform), \
+                redirect_stdout(buffer):
+            cli._ask_token()
+        return buffer.getvalue()
+
+    def test_explains_how_to_paste_on_windows(self):
+        out = self.prompt("abc")
+        self.assertIn("ПРАВОЙ кнопкой", out)
+        self.assertIn("Ctrl+V", out)
+
+    def test_offers_the_file_fallback(self):
+        out = self.prompt("abc")
+        self.assertIn("token.txt", out)
+        self.assertIn("Блокнот", out)
+
+    def test_says_the_token_will_be_visible(self):
+        out = self.prompt("abc")
+        self.assertIn("виден на экране", out)
+
+    def test_empty_input_reads_the_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            drop = Path(tmp) / "token.txt"
+            drop.write_text("aaa.bbb.ccc", encoding="utf-8")
+            with patch("builtins.input", lambda p="": ""), \
+                    patch("run.token_from_file", lambda: "aaa.bbb.ccc"), \
+                    patch("run.TOKEN_DROP_FILE", drop), \
+                    redirect_stdout(io.StringIO()):
+                self.assertEqual(cli._ask_token(), "aaa.bbb.ccc")
 
 
 class TestPortFallback(unittest.TestCase):

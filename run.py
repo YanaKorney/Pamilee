@@ -32,15 +32,16 @@ if sys.version_info < (3, 9):
     raise SystemExit(1)
 
 import argparse
-import getpass
 from datetime import date, datetime, timedelta
 
 from wbads import analytics, collector, db, demo
 from wbads.api import serve
 from wbads.config import (
     ROOT,
+    TOKEN_DROP_FILE,
     clear_template_token,
     load_config,
+    token_from_file,
     token_from_template,
     token_in_template,
     write_token,
@@ -91,23 +92,48 @@ def _ask(question: str, default: str = "д") -> bool:
 
 
 def _ask_token() -> str:
-    """Спрашивает токен. Ввод скрыт, поэтому предупреждаем заранее."""
+    """Спрашивает токен — видимым вводом и с запасным путём через файл.
+
+    Скрытый ввод здесь только мешал: вставить в окно командной строки
+    получается не у всех, а увидеть, вставилось ли, было нельзя вообще.
+    Токен всё равно ложится в файл на этом же компьютере, так что прятать
+    его от самого владельца смысла нет.
+    """
     print()
     _print("Откройте кабинет WB → Настройки → Доступ к API → Создать новый токен.")
     _print("Отметьте категории «Продвижение» и «Статистика», скопируйте токен.")
     print()
-    _print("Сейчас вставьте его сюда. Символы на экране НЕ появятся —")
-    _print("так и должно быть. Вставьте и нажмите Enter.")
     if sys.platform == "win32":
-        print()
-        _print("В этом окне Ctrl+V часто не работает: вставляйте щелчком")
-        _print("ПРАВОЙ кнопки мыши.")
+        _print("Вставить в это окно можно так:")
+        _print("  • щелчок ПРАВОЙ кнопкой мыши (обычно срабатывает сразу);")
+        _print("  • если правая кнопка открыла меню — выберите в нём «Вставить»;")
+        _print("  • или Ctrl+V.")
+    else:
+        _print("Вставьте токен: ⌘+V (Mac) или Ctrl+Shift+V (Linux).")
+    _print("Токен будет виден на экране — так вы сразу увидите, что он вставился.")
     print()
+    _print("Не получается вставить? Тогда сделайте так:")
+    _print(f"  1. Создайте рядом с программой файл token.txt")
+    _print("  2. Вставьте туда токен через Блокнот и сохраните")
+    _print("  3. Вернитесь сюда и просто нажмите Enter")
+    _print("  Программа возьмёт токен из файла и удалит его.")
+    print()
+
     try:
-        return getpass.getpass("  Токен: ").strip()
+        typed = input("  Токен (или Enter, если положили в token.txt): ").strip()
     except (EOFError, KeyboardInterrupt):
         print()
         return ""
+
+    if typed:
+        return typed
+
+    from_file = token_from_file()
+    if from_file:
+        print()
+        _print(f"Взяла токен из файла {TOKEN_DROP_FILE.name} и удалила его.")
+        return from_file
+    return ""
 
 
 def cmd_setup(args: argparse.Namespace, quiet_tail: bool = False) -> int:
@@ -131,12 +157,29 @@ def cmd_setup(args: argparse.Namespace, quiet_tail: bool = False) -> int:
             print()
             return cmd_check(args, quiet_tail)
 
-    token = _ask_token()
-    if not token:
+    token = ""
+    for attempt in (1, 2, 3):
+        token = _ask_token()
+        if not token:
+            print()
+            _print("Токен не введён.")
+            if attempt < 3 and _ask("Попробовать ещё раз?"):
+                continue
+            _print("Ничего не изменила.")
+            _print("Посмотреть сервис без токена можно так: python run.py demo")
+            return 1
+
+        info = describe_token(token)
+        if not info["error"]:
+            break
         print()
-        _print("Токен не введён. Ничего не изменила.")
-        _print("Посмотреть сервис без токена можно так: python3 run.py demo")
-        return 1
+        _print(f"Получено {info['length']} символов — это не похоже на токен WB.")
+        _print(f"({info['error']})")
+        _print("Обычно токен длиной 150–250 символов и начинается на eyJ.")
+        if attempt < 3 and _ask("Попробовать ещё раз?"):
+            continue
+        _print("Сохраню как есть, но, скорее всего, он не заработает.")
+        break
 
     path = write_token(token)
     clear_template_token()
