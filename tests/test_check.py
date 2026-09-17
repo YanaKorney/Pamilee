@@ -94,6 +94,83 @@ class TestCheck(unittest.TestCase):
         self.assertIn("Продвижение", out)
 
 
+class TestNetworkVsAuth(unittest.TestCase):
+    """Сетевой сбой и просроченный сертификат не имеют отношения к токену.
+    Раньше программа сваливала их в кучу с отказом доступа и советовала
+    перевыпустить исправный токен — это уводило в сторону."""
+
+    @staticmethod
+    def tls_error(*args, **kwargs):
+        from wbads.wb_client import WBError, explain_tls_error
+        raise WBError(
+            explain_tls_error("certificate verify failed: certificate has expired"),
+            kind="tls",
+        )
+
+    @staticmethod
+    def network_error(*args, **kwargs):
+        from wbads.wb_client import WBError
+        raise WBError("Не удалось связаться с Wildberries.\nПроверьте интернет.",
+                      kind="network")
+
+    def test_tls_failure_does_not_blame_the_token(self):
+        code, out = run_check({"balance": self.tls_error,
+                               "campaign_ids": self.tls_error},
+                              orders={"orders": self.tls_error})
+        self.assertEqual(code, 1)
+        self.assertIn("НЕ про токен", out)
+        self.assertIn("Дата и время на этом компьютере", out)
+        self.assertNotIn("выпустите токен заново", out)
+        self.assertNotIn("Тестовый контур", out)
+
+    def test_tls_advice_printed_once_not_per_method(self):
+        """Длинное объяснение не должно повторяться под каждым методом."""
+        _, out = run_check({"balance": self.tls_error,
+                            "campaign_ids": self.tls_error},
+                           orders={"orders": self.tls_error})
+        self.assertEqual(out.count("Дата и время на этом компьютере"), 1)
+
+    def test_network_failure_suggests_checking_internet(self):
+        code, out = run_check({"balance": self.network_error,
+                               "campaign_ids": self.network_error},
+                              orders={"orders": self.network_error})
+        self.assertEqual(code, 1)
+        self.assertIn("связаться с Wildberries", out)
+        self.assertNotIn("Тестовый контур", out)
+
+    def test_real_403_still_diagnoses_the_token(self):
+        """А вот настоящий отказ доступа по-прежнему разбирает токен."""
+        code, out = run_check({"balance": denied, "campaign_ids": denied},
+                              orders={"orders": denied})
+        self.assertEqual(code, 1)
+        self.assertIn("Что записано в вашем токене", out)
+
+    def test_offers_demo_while_connection_is_broken(self):
+        _, out = run_check({"balance": self.tls_error,
+                            "campaign_ids": self.tls_error},
+                           orders={"orders": self.tls_error})
+        self.assertIn("demo", out)
+
+
+class TestTlsExplanation(unittest.TestCase):
+    def test_shows_the_machine_clock(self):
+        """Сбитые дата и время — самая частая причина «сертификат просрочен»."""
+        from datetime import datetime
+        from wbads.wb_client import explain_tls_error
+        text = explain_tls_error("certificate has expired")
+        self.assertIn(datetime.now().strftime("%d.%m.%Y"), text)
+
+    def test_keeps_the_technical_reason(self):
+        from wbads.wb_client import explain_tls_error
+        text = explain_tls_error("certificate verify failed: certificate has expired")
+        self.assertIn("certificate verify failed", text)
+
+    def test_mentions_antivirus_and_proxy(self):
+        from wbads.wb_client import explain_tls_error
+        text = explain_tls_error("certificate has expired")
+        self.assertIn("Антивирус", text)
+
+
 class TestTokenInTemplate(unittest.TestCase):
     """Токен, вписанный в .env.example, обязан быть замечен.
 

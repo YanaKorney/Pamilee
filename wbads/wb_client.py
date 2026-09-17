@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import base64
 import json
+import ssl
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -45,11 +47,61 @@ Progress = Callable[[str], None]
 
 
 class WBError(RuntimeError):
-    """Ошибка обращения к API WB с человеческим объяснением."""
+    """Ошибка обращения к API WB с человеческим объяснением.
 
-    def __init__(self, message: str, status: int | None = None) -> None:
+    kind различает причины, потому что лечатся они по-разному:
+        "http"    — WB ответил и отказал: дело в токене или правах
+        "tls"     — не удалось проверить защищённое соединение
+        "network" — до WB вообще не дошли: сеть, прокси, брандмауэр
+    Без этого различия сетевой сбой выглядел как проблема с токеном,
+    и человек шёл перевыпускать исправный токен.
+    """
+
+    def __init__(self, message: str, status: int | None = None,
+                 kind: str = "http") -> None:
         super().__init__(message)
         self.status = status
+        self.kind = kind
+
+
+def explain_tls_error(reason: object) -> str:
+    """Объясняет отказ проверки сертификата — и сразу показывает, куда смотреть.
+
+    Самая частая причина «сертификат просрочен» на стороне клиента —
+    неверные дата и время на компьютере: при сбитой дате любой сертификат
+    выглядит недействительным. Поэтому печатаем текущую дату машины:
+    ошибку видно глазами.
+    """
+    now = datetime.now()
+    text = str(reason)
+    lines = [
+        "Не удалось проверить защищённое соединение с Wildberries.",
+        "Это НЕ про токен — до проверки доступа дело даже не дошло.",
+        "",
+        f"Дата и время на этом компьютере: {now:%d.%m.%Y %H:%M}.",
+        "Если они неверные — исправьте и запустите программу снова.",
+        "При сбитой дате любой сертификат выглядит просроченным,",
+        "и это самая частая причина такой ошибки.",
+        "",
+        "Если дата верная, то по порядку:",
+        "  1. Антивирус или корпоративный прокси, проверяющий защищённые",
+        "     соединения своим сертификатом. Отключите такую проверку",
+        "     для python.exe или попробуйте другую сеть — например,",
+        "     телефон как точку доступа.",
+    ]
+    if sys.platform == "darwin":
+        lines.append("  2. На Mac: откройте папку установленного Python "
+                     "и запустите «Install Certificates.command».")
+    elif sys.platform == "win32":
+        lines.append("  2. Установите обновления Windows: с ними приезжают "
+                     "свежие корневые сертификаты.")
+    else:
+        lines.append("  2. Обновите системные корневые сертификаты "
+                     "(пакет ca-certificates).")
+    lines.append("  3. Обновите Python до последней версии с python.org.")
+    lines.append("")
+    lines.append(f"Техническая причина: {text}")
+    return "\n".join(lines)
 
 
 def explain_status(status: int, scope: str = "Продвижение") -> str:
@@ -169,11 +221,26 @@ class _BaseClient:
                     delay *= 2
                     continue
                 raise WBError(explain_status(exc.code, self.scope), exc.code) from exc
-            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            except urllib.error.URLError as exc:
+                reason = getattr(exc, "reason", None)
+                # Отказ проверки сертификата повторять бессмысленно:
+                # он не временный и от повтора не исправится.
+                if isinstance(reason, ssl.SSLCertVerificationError) or \
+                        "CERTIFICATE_VERIFY" in str(reason):
+                    raise WBError(explain_tls_error(reason), kind="tls") from exc
                 last_error = exc
                 time.sleep(delay)
                 delay *= 2
-        raise WBError(f"Не удалось получить данные от WB: {last_error}")
+            except (TimeoutError, json.JSONDecodeError) as exc:
+                last_error = exc
+                time.sleep(delay)
+                delay *= 2
+        raise WBError(
+            "Не удалось связаться с Wildberries.\n"
+            "Проверьте подключение к интернету и попробуйте снова.\n"
+            f"Техническая причина: {last_error}",
+            kind="network",
+        )
 
 
 class _MinuteLimited(_BaseClient):

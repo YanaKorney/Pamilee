@@ -413,16 +413,19 @@ def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
     print()
 
     failures: list[str] = []
+    problems: list[WBError] = []
     ids: list[int] = []
 
     def probe(label: str, method: str, call) -> object:
-        nonlocal failures
         try:
             result = call()
         except WBError as exc:
             print(f"  ✗ {label:<26} {method}")
-            print(f"    {exc}")
+            # Многострочные объяснения печатаем один раз в конце, а не
+            # по три копии подряд — здесь только суть.
+            print(f"    {str(exc).splitlines()[0]}")
             failures.append(label)
+            problems.append(exc)
             return None
         print(f"  ✓ {label:<26} {method}")
         return result
@@ -450,6 +453,19 @@ def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
     print()
 
     if failures:
+        # Сначала разбираемся, WB вообще отвечал или до него не дошли.
+        # Сетевой сбой и просроченный сертификат не имеют отношения
+        # к токену, и советовать его перевыпустить — вредно.
+        blocked = next((e for e in problems if e.kind in ("tls", "network")), None)
+        if blocked is not None:
+            print()
+            for line in str(blocked).splitlines():
+                print(f"  {line}" if line else "")
+            print()
+            _print("Пока это не решится, можно посмотреть демо-кабинет:")
+            _print("  python run.py demo   затем   python run.py serve")
+            return 1
+
         # Отказ и в рекламе, и в заказах означает проблему с самим токеном,
         # а не с набором категорий — тогда советовать «проверьте галочки» вредно.
         if orders_ok is None and len(failures) >= 2:
