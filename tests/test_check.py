@@ -171,6 +171,57 @@ class TestTlsExplanation(unittest.TestCase):
         self.assertIn("Антивирус", text)
 
 
+class TestClockPlausibility(unittest.TestCase):
+    """Порядок советов при сбое сертификата зависит от того, похожи ли часы
+    на верные: гонять человека в настройки времени, когда дата в порядке,
+    значит уводить его от настоящей причины."""
+
+    @staticmethod
+    def token(days_left: int) -> str:
+        import base64
+        import json
+        import time
+        enc = lambda d: base64.urlsafe_b64encode(  # noqa: E731
+            json.dumps(d).encode()).decode().rstrip("=")
+        payload = {"exp": int(time.time()) + days_left * 86400, "t": False}
+        return f"{enc({'alg': 'ES256'})}.{enc(payload)}.signature"
+
+    def test_fresh_token_means_clock_is_fine(self):
+        from wbads.wb_client import clock_looks_plausible
+        self.assertTrue(clock_looks_plausible(self.token(166)))
+
+    def test_long_expired_token_means_clock_is_suspect(self):
+        from wbads.wb_client import clock_looks_plausible
+        self.assertFalse(clock_looks_plausible(self.token(-500)))
+
+    def test_absurdly_distant_expiry_is_suspect(self):
+        """Токены WB не выпускают на годы вперёд — значит, часы сбиты назад."""
+        from wbads.wb_client import clock_looks_plausible
+        self.assertFalse(clock_looks_plausible(self.token(3000)))
+
+    def test_unreadable_token_gives_no_verdict(self):
+        from wbads.wb_client import clock_looks_plausible
+        self.assertIsNone(clock_looks_plausible("мусор"))
+
+    def test_plausible_clock_points_at_antivirus(self):
+        from wbads.wb_client import explain_tls_error
+        text = explain_tls_error("certificate has expired", self.token(166))
+        self.assertIn("похожа на правильную", text)
+        self.assertNotIn("часы на компьютере сбиты", text)
+
+    def test_broken_clock_points_at_the_clock(self):
+        from wbads.wb_client import explain_tls_error
+        text = explain_tls_error("certificate has expired", self.token(-500))
+        self.assertIn("часы на компьютере сбиты", text)
+        self.assertIn("Установить время автоматически", text)
+
+    def test_suggests_the_recheck_file(self):
+        """После правки настроек нужен быстрый способ перепроверить."""
+        from wbads.wb_client import explain_tls_error
+        text = explain_tls_error("certificate has expired", self.token(166))
+        self.assertIn("CHECK-Windows.bat", text)
+
+
 class TestTokenInTemplate(unittest.TestCase):
     """Токен, вписанный в .env.example, обязан быть замечен.
 
