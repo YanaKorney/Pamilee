@@ -630,7 +630,7 @@ class TestPlanAnalysis(TestBase):
         fake = FakeProvider("Извините, я не могу прочитать этот чертёж.")
         with self.assertRaises(UserError) as caught:
             analyse_page(1, self.PDF, 1, True, 74.37, provider=fake)
-        self.assertIn("планировку", caught.exception.message)
+        self.assertIn("разобрать ответ", caught.exception.message)
         self.assertTrue(caught.exception.hint)
 
     def test_scale_from_dimension_lines_when_unknown(self) -> None:
@@ -1235,3 +1235,58 @@ class TestMessagesDoNotSendPeopleHunting(TestBase):
         self.assertIn("ключа доступа", body["error"])
         self.assertIn("Настройки", body["hint"])
         self.client.delete(f"/api/projects/{project_id}")
+
+
+class TestTruncatedAnswerIsRescued(TestBase):
+    """Оборванный ответ модели не должен пропадать целиком.
+
+    Модель пишет длинный список комнат и иногда не успевает его
+    дописать. Обрывок всё равно ценен: комнаты в нём уже есть.
+    """
+
+    PDF = BASE_DIR / "tests" / "fixtures" / "plan-zastroyshchik.pdf"
+
+    def test_cut_off_json_is_repaired(self) -> None:
+        from app.plan_analysis import parse_answer
+        broken = (
+            '{"page_kind":"dimensioned_plan","rooms":['
+            '{"name":"Гостиная","kind":"living","polygon":[[0,0],[100,0],[100,80],[0,80]]},'
+            '{"name":"Спальня","kind":"bedroom","polygon":[[0,80],[100,80],[100,'
+        )
+        data = parse_answer(broken, finish_reason="length")
+        self.assertEqual(len(data["rooms"]), 1, "Целая комната должна уцелеть")
+        self.assertEqual(data["rooms"][0]["name"], "Гостиная")
+
+    def test_whole_answer_still_parses(self) -> None:
+        from app.plan_analysis import parse_answer
+        data = parse_answer('{"rooms":[{"name":"Кухня"}],"items":[]}')
+        self.assertEqual(data["rooms"][0]["name"], "Кухня")
+
+    def test_hopeless_answer_explains_what_to_do(self) -> None:
+        from app.plan_analysis import parse_answer
+        with self.assertRaises(UserError) as caught:
+            parse_answer("Извините, я не могу прочитать этот чертёж.", "stop")
+        error = caught.exception
+        self.assertIn("Настройк", error.hint, "Подсказка должна вести в настройки")
+        self.assertTrue(error.technical, "Разработчику нужен кусок ответа")
+        self.assertIn("Извините", error.technical)
+
+    def test_length_limit_is_named_plainly(self) -> None:
+        from app.plan_analysis import parse_answer
+        with self.assertRaises(UserError) as caught:
+            parse_answer('{"rooms":[{"name":"Обор', "length")
+        self.assertIn("оборвался", caught.exception.message)
+        self.assertNotIn("JSON", caught.exception.message)
+
+    def test_rescued_answer_reaches_the_rooms(self) -> None:
+        """Проверка целиком: оборванный ответ всё равно даёт комнаты."""
+        from app.plan_analysis import analyse_page
+        broken = (
+            '{"page_kind":"dimensioned_plan","rooms":['
+            '{"name":"Гостиная","kind":"living","polygon":[[100,100],[400,100],[400,300],[100,300]]},'
+            '{"name":"Кухня","kind":"kitchen","polygon":[[400,100],[600'
+        )
+        fake = FakeProvider(broken)
+        result = analyse_page(1, self.PDF, 1, True, 74.37, provider=fake)
+        self.assertEqual(len(result.rooms), 1)
+        self.assertEqual(result.rooms[0].name, "Гостиная")

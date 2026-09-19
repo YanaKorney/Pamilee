@@ -28,6 +28,9 @@ class TextAnswer:
     input_tokens: int = 0
     output_tokens: int = 0
     model: str = ""
+    # Чем ответ закончился: "stop" — модель договорила,
+    # "length" — упёрлась в предел и оборвалась на полуслове.
+    finish_reason: str = ""
 
 
 class AiProvider(Protocol):

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from . import ai, db, geometry
-from .errors import UserError, get_logger, plan_not_recognised, scale_unknown
+from .errors import UserError, get_logger, scale_unknown
 from .plan_vector import VectorPlan, read_plan
 
 log = get_logger()
@@ -207,6 +207,10 @@ def build_prompt(
     return f"""Ты разбираешь лист дизайн-проекта квартиры. Отвечай ТОЛЬКО одним
 объектом JSON, без пояснений и без markdown.
 
+Ответ должен быть КОМПАКТНЫМ: без отступов и переносов строк, без
+рассуждений до или после него. Все проверки делай про себя, в ответ
+пиши только итог. Длинный ответ не поместится и пропадёт целиком.
+
 Картинка: {width_px}×{height_px} пикселей. Начало координат — левый верхний
 угол, X вправо, Y вниз. ВСЕ координаты в ответе — в пикселях этой картинки.
 
@@ -220,7 +224,8 @@ def build_prompt(
    развертка стены ("elevation") или иное ("other").
 
 2. ПОМЕЩЕНИЯ. Обведи каждое помещение многоугольником по внутренним
-   граням стен. Для прямоугольной комнаты хватит 4 точек, для Г-образной — 6.
+   граням стен. Для прямоугольной комнаты ровно 4 точки, для Г-образной 6.
+   Больше 8 точек не используй: лишняя подробность только вредит.
    Название дай по-русски и по назначению: Гостиная, Спальня, Детская, Кухня,
    Кухня-гостиная, Прихожая, Коридор, Гардеробная, Ванная, Санузел, Лоджия.
    Если рядом подписана площадь — укажи её в area_m2.
@@ -228,7 +233,9 @@ def build_prompt(
 
 3. ПРОЁМЫ. Отметь двери и окна: точку в середине проёма и ширину в пикселях.
 
-4. МЕБЕЛЬ, САНТЕХНИКА И ТЕХНИКА. Для каждого предмета укажи центр,
+4. МЕБЕЛЬ, САНТЕХНИКА И ТЕХНИКА. Отметь только то, что занимает место:
+   мебель, сантехнику, крупную технику. Мелкий декор, ковры, растения
+   и надписи на чертеже пропускай. Для каждого предмета укажи центр,
    ширину и глубину в пикселях, поворот в градусах (0 — предмет стоит
    как нарисован) и уверенность от 0 до 1. Ставь низкую уверенность, если
    не уверен: такие предметы будут подсвечены для проверки человеком.
@@ -263,23 +270,109 @@ def build_prompt(
 планировку. Лучше отметить низкой уверенностью, чем угадать."""
 
 
-def parse_answer(text: str) -> dict[str, Any]:
-    """Достаёт JSON из ответа, даже если модель обернула его в markdown."""
+def _repair_truncated(text: str) -> str | None:
+    """Пытается починить ответ, оборвавшийся на полуслове.
+
+    Модель пишет длинный список комнат и предметов и иногда не успевает
+    дописать его до конца. Обрывок всё равно ценен: отрезаем недописанный
+    кусок по последнему целому элементу и закрываем скобки.
+    """
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    last_safe = -1
+
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append("}" if char == "{" else "]")
+        elif char in "}]":
+            if stack:
+                stack.pop()
+            if stack:
+                last_safe = index
+        elif char == "," and stack:
+            last_safe = index - 1
+
+    if last_safe < 0 or not stack:
+        return None
+
+    healed = text[:last_safe + 1]
+    # Пересчитываем, что осталось незакрытым после обрезки
+    stack = []
+    in_string = False
+    escaped = False
+    for char in healed:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append("}" if char == "{" else "]")
+        elif char in "}]" and stack:
+            stack.pop()
+    return healed + "".join(reversed(stack))
+
+
+def parse_answer(text: str, finish_reason: str = "") -> dict[str, Any]:
+    """Достаёт JSON из ответа, даже если модель обернула его в markdown
+    или не успела дописать."""
     cleaned = text.strip()
     fence = re.search(r"```(?:json)?\s*(.+?)```", cleaned, re.S)
     if fence:
         cleaned = fence.group(1).strip()
-    start, end = cleaned.find("{"), cleaned.rfind("}")
-    if start >= 0 and end > start:
-        cleaned = cleaned[start:end + 1]
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        log.warning("Ответ модели не разобран: %s", text[:400])
-        raise plan_not_recognised() from exc
-    if not isinstance(data, dict):
-        raise plan_not_recognised()
-    return data
+    start = cleaned.find("{")
+    if start >= 0:
+        end = cleaned.rfind("}")
+        cleaned = cleaned[start:end + 1] if end > start else cleaned[start:]
+
+    for candidate in (cleaned, _repair_truncated(cleaned)):
+        if not candidate:
+            continue
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            if candidate is not cleaned:
+                log.warning("Ответ модели оборвался — восстановлена часть")
+            return data
+
+    log.warning(
+        "Ответ модели не разобран (окончание: %s): %s",
+        finish_reason or "неизвестно", text[:600],
+    )
+    snippet = text.strip()[:200].replace("\n", " ")
+    if finish_reason == "length":
+        raise UserError(
+            "Ответ получился слишком длинным и оборвался.",
+            "Попробуйте ещё раз — обычно со второго раза проходит. "
+            "Если повторяется, выберите в «Настройках» другую модель "
+            "для чтения чертежа.",
+            technical=f"ответ оборван по пределу длины: {snippet}",
+        )
+    raise UserError(
+        "Не удалось разобрать ответ сервиса.",
+        "Попробуйте ещё раз. Если повторяется — выберите в «Настройках» "
+        "другую модель для чтения чертежа: не все модели умеют отвечать "
+        "строго по форме.",
+        technical=f"окончание: {finish_reason or 'неизвестно'}; ответ: {snippet}",
+    )
 
 
 # ── Масштаб ───────────────────────────────────────────────────────────────
@@ -542,9 +635,11 @@ def analyse_page(
     )
     prompt = build_prompt(plan, width_px, height_px, known_mm_per_px, factor)
     service = provider or ai.plan_provider()
-    answer = service.ask(ai.plan_model(), prompt, images=[image], max_tokens=16000)
+    # Запас по длине ответа: список комнат с мебелью бывает объёмным,
+    # а оборванный ответ теряется целиком.
+    answer = service.ask(ai.plan_model(), prompt, images=[image], max_tokens=32000)
 
-    result = interpret(parse_answer(answer.text), plan, factor)
+    result = interpret(parse_answer(answer.text, answer.finish_reason), plan, factor)
     result.input_tokens = answer.input_tokens
     result.output_tokens = answer.output_tokens
     log.info(

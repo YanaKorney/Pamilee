@@ -216,9 +216,15 @@ class OpenAiCompatProvider:
             ) from exc
 
         usage = payload.get("usage") or {}
+        finish = ""
+        try:
+            finish = str(payload["choices"][0].get("finish_reason") or "")
+        except (KeyError, IndexError, TypeError):
+            pass
         return TextAnswer(
             text=text or "",
             input_tokens=int(usage.get("prompt_tokens") or 0),
             output_tokens=int(usage.get("completion_tokens") or 0),
             model=str(payload.get("model") or model),
+            finish_reason=finish,
         )

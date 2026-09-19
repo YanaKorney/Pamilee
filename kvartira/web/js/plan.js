@@ -1,6 +1,6 @@
 // Страница «Планировка»: загрузка файлов дизайн-проекта и их просмотр.
 
-import { api, el, showError, toast, plural, formatDate, formatArea } from './api.js';
+import { api, el, showError, technicalNote, toast, plural, formatDate, formatArea } from './api.js';
 
 const projectId = Number(window.location.pathname.split('/')[2]);
 const docsBox = document.getElementById('docs');
@@ -149,6 +149,13 @@ function analyseButton(pageId, host) {
             toast('План разобран', `Найдено помещений: ${data.rooms.length}`, 'ok');
         } catch (err) {
             showError(err);
+            // Ошибку оставляем на странице: её текст можно скопировать
+            // и прислать разработчику, в отличие от всплывающей подсказки.
+            host.replaceChildren(el('div', { class: 'notice notice-error' }, [
+                el('strong', { text: (err && err.error) || 'Не получилось разобрать план.' }),
+                el('div', { class: 'small', text: (err && err.hint) || '' }),
+                technicalNote(err && err.technical),
+            ]));
         } finally {
             button.disabled = false;
             button.textContent = original;
