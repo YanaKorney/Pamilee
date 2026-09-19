@@ -65,7 +65,7 @@ function facts(project) {
         ['Общая площадь', project.declared_area_m2 ? formatArea(project.declared_area_m2) : 'не указана'],
         ['Листов плана', String(project.plan_pages ?? 0)],
         ['Комнат найдено', String(project.room_count ?? 0)],
-        ['Файлов на диске', (project.disk_mb ?? 0) + ' МБ'],
+        ['Файлов на диске', String(project.disk_mb ?? 0).replace('.', ',') + ' МБ'],
     ];
     return el('div', { class: 'stat-row' }, items.map(([k, v]) =>
         el('div', { class: 'stat' }, [
