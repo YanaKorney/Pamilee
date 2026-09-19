@@ -11,7 +11,7 @@ const SECTIONS = [
     {
         key: 'plan', icon: '📄', title: 'Планировка',
         text: 'Загрузите PDF или фото плана — программа найдёт комнаты, стены, окна и мебель.',
-        href: (id) => `/project/${id}/plan`, ready: false,
+        href: (id) => `/project/${id}/plan`, ready: true,
     },
     {
         key: 'rooms', icon: '🚪', title: 'Комнаты',
@@ -63,6 +63,7 @@ function facts(project) {
     const items = [
         ['Высота потолка', metres(project.ceiling_height_mm)],
         ['Общая площадь', project.declared_area_m2 ? formatArea(project.declared_area_m2) : 'не указана'],
+        ['Листов плана', String(project.plan_pages ?? 0)],
         ['Комнат найдено', String(project.room_count ?? 0)],
         ['Файлов на диске', (project.disk_mb ?? 0) + ' МБ'],
     ];
@@ -123,6 +124,25 @@ function settingsCard(project) {
     ]);
 }
 
+function startHere(project) {
+    const done = (project.plan_files ?? 0) > 0;
+    return el('div', { class: 'notice', style: 'margin-top:26px' }, [
+        el('strong', { text: done ? 'План загружен' : 'С чего начать' }),
+        el('div', { class: 'small', text: done
+            ? 'Дизайн-проект загружен. Следующий шаг — разобрать его на комнаты; '
+              + 'этот шаг появится в ближайшем обновлении программы.'
+            : 'Первый шаг — загрузить дизайн-проект: план квартиры, план мебели, '
+              + 'развертки стен. Подойдут PDF и фотографии.' }),
+        el('div', { style: 'margin-top:12px' }, [
+            el('a', {
+                class: done ? 'btn' : 'btn btn-primary',
+                href: `/project/${project.id}/plan`,
+                text: done ? 'Открыть планировку' : 'Загрузить дизайн-проект',
+            }),
+        ]),
+    ]);
+}
+
 async function load() {
     try {
         const project = await api.get(`/api/projects/${projectId}`);
@@ -133,14 +153,7 @@ async function load() {
             el('h1', { text: project.name }),
             facts(project),
 
-            el('div', { class: 'notice', style: 'margin-top:26px' }, [
-                el('strong', { text: 'С чего начать' }),
-                el('div', {
-                    class: 'small',
-                    text: 'Следующий шаг — загрузить дизайн-проект в разделе «Планировка». '
-                        + 'Этот раздел появится в ближайшем обновлении программы.',
-                }),
-            ]),
+            startHere(project),
 
             el('h2', { text: 'Разделы' }),
             el('div', { class: 'cards cards-3' }, SECTIONS.map((s) => sectionTile(s, project))),

@@ -6,14 +6,15 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import __version__, db, storage
+from . import __version__, db, plan_files, storage
 from .config import WEB_DIR, settings
 from .errors import UserError, get_logger, project_not_found
 
@@ -111,6 +112,7 @@ def api_get_project(project_id: int) -> dict[str, Any]:
     project = db.get_project(project_id)
     if project is None:
         raise project_not_found()
+    project.update(db.project_stats(project_id))
     project["disk_mb"] = storage.disk_usage_mb(project_id)
     return project
 
@@ -136,6 +138,107 @@ def api_delete_project(project_id: int) -> dict[str, Any]:
     return {"ok": True}
 
 
+# ── Файлы проекта ─────────────────────────────────────────────────────────
+
+def _require_project(project_id: int) -> dict[str, Any]:
+    project = db.get_project(project_id)
+    if project is None:
+        raise project_not_found()
+    return project
+
+
+def _safe_stored_name(name: str) -> str:
+    """Защита от попытки выйти за пределы папки проекта."""
+    cleaned = Path(name).name
+    if not cleaned or cleaned != name:
+        raise UserError("Файл не найден.", "Обновите страницу.", status=404)
+    return cleaned
+
+
+@app.post("/api/projects/{project_id}/files", status_code=201)
+async def api_upload_files(
+    project_id: int,
+    files: list[UploadFile] = File(...),
+) -> dict[str, Any]:
+    """Приём загруженных планов. Можно выбрать сразу несколько файлов."""
+    _require_project(project_id)
+    if not files:
+        raise UserError("Вы не выбрали ни одного файла.", "Нажмите «Выбрать файлы».")
+
+    added: list[dict[str, Any]] = []
+    problems: list[dict[str, str]] = []
+    for upload in files:
+        name = upload.filename or "файл"
+        try:
+            result = plan_files.ingest(project_id, name, await upload.read())
+            added.append({
+                "original_name": result.original_name,
+                "stored_name": result.stored_name,
+                "pages": result.pages,
+                "is_vector": result.is_vector,
+            })
+        except UserError as exc:
+            # Один плохой файл не должен ломать загрузку остальных.
+            problems.append({"name": name, "error": exc.message, "hint": exc.hint})
+
+    if not added and problems:
+        first = problems[0]
+        raise UserError(first["error"], first["hint"])
+
+    return {"added": added, "problems": problems}
+
+
+@app.get("/api/projects/{project_id}/documents")
+def api_list_documents(project_id: int) -> list[dict[str, Any]]:
+    _require_project(project_id)
+    return plan_files.group_documents(db.list_files(project_id, kind="plan"))
+
+
+@app.delete("/api/projects/{project_id}/documents/{stored_name}")
+def api_delete_document(project_id: int, stored_name: str) -> dict[str, Any]:
+    _require_project(project_id)
+    removed = plan_files.delete_document(project_id, _safe_stored_name(stored_name))
+    return {"ok": True, "removed_pages": removed}
+
+
+@app.patch("/api/files/{file_id}/label")
+def api_set_label(file_id: int, body: dict[str, str]) -> dict[str, Any]:
+    if db.get_file(file_id) is None:
+        raise UserError("Файл не найден.", "Обновите страницу.", status=404)
+    db.set_file_label(file_id, (body.get("label") or "").strip()[:120])
+    return {"ok": True}
+
+
+def _file_response(file_id: int, preview: bool) -> FileResponse:
+    row = db.get_file(file_id)
+    if row is None:
+        raise UserError("Файл не найден.", "Обновите страницу.", status=404)
+    base = storage.project_dir(row["project_id"])
+    if preview and row["preview_name"]:
+        path = base / "previews" / row["preview_name"]
+        media = "image/png" if path.suffix == ".png" else "image/jpeg"
+    else:
+        path = base / "uploads" / row["stored_name"]
+        media = row["mime"]
+    if not path.exists():
+        raise UserError(
+            "Файл на диске не найден.",
+            "Возможно, папку data перемещали. Загрузите файл заново.",
+            status=404,
+        )
+    return FileResponse(path, media_type=media, filename=row["original_name"])
+
+
+@app.get("/api/files/{file_id}/preview")
+def api_file_preview(file_id: int) -> FileResponse:
+    return _file_response(file_id, preview=True)
+
+
+@app.get("/api/files/{file_id}/raw")
+def api_file_raw(file_id: int) -> FileResponse:
+    return _file_response(file_id, preview=False)
+
+
 # ── Страницы ──────────────────────────────────────────────────────────────
 
 def _page(name: str) -> FileResponse:
@@ -150,6 +253,11 @@ def page_index() -> FileResponse:
 @app.get("/project/{project_id}")
 def page_project(project_id: int) -> FileResponse:
     return _page("project.html")
+
+
+@app.get("/project/{project_id}/plan")
+def page_plan(project_id: int) -> FileResponse:
+    return _page("plan.html")
 
 
 @app.get("/settings")

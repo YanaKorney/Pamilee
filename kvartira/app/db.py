@@ -275,3 +275,97 @@ def touch_project(project_id: int) -> None:
     """Отмечает, что проект менялся — чтобы он поднялся в списке."""
     with connect() as conn:
         conn.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now(), project_id))
+
+
+# ── Файлы ─────────────────────────────────────────────────────────────────
+
+def add_file(
+    project_id: int,
+    kind: str,
+    original_name: str,
+    stored_name: str,
+    mime: str,
+    page_no: int | None = None,
+    preview_name: str | None = None,
+    label: str = "",
+    width_px: int | None = None,
+    height_px: int | None = None,
+    is_vector: bool = False,
+    room_id: int | None = None,
+) -> int:
+    with connect() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO files (project_id, room_id, kind, original_name, stored_name,
+                               mime, page_no, preview_name, label, width_px, height_px,
+                               is_vector, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (project_id, room_id, kind, original_name, stored_name, mime, page_no,
+             preview_name, label, width_px, height_px, int(is_vector), now()),
+        )
+        conn.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now(), project_id))
+        return int(cur.lastrowid)
+
+
+def list_files(project_id: int, kind: str | None = None) -> list[dict[str, Any]]:
+    sql = "SELECT * FROM files WHERE project_id = ?"
+    params: list[Any] = [project_id]
+    if kind:
+        sql += " AND kind = ?"
+        params.append(kind)
+    sql += " ORDER BY created_at, page_no, id"
+    with connect() as conn:
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def get_file(file_id: int) -> dict[str, Any] | None:
+    with connect() as conn:
+        return row_to_dict(
+            conn.execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()
+        )
+
+
+def file_group(project_id: int, stored_name: str) -> list[dict[str, Any]]:
+    """Все строки одного загруженного документа (у PDF это его страницы)."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM files WHERE project_id = ? AND stored_name = ? ORDER BY page_no",
+            (project_id, stored_name),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_file_group(project_id: int, stored_name: str) -> int:
+    with connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM files WHERE project_id = ? AND stored_name = ?",
+            (project_id, stored_name),
+        )
+        conn.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now(), project_id))
+        return cur.rowcount
+
+
+def set_file_label(file_id: int, label: str) -> bool:
+    with connect() as conn:
+        cur = conn.execute("UPDATE files SET label = ? WHERE id = ?", (label, file_id))
+        return cur.rowcount > 0
+
+
+def project_stats(project_id: int) -> dict[str, int]:
+    """Сколько в проекте документов, страниц и комнат."""
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT
+              (SELECT COUNT(DISTINCT stored_name) FROM files
+                WHERE project_id = ? AND kind = 'plan')  AS plan_files,
+              (SELECT COUNT(*) FROM files
+                WHERE project_id = ? AND kind = 'plan')  AS plan_pages,
+              (SELECT COUNT(*) FROM files
+                WHERE project_id = ? AND kind = 'reference') AS reference_files,
+              (SELECT COUNT(*) FROM rooms WHERE project_id = ?) AS room_count
+            """,
+            (project_id, project_id, project_id, project_id),
+        ).fetchone()
+    return {k: int(row[k]) for k in row.keys()}

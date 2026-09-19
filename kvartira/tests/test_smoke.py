@@ -137,3 +137,107 @@ class TestFixtures(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPlanUpload(TestBase):
+    """Загрузка настоящих планов квартиры."""
+
+    FIXTURES = BASE_DIR / "tests" / "fixtures"
+
+    def setUp(self) -> None:
+        self.project_id = self.client.post(
+            "/api/projects", json={"name": "Для загрузки"}
+        ).json()["id"]
+
+    def tearDown(self) -> None:
+        self.client.delete(f"/api/projects/{self.project_id}")
+
+    def _upload(self, filename: str, mime: str):
+        data = (self.FIXTURES / filename).read_bytes()
+        return self.client.post(
+            f"/api/projects/{self.project_id}/files",
+            files={"files": (filename, data, mime)},
+        )
+
+    def test_vector_pdf_is_recognised_as_vector(self) -> None:
+        response = self._upload("plan-zastroyshchik.pdf", "application/pdf")
+        self.assertEqual(response.status_code, 201)
+        added = response.json()["added"]
+        self.assertEqual(len(added), 1)
+        self.assertEqual(added[0]["pages"], 1)
+        self.assertTrue(added[0]["is_vector"], "Чертёж застройщика — векторный PDF")
+
+    def test_photo_plan_is_not_vector(self) -> None:
+        response = self._upload("plan-dizayner.jpg", "image/jpeg")
+        self.assertEqual(response.status_code, 201)
+        added = response.json()["added"]
+        self.assertFalse(added[0]["is_vector"], "Картинка не может быть векторной")
+
+    def test_documents_and_previews(self) -> None:
+        self._upload("plan-zastroyshchik.pdf", "application/pdf")
+        self._upload("plan-dizayner.jpg", "image/jpeg")
+
+        documents = self.client.get(f"/api/projects/{self.project_id}/documents").json()
+        self.assertEqual(len(documents), 2)
+        self.assertEqual(sum(d["page_count"] for d in documents), 2)
+
+        page_id = documents[0]["pages"][0]["id"]
+        preview = self.client.get(f"/api/files/{page_id}/preview")
+        self.assertEqual(preview.status_code, 200)
+        self.assertTrue(preview.headers["content-type"].startswith("image/"))
+
+        raw = self.client.get(f"/api/files/{page_id}/raw")
+        self.assertEqual(raw.status_code, 200)
+
+    def test_label_is_saved(self) -> None:
+        self._upload("plan-dizayner.jpg", "image/jpeg")
+        documents = self.client.get(f"/api/projects/{self.project_id}/documents").json()
+        page_id = documents[0]["pages"][0]["id"]
+        self.client.patch(f"/api/files/{page_id}/label", json={"label": "план мебели"})
+        documents = self.client.get(f"/api/projects/{self.project_id}/documents").json()
+        self.assertEqual(documents[0]["pages"][0]["label"], "план мебели")
+
+    def test_delete_removes_document_and_files(self) -> None:
+        self._upload("plan-zastroyshchik.pdf", "application/pdf")
+        documents = self.client.get(f"/api/projects/{self.project_id}/documents").json()
+        stored = documents[0]["stored_name"]
+
+        uploads = storage.project_dir(self.project_id) / "uploads" / stored
+        self.assertTrue(uploads.exists())
+
+        response = self.client.delete(
+            f"/api/projects/{self.project_id}/documents/{stored}"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(uploads.exists(), "Оригинал должен удаляться с диска")
+        self.assertEqual(
+            self.client.get(f"/api/projects/{self.project_id}/documents").json(), []
+        )
+
+    def test_unsupported_file_explains_itself(self) -> None:
+        response = self.client.post(
+            f"/api/projects/{self.project_id}/files",
+            files={"files": ("чертёж.dwg", b"x" * 100, "application/octet-stream")},
+        )
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertIn("не поддерживается", body["error"])
+        self.assertIn("PDF", body["hint"])
+
+    def test_broken_pdf_does_not_crash(self) -> None:
+        response = self.client.post(
+            f"/api/projects/{self.project_id}/files",
+            files={"files": ("сломанный.pdf", b"not a pdf at all", "application/pdf")},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertTrue(response.json()["hint"])
+
+    def test_project_stats_count_pages(self) -> None:
+        self._upload("plan-zastroyshchik.pdf", "application/pdf")
+        project = self.client.get(f"/api/projects/{self.project_id}").json()
+        self.assertEqual(project["plan_files"], 1)
+        self.assertEqual(project["plan_pages"], 1)
+
+    def test_plan_page_opens(self) -> None:
+        response = self.client.get(f"/project/{self.project_id}/plan")
+        self.assertEqual(response.status_code, 200)

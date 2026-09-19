@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Планировка · Моя квартира</title>
+<link rel="stylesheet" href="/static/css/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>&#127968;</text></svg>">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="/">
+      <span class="brand-mark">&#127968;</span>
+      Моя квартира
+    </a>
+    <span class="spacer"></span>
+    <a class="btn btn-quiet" href="/settings">Настройки</a>
+  </div>
+</header>
+
+<main>
+  <div class="crumbs">
+    <a href="/">Мои проекты</a> → <a id="crumb-project" href="#">…</a> → Планировка
+  </div>
+
+  <h1>Планировка</h1>
+  <p class="lead">
+    Загрузите всё, что дал дизайнер: план квартиры, план мебели, план сантехники,
+    развертки стен. Чем больше листов, тем точнее получится модель.
+  </p>
+
+  <label class="dropzone" id="dropzone">
+    <div class="icon">📄</div>
+    <div class="title">Перетащите файлы сюда или нажмите, чтобы выбрать</div>
+    <div class="muted small">PDF, JPG, PNG, WEBP · до 50 МБ каждый</div>
+    <input type="file" id="picker" multiple accept=".pdf,.jpg,.jpeg,.png,.webp">
+  </label>
+
+  <div id="progress" hidden>
+    <div class="progress-line"><span></span></div>
+    <div class="muted small" style="margin-top:8px" id="progress-text">Загружаю…</div>
+  </div>
+
+  <div id="docs" style="margin-top:26px"><div class="spinner"></div></div>
+</main>
+
+<div class="lightbox" id="lightbox" hidden>
+  <button class="close" id="lightbox-close" aria-label="Закрыть">×</button>
+  <img id="lightbox-img" alt="">
+</div>
+
+<script type="module" src="/static/js/plan.js"></script>
+</body>
+</html>
