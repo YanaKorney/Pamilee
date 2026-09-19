@@ -6,11 +6,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 import warnings
 
@@ -1772,3 +1774,101 @@ class TestLoggiaCountedOnce(unittest.TestCase):
         ]
         _add_warnings(result, plan)
         self.assertTrue(any("лоджия или балкон" in w for w in result.warnings))
+
+
+# ── Разбор виден и после обновления страницы ─────────────────────────
+
+class TestSavedAnalysisIsVisible(TestBase):
+    """Разбор плана стоит денег и делается один раз.
+
+    Раньше его результат показывался только в ту минуту, когда он
+    пришёл: стоило обновить страницу — и на экране оставалась одна
+    строчка. Человек решает, что разбор не сохранился.
+    """
+
+    def _with_rooms(self) -> int:
+        project_id = db.create_project("С разбором", ceiling_height_mm=2900)
+        db.update_project(project_id, declared_area_m2=30.0)
+        db.add_room(project_id=project_id, name="Гостиная", kind="living",
+                    polygon=json.dumps([[0, 0], [5000, 0], [5000, 4000], [0, 4000]]),
+                    declared_area_m2=20.0, sort_order=0)
+        db.add_room(project_id=project_id, name="Кухня", kind="kitchen",
+                    polygon=json.dumps([[5000, 0], [8000, 0], [8000, 4000], [5000, 4000]]),
+                    declared_area_m2=12.0, sort_order=1)
+        db.add_room(project_id=project_id, name="Лоджия", kind="balcony",
+                    polygon=json.dumps([[0, 4000], [3000, 4000], [3000, 5500], [0, 5500]]),
+                    declared_area_m2=4.49, sort_order=2)
+        return project_id
+
+    def test_комнаты_возвращаются_с_площадями(self) -> None:
+        project_id = self._with_rooms()
+        data = self.client.get(f"/api/projects/{project_id}/rooms").json()
+        self.assertEqual(len(data["rooms"]), 3)
+        self.assertAlmostEqual(data["rooms"][0]["area_m2"], 20.0, places=2)
+        self.assertAlmostEqual(data["rooms"][1]["area_m2"], 12.0, places=2)
+
+    def test_лоджия_не_входит_в_площадь_квартиры(self) -> None:
+        project_id = self._with_rooms()
+        data = self.client.get(f"/api/projects/{project_id}/rooms").json()
+        self.assertAlmostEqual(data["total_area_m2"], 32.0, places=2)
+        self.assertAlmostEqual(data["outside_area_m2"], 4.5, places=1)
+
+    def test_известна_площадь_по_документам(self) -> None:
+        project_id = self._with_rooms()
+        data = self.client.get(f"/api/projects/{project_id}/rooms").json()
+        self.assertEqual(data["declared_total_m2"], 30.0)
+
+    def test_отклонение_от_чертежа_посчитано(self) -> None:
+        project_id = self._with_rooms()
+        rooms = self.client.get(f"/api/projects/{project_id}/rooms").json()["rooms"]
+        self.assertEqual(rooms[0]["deviation_percent"], 0.0)
+        self.assertIsNotNone(rooms[1]["deviation_percent"])
+
+    def test_проект_без_разбора_отдаёт_пустой_список(self) -> None:
+        project_id = db.create_project("Пустой", ceiling_height_mm=2900)
+        data = self.client.get(f"/api/projects/{project_id}/rooms").json()
+        self.assertEqual(data["rooms"], [])
+        self.assertEqual(data["total_area_m2"], 0)
+
+    def test_неуверенные_предметы_посчитаны(self) -> None:
+        project_id = self._with_rooms()
+        db.add_item(project_id=project_id, category="furniture", subtype="bed",
+                    label="Кровать", x=100, y=100, width_mm=1600, depth_mm=2000,
+                    height_mm=500, rotation_deg=0, confidence=0.3)
+        data = self.client.get(f"/api/projects/{project_id}/rooms").json()
+        self.assertEqual(data["unsure_items"], 1)
+
+
+class TestSecondCopyIsNoticed(unittest.TestCase):
+    """Две запущенные копии — верный способ запутаться в версиях."""
+
+    def test_свободный_порт_ничего_не_говорит(self) -> None:
+        import run
+        self.assertIsNone(run.running_version(1))
+
+    def test_своя_программа_узнаётся_по_версии(self) -> None:
+        import run
+        from app import __version__
+        with self.client_on_port() as port:
+            self.assertEqual(run.running_version(port), __version__)
+
+    @contextlib.contextmanager
+    def client_on_port(self):
+        """Поднимает настоящий сервер на свободном порту."""
+        import threading
+        import uvicorn
+        from app.server import app
+
+        config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="critical")
+        server = uvicorn.Server(config)
+        thread = threading.Thread(target=server.run, daemon=True)
+        thread.start()
+        try:
+            for _ in range(200):
+                if server.started and server.servers:
+                    break
+                time.sleep(0.05)
+            yield server.servers[0].sockets[0].getsockname()[1]
+        finally:
+            server.should_exit = True
+            thread.join(timeout=5)

@@ -218,6 +218,42 @@ def prepare_home() -> None:
 
 # ── Порт ──────────────────────────────────────────────────────────────────
 
+def running_version(port: int) -> str | None:
+    """Проверяет, не эта ли самая программа занимает порт."""
+    import json as _json
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/status", timeout=1.5
+        ) as answer:
+            return str(_json.loads(answer.read()).get("version") or "")
+    except Exception:
+        return None          # порт занят кем-то другим или свободен
+
+
+def warn_about_second_copy(port: int) -> None:
+    """Говорит, что программа уже открыта, вместо молчаливого переезда."""
+    running = running_version(port)
+    if running is None:
+        return
+
+    from app import __version__
+
+    title("Программа уже запущена")
+    say(f"  Она открыта в другом окне: http://127.0.0.1:{port}")
+    if running != __version__:
+        say()
+        say(f"  Причём это другая версия: там {running}, а здесь {__version__}.")
+        say("  Закройте то окно (и чёрное окно рядом с ним), иначе легко")
+        say("  перепутать, в каком окне какая версия.")
+    else:
+        say()
+        say("  Сейчас откроется вторая копия. Если она не нужна — закройте")
+        say("  это окно, а работайте в том, которое уже открыто.")
+    say()
+
+
 def find_free_port(preferred: int) -> int:
     """Ищет свободный порт. Занятый порт — не повод падать."""
     for port in range(preferred, preferred + 20):
@@ -324,6 +360,7 @@ def main() -> None:
             port = int(sys.argv[sys.argv.index("--port") + 1])
         except (IndexError, ValueError):
             pass
+    warn_about_second_copy(port)
     port = find_free_port(port)
 
     try:

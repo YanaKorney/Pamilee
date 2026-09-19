@@ -80,6 +80,45 @@ function roomRow(room) {
     return el('div', { class: 'small', style: 'margin-bottom:4px' }, parts);
 }
 
+// Итог по площадям — общий для свежего разбора и сохранённого.
+function areaSummary(data) {
+    const sum = el('div', { class: 'small', style: 'margin-top:8px' }, [
+        document.createTextNode('Площадь квартиры: '),
+        el('strong', { text: formatArea(data.total_area_m2) }),
+    ]);
+    if (data.declared_total_m2) {
+        const off = Math.abs(data.total_area_m2 - data.declared_total_m2)
+            / data.declared_total_m2 * 100;
+        sum.appendChild(document.createTextNode(
+            ` · по документам ${formatArea(data.declared_total_m2)} `));
+        sum.appendChild(el('span', {
+            class: off <= 2 ? 'badge badge-ok' : 'badge badge-warn',
+            text: off <= 2 ? 'сходится' : `расхождение ${off.toFixed(1).replace('.', ',')} %`,
+        }));
+    }
+    return sum;
+}
+
+// Сохранённый разбор — то же самое, но без стоимости: она списана один раз.
+function savedResult(data) {
+    const blocks = [el('strong', { text: 'Что распознано на плане' })];
+    data.rooms.forEach((r) => blocks.push(roomRow(r)));
+    blocks.push(areaSummary(data));
+
+    if (data.outside_area_m2 > 0) {
+        blocks.push(el('div', { class: 'muted small', text:
+            `Балкон или лоджия: ${formatArea(data.outside_area_m2)} — `
+            + 'в общую площадь не входит.' }));
+    }
+    blocks.push(el('div', { class: 'small', style: 'margin-top:10px' }, [
+        document.createTextNode(`Предметов найдено: ${data.items.length}`),
+        document.createTextNode(data.unsure_items
+            ? `, из них неуверенно — ${data.unsure_items}. ` : '. '),
+        el('a', { href: `/project/${projectId}/viewer`, text: 'Открыть 3D-модель' }),
+    ]));
+    return el('div', { class: 'notice', style: 'margin-top:14px' }, blocks);
+}
+
 function analysisResult(data) {
     const blocks = [el('strong', { text: 'Что распознано на листе' })];
 
@@ -97,21 +136,7 @@ function analysisResult(data) {
 
     data.rooms.forEach((r) => blocks.push(roomRow(r)));
 
-    const sum = el('div', { class: 'small', style: 'margin-top:8px' }, [
-        document.createTextNode('Площадь квартиры: '),
-        el('strong', { text: formatArea(data.total_area_m2) }),
-    ]);
-    if (data.declared_total_m2) {
-        const off = Math.abs(data.total_area_m2 - data.declared_total_m2)
-            / data.declared_total_m2 * 100;
-        sum.appendChild(document.createTextNode(
-            ` · по документам ${formatArea(data.declared_total_m2)} `));
-        sum.appendChild(el('span', {
-            class: off <= 2 ? 'badge badge-ok' : 'badge badge-warn',
-            text: off <= 2 ? 'сходится' : `расхождение ${off.toFixed(1).replace('.', ',')} %`,
-        }));
-    }
-    blocks.push(sum);
+    blocks.push(areaSummary(data));
 
     if (data.outside_area_m2 > 0) {
         blocks.push(el('div', { class: 'muted small' }, [
@@ -353,14 +378,9 @@ function nextStepNote(documents, project) {
     if (found > 0) {
         return el('div', { class: 'notice' }, [
             el('strong', { text: 'План разобран' }),
-            el('div', { class: 'small', style: 'margin-top:4px' }, [
-                document.createTextNode(
-                    `Найдено помещений: ${found}. Квартиру можно посмотреть в объёме — `),
-                el('a', { href: `/project/${projectId}/viewer`, text: '3D-модель' }),
-                document.createTextNode(
-                    '. Если что-то распознано неверно, нажмите «Разобрать план» '
-                    + 'ещё раз — прошлый разбор заменится новым.'),
-            ]),
+            el('div', { class: 'small', style: 'margin-top:4px', text:
+                'Что программа нашла — ниже. Если что-то распознано неверно, '
+                + 'нажмите «Разобрать план» ещё раз: прошлый разбор заменится новым.' }),
         ]);
     }
 
@@ -398,6 +418,23 @@ async function load() {
         docsBox.appendChild(el('h2', { text: 'Загруженные файлы' }));
         documents.forEach((d) => docsBox.appendChild(documentCard(d)));
         docsBox.appendChild(nextStepNote(documents, project));
+
+        // Разбор плана делается один раз и стоит денег. Его результат
+        // должен быть виден при каждом открытии, а не исчезать после
+        // обновления страницы.
+        if (project.room_count > 0) {
+            try {
+                const saved = await api.get(`/api/projects/${projectId}/rooms`);
+                if (saved.rooms.length) docsBox.appendChild(savedResult(saved));
+            } catch (err) {
+                docsBox.appendChild(el('div', { class: 'notice notice-warn' }, [
+                    el('strong', { text: 'Не удалось показать прошлый разбор.' }),
+                    el('div', { class: 'small', text:
+                        'Сам разбор сохранён — попробуйте обновить страницу.' }),
+                    technicalNote(err && err.technical),
+                ]));
+            }
+        }
     } catch (err) {
         docsBox.replaceChildren(el('div', { class: 'notice notice-error' }, [
             el('strong', { text: (err && err.error) || 'Не удалось открыть раздел.' }),

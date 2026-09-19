@@ -358,10 +358,34 @@ def api_analyse_page(project_id: int, file_id: int) -> dict[str, Any]:
 
 @app.get("/api/projects/{project_id}/rooms")
 def api_list_rooms(project_id: int) -> dict[str, Any]:
-    _require_project(project_id)
+    """Что программа знает о комнатах — чтобы показать это при открытии.
+
+    Разбор плана стоит денег и делается один раз, поэтому его результат
+    должен быть виден всегда, а не только в ту минуту, когда он пришёл.
+    """
+    project = _require_project(project_id)
+    rooms = db.list_rooms(project_id)
+    items = db.list_items(project_id)
+
+    for room in rooms:
+        polygon = geometry.parse_polygon(room.get("polygon", "[]"))
+        room["polygon"] = polygon
+        room["area_m2"] = round(geometry.polygon_area_m2(polygon), 2)
+        declared = room.get("declared_area_m2")
+        room["deviation_percent"] = (
+            round((room["area_m2"] - declared) / declared * 100, 1)
+            if declared else None
+        )
+
+    inside = [r for r in rooms if r["kind"] not in plan_analysis.OUTSIDE_KINDS]
+    outside = [r for r in rooms if r["kind"] in plan_analysis.OUTSIDE_KINDS]
     return {
-        "rooms": db.list_rooms(project_id),
-        "items": db.list_items(project_id),
+        "rooms": rooms,
+        "items": items,
+        "total_area_m2": round(sum(r["area_m2"] for r in inside), 2),
+        "outside_area_m2": round(sum(r["area_m2"] for r in outside), 2),
+        "declared_total_m2": project.get("declared_area_m2"),
+        "unsure_items": sum(1 for i in items if (i.get("confidence") or 1) < 0.7),
     }
 
 
