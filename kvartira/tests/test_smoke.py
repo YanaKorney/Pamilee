@@ -593,7 +593,9 @@ class TestPlanAnalysis(TestBase):
         fake = FakeProvider(self._answer([]))
         analyse_page(1, self.PDF, 1, True, 74.37, provider=fake)
         self.assertIn("74.37", fake.asked_prompt)
-        self.assertIn("Масштаб чертежа уже известен", fake.asked_prompt)
+        # Масштаб передан числом, а не поручен модели
+        self.assertIn("Один пиксель этой картинки", fake.asked_prompt)
+        self.assertNotIn("Масштаб этого листа неизвестен", fake.asked_prompt)
         self.assertEqual(fake.asked_images, 1)
 
     def test_pixels_become_millimetres(self) -> None:
@@ -688,3 +690,78 @@ class TestSpending(TestBase):
             ai.check_daily_limit()
         self.assertIn("лимит", caught.exception.message.lower())
         self.assertIn("DAILY_LIMIT_RUB", caught.exception.hint)
+
+
+class TestLoggiaIsNotPartOfTheFlat(TestBase):
+    """Лоджия не входит в общую площадь — и не должна ломать сверку.
+
+    На настоящем разборе квартиры это дало ложную тревогу: сумма восьми
+    помещений вместе с лоджией — 79,59 м² против 74,37 по документам,
+    а без лоджии — 74,54, то есть расхождение 0,2 %.
+    """
+
+    PDF = BASE_DIR / "tests" / "fixtures" / "plan-zastroyshchik.pdf"
+
+    def _run(self, rooms):
+        import json as js
+        from app.plan_analysis import analyse_page
+        fake = FakeProvider(js.dumps({
+            "page_kind": "dimensioned_plan", "rooms": rooms, "items": [], "notes": "",
+        }))
+        return analyse_page(1, self.PDF, 1, True, 74.37, provider=fake)
+
+    def _square(self, side_px, offset=0):
+        return [[offset, 0], [offset + side_px, 0],
+                [offset + side_px, side_px], [offset, side_px]]
+
+    def test_balcony_is_out_of_the_total(self) -> None:
+        result = self._run([
+            {"name": "Гостиная", "kind": "living", "polygon": self._square(200)},
+            {"name": "Лоджия", "kind": "balcony", "polygon": self._square(60, 400)},
+        ])
+        living = next(r for r in result.rooms if r.kind == "living")
+        self.assertEqual(result.total_area_m2, living.area_m2)
+        self.assertGreater(result.outside_area_m2, 0)
+
+    def test_balcony_is_not_counted_as_a_room(self) -> None:
+        """Семь помещений плюс лоджия — это всё ещё семь помещений."""
+        rooms = [
+            {"name": f"Комната {n}", "kind": "bedroom", "polygon": self._square(60, n * 70)}
+            for n in range(7)
+        ]
+        rooms.append({"name": "Лоджия", "kind": "balcony", "polygon": self._square(40, 700)})
+        result = self._run(rooms)
+        about_count = [w for w in result.warnings if "подписано" in w]
+        self.assertFalse(
+            about_count,
+            "Семь помещений и лоджия — счёт сходится, тревожить человека незачем",
+        )
+
+
+class TestPromptHelpsTheModel(TestBase):
+    """Модели передаётся всё, что программа знает точно."""
+
+    PDF = BASE_DIR / "tests" / "fixtures" / "plan-zastroyshchik.pdf"
+
+    def setUp(self) -> None:
+        import json as js
+        from app.plan_analysis import analyse_page
+        self.fake = FakeProvider(js.dumps({"rooms": [], "items": []}))
+        analyse_page(1, self.PDF, 1, True, 74.37, provider=self.fake)
+
+    def test_scale_is_given_so_the_model_can_check_itself(self) -> None:
+        self.assertIn("ПРОВЕРЬ СЕБЯ", self.fake.asked_prompt)
+        self.assertIn("мм", self.fake.asked_prompt)
+
+    def test_dimension_marks_are_given(self) -> None:
+        self.assertIn("ОПОРНЫЕ РАЗМЕРЫ", self.fake.asked_prompt)
+        self.assertIn("7830 мм", self.fake.asked_prompt)
+        self.assertIn("5805 мм", self.fake.asked_prompt)
+
+    def test_inner_faces_are_required(self) -> None:
+        """Разница между осями и внутренними гранями — это те самые проценты."""
+        self.assertIn("ВНУТРЕННИМ граням", self.fake.asked_prompt)
+
+    def test_balcony_rule_is_explained(self) -> None:
+        self.assertIn("НЕ входят", self.fake.asked_prompt)
+        self.assertIn("kind = balcony", self.fake.asked_prompt)

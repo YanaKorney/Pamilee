@@ -67,6 +67,10 @@ ROOM_KINDS = (
     "toilet", "hall", "corridor", "wardrobe", "balcony", "other",
 )
 
+# Балкон и лоджия — не часть квартиры: в общую площадь они не входят
+# и в сверке с документами не участвуют.
+OUTSIDE_KINDS = ("balcony",)
+
 
 @dataclass
 class RoomGuess:
@@ -103,6 +107,7 @@ class Analysis:
     notes: str = ""
     warnings: list[str] = field(default_factory=list)
     total_area_m2: float = 0.0
+    outside_area_m2: float = 0.0
     declared_total_m2: float | None = None
     cost_note: str = ""
     input_tokens: int = 0
@@ -130,27 +135,61 @@ def render_page(path: Path, page_number: int) -> tuple[bytes, float]:
 
 # ── Запрос к модели ───────────────────────────────────────────────────────
 
-def build_prompt(plan: VectorPlan, width_px: int, height_px: int) -> str:
+def build_prompt(
+    plan: VectorPlan,
+    width_px: int,
+    height_px: int,
+    mm_per_px: float | None = None,
+    factor: float = 1.0,
+) -> str:
     known: list[str] = []
     if plan.total_area_m2:
-        known.append(f"Общая площадь квартиры: {plan.total_area_m2} м².")
+        known.append(
+            f"Общая площадь квартиры: {plan.total_area_m2} м². "
+            "Балкон и лоджия в неё НЕ входят."
+        )
     if plan.room_areas:
         listed = ", ".join(f"{v} м²" for v in sorted(plan.room_areas, reverse=True))
         known.append(
-            f"На чертеже подписаны площади {len(plan.room_areas)} помещений: {listed}. "
-            "Ровно столько помещений и должно получиться."
+            f"На чертеже подписаны площади {len(plan.room_areas)} помещений квартиры: "
+            f"{listed}. Ровно столько помещений и должно получиться, не считая "
+            "балкона или лоджии."
         )
     if plan.extra_areas:
         known.append(
-            "Есть также площади, не входящие в общую, — это балкон или лоджия: "
-            + ", ".join(f"{v} м²" for v in plan.extra_areas) + "."
+            "Отдельно подписаны площади балкона или лоджии: "
+            + ", ".join(f"{v} м²" for v in plan.extra_areas)
+            + ". Это помещение тоже обведи, но пометь kind = balcony."
         )
-    if plan.scale_is_reliable:
-        known.append("Масштаб чертежа уже известен точно — определять его не нужно.")
+
+    check_block = ""
+    if mm_per_px:
+        check_block = f"""
+ПРОВЕРЬ СЕБЯ. Один пиксель этой картинки = {mm_per_px:.3f} мм.
+Площадь в квадратных метрах = площадь многоугольника в пикселях,
+умноженная на {mm_per_px:.3f}, ещё раз на {mm_per_px:.3f} и делённая на 1 000 000.
+Обведя помещение, посчитай его площадь по своим же точкам и сравни
+с подписанной на чертеже. Расходится больше чем на 5 % — подвинь точки
+и посчитай заново. Обводи по ВНУТРЕННИМ граням стен, не по осям и не по
+наружным граням: именно от внутренних граней считается площадь помещения.
+"""
+
+    marks = [d for d in plan.dimensions if d.value_mm >= 500]
+    marks_block = ""
+    if marks and factor:
+        listed = "; ".join(
+            f"{d.value_mm} мм около ({round(d.x * factor)}, {round(d.y * factor)})"
+            for d in sorted(marks, key=lambda d: -d.value_mm)[:30]
+        )
+        marks_block = f"""
+ОПОРНЫЕ РАЗМЕРЫ. На чертеже есть размерные подписи — значение и место
+подписи в пикселях картинки: {listed}.
+Используй их, чтобы точно ставить углы помещений.
+"""
 
     known_block = "\n".join(f"- {line}" for line in known) or "- ничего не известно заранее"
 
-    scale_task = "" if plan.scale_is_reliable else """
+    scale_task = "" if (plan.scale_is_reliable or mm_per_px) else """
 5. МАСШТАБ. Масштаб этого листа неизвестен. Найди на чертеже подписи
    размеров (числа в миллиметрах рядом с размерными линиями) и для двух-трёх
    из них укажи концы соответствующей размерной линии в пикселях. Бери
@@ -165,7 +204,7 @@ def build_prompt(plan: VectorPlan, width_px: int, height_px: int) -> str:
 
 Что уже известно про эту квартиру:
 {known_block}
-
+{check_block}{marks_block}
 Задачи:
 
 1. ТИП ЛИСТА. Определи, что на нём: план с расстановкой мебели
@@ -177,6 +216,7 @@ def build_prompt(plan: VectorPlan, width_px: int, height_px: int) -> str:
    Название дай по-русски и по назначению: Гостиная, Спальня, Детская, Кухня,
    Кухня-гостиная, Прихожая, Коридор, Гардеробная, Ванная, Санузел, Лоджия.
    Если рядом подписана площадь — укажи её в area_m2.
+   Помещения не должны перекрываться.
 
 3. ПРОЁМЫ. Отметь двери и окна: точку в середине проёма и ширину в пикселях.
 
@@ -355,7 +395,11 @@ def interpret(data: dict[str, Any], plan: VectorPlan, factor: float) -> Analysis
             confidence=max(0.0, min(1.0, confidence)),
         ))
 
-    result.total_area_m2 = round(sum(r.area_m2 for r in result.rooms), 2)
+    inside = [r for r in result.rooms if r.kind not in OUTSIDE_KINDS]
+    result.total_area_m2 = round(sum(r.area_m2 for r in inside), 2)
+    result.outside_area_m2 = round(
+        sum(r.area_m2 for r in result.rooms if r.kind in OUTSIDE_KINDS), 2
+    )
     result.declared_total_m2 = plan.total_area_m2
     _add_warnings(result, plan)
     return result
@@ -366,10 +410,11 @@ def _add_warnings(result: Analysis, plan: VectorPlan) -> None:
         result.warnings.append("Помещения на этом листе не найдены.")
         return
 
-    if plan.room_areas and len(result.rooms) != len(plan.room_areas):
+    inside = [r for r in result.rooms if r.kind not in OUTSIDE_KINDS]
+    if plan.room_areas and len(inside) != len(plan.room_areas):
         result.warnings.append(
-            f"На чертеже подписано {len(plan.room_areas)} помещений, "
-            f"а распознано {len(result.rooms)}."
+            f"На чертеже подписано {len(plan.room_areas)} помещений квартиры, "
+            f"а распознано {len(inside)}. Балкон и лоджия не считаются."
         )
 
     if result.declared_total_m2:
@@ -450,7 +495,11 @@ def analyse_page(
     pixmap = pymupdf.Pixmap(image)
     width_px, height_px = pixmap.width, pixmap.height
 
-    prompt = build_prompt(plan, width_px, height_px)
+    known_mm_per_px = (
+        plan.scale_mm_per_unit / factor
+        if plan.scale_is_reliable and plan.scale_mm_per_unit else None
+    )
+    prompt = build_prompt(plan, width_px, height_px, known_mm_per_px, factor)
     service = provider or ai.plan_provider()
     answer = service.ask(ai.plan_model(), prompt, images=[image], max_tokens=16000)
 

@@ -98,14 +98,27 @@ function analysisResult(data) {
     data.rooms.forEach((r) => blocks.push(roomRow(r)));
 
     const sum = el('div', { class: 'small', style: 'margin-top:8px' }, [
-        document.createTextNode('Сумма площадей: '),
+        document.createTextNode('Площадь квартиры: '),
         el('strong', { text: formatArea(data.total_area_m2) }),
     ]);
     if (data.declared_total_m2) {
+        const off = Math.abs(data.total_area_m2 - data.declared_total_m2)
+            / data.declared_total_m2 * 100;
         sum.appendChild(document.createTextNode(
-            ` · по документам ${formatArea(data.declared_total_m2)}`));
+            ` · по документам ${formatArea(data.declared_total_m2)} `));
+        sum.appendChild(el('span', {
+            class: off <= 2 ? 'badge badge-ok' : 'badge badge-warn',
+            text: off <= 2 ? 'сходится' : `расхождение ${off.toFixed(1).replace('.', ',')} %`,
+        }));
     }
     blocks.push(sum);
+
+    if (data.outside_area_m2 > 0) {
+        blocks.push(el('div', { class: 'muted small' }, [
+            document.createTextNode(
+                `Балкон или лоджия: ${formatArea(data.outside_area_m2)} — в общую площадь не входит.`),
+        ]));
+    }
 
     if (data.notes) {
         blocks.push(el('div', { class: 'muted small', style: 'margin-top:8px',
