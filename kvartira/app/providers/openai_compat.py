@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from typing import Any
 
 import httpx
@@ -19,6 +20,10 @@ log = get_logger()
 
 CONNECT_TIMEOUT = 15.0
 READ_TIMEOUT = 300.0
+
+
+class StreamNotSupported(Exception):
+    """Сервис не умеет отдавать ответ по частям — попробуем обычным запросом."""
 
 
 class OpenAiCompatProvider:
@@ -68,36 +73,46 @@ class OpenAiCompatProvider:
         except Exception:
             detail = response.text[:300]
         log.warning("Сервис %s ответил %s: %s", self.title, code, detail)
+        # Человеку — объяснение словами, а точный ответ сервиса кладём
+        # в «Подробности»: без него причину потом не найти.
+        note = f"{code}: {detail}".strip()[:200]
 
         if code in (401, 403):
             return UserError(
                 "Сервис не принял ключ доступа.",
-                "Проверьте, что ключ в файле .env скопирован целиком, без пробелов "
-                "по краям, и что он не был удалён в личном кабинете.",
+                "Откройте «Настройки» и вставьте ключ заново — целиком и без "
+                "пробелов по краям. Заодно проверьте в личном кабинете сервиса, "
+                "что ключ не удалён.",
+                technical=note,
             )
         if code == 402 or "insufficient" in detail.lower() or "баланс" in detail.lower():
             return UserError(
                 "На счету закончились деньги.",
                 "Пополните баланс в личном кабинете сервиса и попробуйте снова.",
+                technical=note,
             )
         if code == 404:
             return UserError(
                 "Такой модели у сервиса нет.",
                 "Откройте «Настройки» и выберите модель из списка.",
+                technical=note,
             )
         if code == 429:
             return UserError(
                 "Слишком много запросов подряд.",
                 "Подождите минуту и попробуйте ещё раз.",
+                technical=note,
             )
         if code >= 500:
             return UserError(
                 "Сервис сейчас недоступен.",
                 "Это на их стороне. Попробуйте через несколько минут.",
+                technical=note,
             )
         return UserError(
             "Сервис не смог выполнить запрос.",
-            "Подробности записаны в logs/app.log. Попробуйте ещё раз.",
+            "Попробуйте ещё раз или выберите другую модель в «Настройках».",
+            technical=note,
         )
 
     def _network_error(self, exc: Exception) -> UserError:
@@ -154,16 +169,13 @@ class OpenAiCompatProvider:
         models.sort(key=lambda m: m.id)
         return models
 
-    # ── Вопрос текстовой модели ───────────────────────────────────────
+    # ── Вопрос текстовой модели ──────────────────────────────────────
 
-    def ask(
-        self,
-        model: str,
-        prompt: str,
-        images: list[bytes] | None = None,
-        pdf: bytes | None = None,
-        max_tokens: int = 8000,
-    ) -> TextAnswer:
+    def _build_body(
+        self, model: str, prompt: str,
+        images: list[bytes] | None, pdf: bytes | None,
+        max_tokens: int, stream: bool, with_usage: bool = True,
+    ) -> dict[str, Any]:
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
 
         for raw_image in images or []:
@@ -183,12 +195,64 @@ class OpenAiCompatProvider:
                 },
             })
 
-        body = {
+        body: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
             "messages": [{"role": "user", "content": content}],
         }
+        if stream:
+            body["stream"] = True
+            if with_usage:
+                # Просим прислать счётчик расхода в конце потока —
+                # иначе стоимость запроса посчитать не из чего.
+                body["stream_options"] = {"include_usage": True}
+        return body
 
+    def ask(
+        self,
+        model: str,
+        prompt: str,
+        images: list[bytes] | None = None,
+        pdf: bytes | None = None,
+        max_tokens: int = 8000,
+        stream: bool = True,
+    ) -> TextAnswer:
+        """Задаёт вопрос модели.
+
+        По умолчанию ответ забирается потоком. Это не про скорость:
+        разбор чертежа занимает минуты, а защита сервисов рвёт
+        соединение, по которому долго ничего не идёт. При потоке данные
+        идут постоянно, и обрыва не происходит.
+
+        Не каждый сервис умеет поток и не каждый понимает просьбу
+        прислать счётчик расхода. Поэтому способы перебираются от
+        лучшего к самому простому, пока какой-нибудь не сработает.
+        """
+        ways: list[tuple[bool, bool]] = (
+            [(True, True), (True, False), (False, False)] if stream else [(False, False)]
+        )
+
+        for number, (as_stream, with_usage) in enumerate(ways):
+            body = self._build_body(
+                model, prompt, images, pdf, max_tokens, as_stream, with_usage
+            )
+            try:
+                if as_stream:
+                    return self._ask_streaming(model, body)
+                return self._ask_at_once(model, body)
+            except StreamNotSupported as refusal:
+                if number == len(ways) - 1:
+                    raise UserError(
+                        "Сервис не смог выполнить запрос.",
+                        "Попробуйте ещё раз или выберите другую модель "
+                        "в «Настройках».",
+                        technical=str(refusal)[:200],
+                    ) from refusal
+                log.info("Пробую другой способ запроса: %s", refusal)
+
+        raise AssertionError("недостижимо")  # pragma: no cover
+
+    def _ask_at_once(self, model: str, body: dict[str, Any]) -> TextAnswer:
         try:
             with self._client() as client:
                 response = client.post(
@@ -203,6 +267,9 @@ class OpenAiCompatProvider:
             raise self._explain(response)
 
         payload = response.json()
+        return self._read_payload(payload, model)
+
+    def _read_payload(self, payload: dict[str, Any], model: str) -> TextAnswer:
         try:
             text = payload["choices"][0]["message"]["content"]
             if isinstance(text, list):  # некоторые сервисы отдают список блоков
@@ -226,5 +293,78 @@ class OpenAiCompatProvider:
             input_tokens=int(usage.get("prompt_tokens") or 0),
             output_tokens=int(usage.get("completion_tokens") or 0),
             model=str(payload.get("model") or model),
+            finish_reason=finish,
+        )
+
+    # Коды, которыми сервис отвечает на непонятную ему просьбу.
+    # Это не поломка, а повод попробовать запрос попроще.
+    RETRY_CODES = (400, 422, 501)
+
+    def _ask_streaming(self, model: str, body: dict[str, Any]) -> TextAnswer:
+        """Забирает ответ по частям, как их присылает сервис."""
+        pieces: list[str] = []
+        finish = ""
+        usage: dict[str, Any] = {}
+        served_model = model
+
+        try:
+            with self._client() as client:
+                with client.stream(
+                    "POST",
+                    f"{self.base_url}/chat/completions",
+                    headers=self._headers(),
+                    json=body,
+                ) as response:
+                    if response.status_code != 200:
+                        response.read()
+                        if response.status_code in self.RETRY_CODES:
+                            raise StreamNotSupported(
+                                f"ответ {response.status_code} на запрос потоком"
+                            )
+                        raise self._explain(response)
+
+                    for line in response.iter_lines():
+                        line = line.strip()
+                        if not line or not line.startswith("data:"):
+                            continue
+                        chunk = line[5:].strip()
+                        if chunk == "[DONE]":
+                            break
+                        try:
+                            parsed = json.loads(chunk)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(parsed, dict):
+                            continue
+                        served_model = str(parsed.get("model") or served_model)
+                        if parsed.get("usage"):
+                            usage = parsed["usage"]
+                        for choice in parsed.get("choices") or []:
+                            if not isinstance(choice, dict):
+                                continue
+                            delta = choice.get("delta") or {}
+                            piece = delta.get("content")
+                            if isinstance(piece, str):
+                                pieces.append(piece)
+                            elif isinstance(piece, list):
+                                pieces.extend(
+                                    part.get("text", "") for part in piece
+                                    if isinstance(part, dict)
+                                )
+                            if choice.get("finish_reason"):
+                                finish = str(choice["finish_reason"])
+        except httpx.HTTPError as exc:
+            raise self._network_error(exc) from exc
+
+        text = "".join(pieces)
+        if not text:
+            # Пустой поток — тоже повод попробовать обычным запросом.
+            raise StreamNotSupported("поток закончился, а ответа в нём не было")
+
+        return TextAnswer(
+            text=text,
+            input_tokens=int(usage.get("prompt_tokens") or 0),
+            output_tokens=int(usage.get("completion_tokens") or 0),
+            model=served_model,
             finish_reason=finish,
         )

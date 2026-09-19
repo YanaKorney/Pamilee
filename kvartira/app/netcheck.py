@@ -41,8 +41,8 @@ def diagnose(base_url: str, error: Exception | None = None) -> Diagnosis:
     if not host:
         return Diagnosis(
             "В настройках указан неверный адрес сервиса.",
-            "Откройте файл .env и проверьте строки PLAN_BASE_URL и IMAGE_BASE_URL. "
-            "Для AITunnel адрес такой: https://api.aitunnel.ru/v1",
+            "Откройте «Настройки» — там показан адрес каждого сервиса. "
+            "Для AITunnel он должен быть такой: https://api.aitunnel.ru/v1",
             technical or f"адрес не разобран: {base_url!r}",
         )
 
@@ -107,10 +107,34 @@ def diagnose(base_url: str, error: Exception | None = None) -> Diagnosis:
                 f"TLS {host}: {type(exc).__name__}: {exc}"[:200],
             )
 
-    # Связь есть, а запрос всё равно не прошёл.
+    # Связь есть, а запрос всё равно не прошёл. Чаще всего это долгий
+    # запрос: разбор чертежа занимает минуты, и соединение успевают
+    # закрыть по дороге. Отличаем такой обрыв от прочих бед по виду ошибки.
+    kind = type(error).__name__ if error else ""
+    reason = f"{kind}: {error}".lower() if error else ""
+
+    if "timeout" in kind.lower() or "timeout" in reason:
+        return Diagnosis(
+            "Сервис не успел ответить.",
+            "Разбор чертежа — долгая работа, и иногда сервис не укладывается "
+            "в отведённое время. Подождите минуту и нажмите «Разобрать план» "
+            "ещё раз: деньги за неудавшийся запрос не списываются.",
+            technical or f"{host}:{port}: ответ не пришёл вовремя",
+        )
+
+    broken = ("remoteprotocolerror", "connectionreset", "readerror",
+              "incomplete", "connecterror", "closedresourceerror")
+    if any(word in kind.lower() for word in broken) or "reset" in reason:
+        return Diagnosis(
+            "Связь с сервисом оборвалась на середине запроса.",
+            "Так бывает при нестабильном интернете или когда включён VPN. "
+            "Выключите VPN, если он включён, и попробуйте ещё раз.",
+            technical or f"{host}:{port}: соединение закрылось раньше времени",
+        )
+
     return Diagnosis(
         "Сервис доступен, но запрос до него не дошёл.",
-        "Проверьте адрес сервиса в файле .env — возможно, в нём опечатка. "
-        "Для AITunnel адрес такой: https://api.aitunnel.ru/v1",
+        "Попробуйте ещё раз через минуту. Если повторяется — выключите VPN "
+        "и проверьте, не блокирует ли программу антивирус.",
         technical or f"{host}:{port} отвечает, но запрос не выполнен",
     )

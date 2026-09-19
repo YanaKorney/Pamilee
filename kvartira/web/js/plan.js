@@ -137,11 +137,24 @@ function analyseButton(pageId, host) {
     button.addEventListener('click', async () => {
         if (!confirm(
             'Программа отправит этот лист в AI-сервис и найдёт на нём комнаты, '
-            + 'двери, окна и мебель.\n\nОбычно это стоит 40–60 рублей. Продолжить?'
+            + 'двери, окна и мебель.\n\nЭто занимает несколько минут — '
+            + 'страницу закрывать не надо.\nОбычно стоит 40–60 рублей. Продолжить?'
         )) return;
         button.disabled = true;
         const original = button.textContent;
-        button.textContent = 'Разбираю… это займёт до минуты';
+
+        // Разбор идёт минутами. Молчащая кнопка за это время выглядит
+        // как зависшая программа, поэтому показываем, сколько уже идёт.
+        const started = Date.now();
+        const tick = () => {
+            const seconds = Math.round((Date.now() - started) / 1000);
+            const passed = seconds < 60
+                ? `${seconds} с`
+                : `${Math.floor(seconds / 60)} мин ${seconds % 60} с`;
+            button.textContent = `Разбираю… ${passed}`;
+        };
+        tick();
+        const timer = setInterval(tick, 1000);
         try {
             const data = await api.post(
                 `/api/projects/${projectId}/files/${pageId}/analyse`, {});
@@ -157,6 +170,7 @@ function analyseButton(pageId, host) {
                 technicalNote(err && err.technical),
             ]));
         } finally {
+            clearInterval(timer);
             button.disabled = false;
             button.textContent = original;
         }

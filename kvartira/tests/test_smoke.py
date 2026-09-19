@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -326,7 +327,8 @@ class TestProviderErrors(unittest.TestCase):
     def test_bad_key(self) -> None:
         error = self._explain(401)
         self.assertIn("ключ", error.message.lower())
-        self.assertIn(".env", error.hint)
+        self.assertIn("Настройки", error.hint)
+        self.assertNotIn(".env", error.hint, "Человека больше не гоняют к файлу")
 
     def test_no_money(self) -> None:
         error = self._explain(402)
@@ -572,7 +574,8 @@ class FakeProvider:
         self.asked_prompt = ""
         self.asked_images = 0
 
-    def ask(self, model, prompt, images=None, pdf=None, max_tokens=8000):
+    def ask(self, model, prompt, images=None, pdf=None, max_tokens=8000,
+            stream=True):
         from app.providers.base import TextAnswer
         self.asked_prompt = prompt
         self.asked_images = len(images or [])
@@ -1290,3 +1293,233 @@ class TestTruncatedAnswerIsRescued(TestBase):
         result = analyse_page(1, self.PDF, 1, True, 74.37, provider=fake)
         self.assertEqual(len(result.rooms), 1)
         self.assertEqual(result.rooms[0].name, "Гостиная")
+
+
+# ── Ответ по частям ──────────────────────────────────────────────────
+
+
+def _sse(*chunks: str) -> bytes:
+    """Собирает ответ в том виде, в каком его присылает сервис."""
+    return "".join(f"data: {chunk}\n\n" for chunk in chunks).encode("utf-8")
+
+
+class StreamingTestBase(unittest.TestCase):
+    """Заготовка: подменяет сервис заранее заготовленными ответами."""
+
+    def setUp(self) -> None:
+        from app.providers import OpenAiCompatProvider
+        self.provider = OpenAiCompatProvider("https://example.invalid/v1", "key", "Тест")
+        self.sent: list[dict] = []
+
+    def _serve(self, handler) -> None:
+        """Подменяет связь с сервисом на заранее заготовленные ответы."""
+        import httpx, json as _json
+
+        def record(request: httpx.Request) -> httpx.Response:
+            self.sent.append(_json.loads(request.content))
+            return handler(len(self.sent) - 1)
+
+        self.provider._client = lambda: httpx.Client(
+            transport=httpx.MockTransport(record)
+        )
+
+
+class TestStreamingAnswer(StreamingTestBase):
+    """Разбор чертежа идёт минутами.
+
+    Если всё это время по соединению ничего не передаётся, защита сервиса
+    считает его брошенным и обрывает — человек видит «запрос не дошёл».
+    Поэтому ответ забирается по частям: данные идут постоянно.
+    """
+
+    def test_запрос_идёт_потоком(self) -> None:
+        """Главное: программа просит присылать ответ по частям."""
+        import httpx
+        self._serve(lambda n: httpx.Response(
+            200,
+            content=_sse('{"choices":[{"delta":{"content":"да"}}]}', "[DONE]"),
+            headers={"content-type": "text/event-stream"},
+        ))
+        self.provider.ask("model", "вопрос")
+        self.assertTrue(self.sent[0].get("stream"), "Ответ должен идти потоком")
+
+    def test_куски_склеиваются_по_порядку(self) -> None:
+        import httpx
+        self._serve(lambda n: httpx.Response(
+            200,
+            content=_sse(
+                '{"model":"claude","choices":[{"delta":{"content":"Гости"}}]}',
+                '{"choices":[{"delta":{"content":"ная"}}]}',
+                '{"choices":[{"delta":{},"finish_reason":"stop"}]}',
+                '{"usage":{"prompt_tokens":11,"completion_tokens":22}}',
+                "[DONE]",
+            ),
+            headers={"content-type": "text/event-stream"},
+        ))
+        answer = self.provider.ask("model", "вопрос")
+        self.assertEqual(answer.text, "Гостиная")
+        self.assertEqual(answer.finish_reason, "stop")
+        self.assertEqual(answer.input_tokens, 11)
+        self.assertEqual(answer.output_tokens, 22)
+        self.assertEqual(answer.model, "claude")
+
+    def test_расход_считается_и_из_потока(self) -> None:
+        """Без счётчика расхода не посчитать стоимость и дневной предел."""
+        import httpx
+        self._serve(lambda n: httpx.Response(
+            200,
+            content=_sse(
+                '{"choices":[{"delta":{"content":"текст"}}]}',
+                '{"usage":{"prompt_tokens":5,"completion_tokens":7}}',
+                "[DONE]",
+            ),
+            headers={"content-type": "text/event-stream"},
+        ))
+        self.provider.ask("model", "вопрос")
+        self.assertEqual(
+            self.sent[0].get("stream_options"), {"include_usage": True},
+            "Счётчик расхода надо запросить явно",
+        )
+
+    def test_обрыв_ответа_виден(self) -> None:
+        """Если модель не договорила, об этом должно быть известно."""
+        import httpx
+        self._serve(lambda n: httpx.Response(
+            200,
+            content=_sse(
+                json.dumps({"choices": [{"delta": {"content": '{"rooms":['}}]}),
+                '{"choices":[{"delta":{},"finish_reason":"length"}]}',
+                "[DONE]",
+            ),
+            headers={"content-type": "text/event-stream"},
+        ))
+        self.assertEqual(self.provider.ask("model", "вопрос").finish_reason, "length")
+
+    def test_мусор_в_потоке_не_ломает_ответ(self) -> None:
+        import httpx
+        self._serve(lambda n: httpx.Response(
+            200,
+            content=(
+                b": keep-alive\n\n"
+                + _sse("не json", '{"choices":[{"delta":{"content":"цел"}}]}')
+                + b"\n"
+                + _sse('{"choices":[{"delta":{"content":"ый"}}]}', "[DONE]")
+            ),
+            headers={"content-type": "text/event-stream"},
+        ))
+        self.assertEqual(self.provider.ask("model", "вопрос").text, "целый")
+
+    def test_ответ_списком_блоков(self) -> None:
+        import httpx
+        self._serve(lambda n: httpx.Response(
+            200,
+            content=_sse(
+                '{"choices":[{"delta":{"content":[{"text":"два "},{"text":"блока"}]}}]}',
+                "[DONE]",
+            ),
+            headers={"content-type": "text/event-stream"},
+        ))
+        self.assertEqual(self.provider.ask("model", "вопрос").text, "два блока")
+
+
+class TestStreamingFallback(StreamingTestBase):
+    """Не каждый сервис умеет поток. Тогда пробуем запрос попроще."""
+
+    def test_сервис_не_понял_счётчик(self) -> None:
+        """Отказ на stream_options — повод повторить без него, но потоком."""
+        import httpx
+
+        def handler(number: int) -> httpx.Response:
+            if number == 0:
+                return httpx.Response(400, json={"error": {"message": "stream_options"}})
+            return httpx.Response(
+                200,
+                content=_sse('{"choices":[{"delta":{"content":"готово"}}]}', "[DONE]"),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        self._serve(handler)
+        self.assertEqual(self.provider.ask("model", "вопрос").text, "готово")
+        self.assertNotIn("stream_options", self.sent[1])
+        self.assertTrue(self.sent[1].get("stream"), "Поток всё ещё нужен")
+
+    def test_сервис_совсем_не_умеет_поток(self) -> None:
+        import httpx
+
+        def handler(number: int) -> httpx.Response:
+            if number < 2:
+                return httpx.Response(400, json={"error": {"message": "stream"}})
+            return httpx.Response(200, json={
+                "model": "claude",
+                "choices": [{"message": {"content": "обычный ответ"},
+                             "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 4},
+            })
+
+        self._serve(handler)
+        answer = self.provider.ask("model", "вопрос")
+        self.assertEqual(answer.text, "обычный ответ")
+        self.assertEqual(len(self.sent), 3)
+        self.assertNotIn("stream", self.sent[2])
+
+    def test_пустой_поток_не_остаётся_без_ответа(self) -> None:
+        import httpx
+
+        def handler(number: int) -> httpx.Response:
+            if number < 2:
+                return httpx.Response(
+                    200, content=b"data: [DONE]\n\n",
+                    headers={"content-type": "text/event-stream"},
+                )
+            return httpx.Response(200, json={
+                "choices": [{"message": {"content": "всё-таки ответ"}}],
+            })
+
+        self._serve(handler)
+        self.assertEqual(self.provider.ask("model", "вопрос").text, "всё-таки ответ")
+
+    def test_настоящая_ошибка_не_прячется_за_повтором(self) -> None:
+        """Отказ по ключу — не повод слать запрос снова и снова."""
+        import httpx
+        self._serve(lambda n: httpx.Response(401, json={"error": "bad key"}))
+        with self.assertRaises(UserError) as caught:
+            self.provider.ask("model", "вопрос")
+        self.assertIn("ключ", caught.exception.message.lower())
+        self.assertEqual(len(self.sent), 1, "Незачем повторять запрос с плохим ключом")
+
+    def test_если_не_вышло_ничем_то_человеку_понятная_ошибка(self) -> None:
+        import httpx
+        self._serve(lambda n: httpx.Response(400, json={"error": "нет"}))
+        with self.assertRaises(UserError) as caught:
+            self.provider.ask("model", "вопрос")
+        self.assertNotIn("stream", caught.exception.message.lower())
+        self.assertTrue(caught.exception.technical, "Подробности нужны для разбора")
+
+
+class TestLongRequestIsExplained(unittest.TestCase):
+    """Если долгий запрос всё же оборвался, причину надо назвать верно."""
+
+    def test_не_успел_ответить(self) -> None:
+        import httpx
+        from app.netcheck import diagnose
+        found = diagnose("https://example.com/v1", httpx.ReadTimeout("время вышло"))
+        self.assertIn("не успел", found.message.lower())
+        self.assertIn("ещё раз", found.hint)
+
+    def test_соединение_оборвалось(self) -> None:
+        import httpx
+        from app.netcheck import diagnose
+        found = diagnose(
+            "https://example.com/v1", httpx.RemoteProtocolError("закрыли")
+        )
+        self.assertIn("оборвалась", found.message.lower())
+
+    def test_человека_не_отправляют_искать_опечатку_в_env(self) -> None:
+        """Адрес сервиса она не вводила — винить его было неправдой."""
+        import httpx
+        from app.netcheck import diagnose
+        for error in (httpx.ReadTimeout("x"), httpx.RemoteProtocolError("x"), None):
+            with self.subTest(error=type(error).__name__):
+                found = diagnose("https://example.com/v1", error)
+                self.assertNotIn(".env", found.hint)
+                self.assertNotIn("опечатка", found.hint)
