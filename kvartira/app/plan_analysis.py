@@ -165,10 +165,17 @@ def build_prompt(
             "балкона или лоджии."
         )
     if plan.extra_areas:
+        count = len(plan.extra_areas)
+        listed = ", ".join(f"{v} м²" for v in plan.extra_areas)
         known.append(
-            "Отдельно подписаны площади балкона или лоджии: "
-            + ", ".join(f"{v} м²" for v in plan.extra_areas)
-            + ". Это помещение тоже обведи, но пометь kind = balcony."
+            (f"Отдельно подписана площадь балкона или лоджии: {listed}."
+             if count == 1 else
+             f"Отдельно подписаны площади {count} балконов или лоджий: {listed}.")
+            + (" Обведи его тоже и пометь kind = balcony. "
+               "Такое помещение здесь ровно одно — больше не ищи."
+               if count == 1 else
+               f" Обведи их тоже и пометь kind = balcony. "
+               f"Таких помещений здесь ровно {count} — больше не ищи.")
         )
 
     check_block = ""
@@ -569,6 +576,15 @@ def _add_warnings(result: Analysis, plan: VectorPlan) -> None:
         result.warnings.append(
             f"На чертеже подписано {len(plan.room_areas)} помещений квартиры, "
             f"а распознано {len(inside)}. Балкон и лоджия не считаются."
+        )
+
+    outside = [r for r in result.rooms if r.kind in OUTSIDE_KINDS]
+    if plan.extra_areas and len(outside) != len(plan.extra_areas):
+        word = ("лоджия или балкон" if len(plan.extra_areas) == 1
+                else f"{len(plan.extra_areas)} лоджий или балконов")
+        result.warnings.append(
+            f"На чертеже подписана {word}, а распознано {len(outside)}. "
+            "Проверьте в 3D-модели."
         )
 
     if result.declared_total_m2:

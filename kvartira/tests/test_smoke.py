@@ -1700,3 +1700,75 @@ class TestOldProjectGetsFixed(TestBase):
 def geometry_module():
     from app import geometry
     return geometry
+
+
+# ── Одна лоджия, а не две ────────────────────────────────────────────
+
+class TestLoggiaCountedOnce(unittest.TestCase):
+    """В экспликации лоджию подписывают дважды.
+
+    Сначала полную площадь, потом её же с понижающим коэффициентом
+    (0,5 для лоджии, 0,3 для балкона). Программа принимала это за две
+    разные лоджии. На её чертеже: 4,49 м² и 2,25 м² — одна лоджия.
+    """
+
+    PDF = Path(__file__).parent / "fixtures" / "plan-zastroyshchik.pdf"
+
+    def test_на_её_чертеже_лоджия_одна(self) -> None:
+        from app.plan_vector import read_plan
+        plan = read_plan(self.PDF, 1, 74.37)
+        self.assertEqual(plan.extra_areas, [4.49])
+
+    def test_комнаты_и_итог_не_пострадали(self) -> None:
+        from app.plan_vector import read_plan
+        plan = read_plan(self.PDF, 1, 74.37)
+        self.assertEqual(len(plan.room_areas), 7)
+        self.assertAlmostEqual(sum(plan.room_areas), 74.37, places=2)
+
+    def test_арифметика_чертежа_подтверждает_повтор(self) -> None:
+        """74,37 + 2,25 = 76,62 — строка с листа, а не догадка."""
+        from app.plan_vector import _drop_coefficient_twins
+        kept = _drop_coefficient_twins([4.49, 2.25], 74.37, [74.37, 76.62, 78.86])
+        self.assertEqual(kept, [4.49])
+
+    def test_два_настоящих_балкона_не_слипаются(self) -> None:
+        """Один балкон ровно вдвое меньше другого — но это два балкона.
+
+        Потерять часть квартиры хуже, чем показать лишнюю подпись,
+        поэтому без подтверждения арифметикой повтор не убирается.
+        """
+        from app.plan_vector import _drop_coefficient_twins
+        kept = _drop_coefficient_twins([6.0, 3.0], 74.37, [74.37, 83.37])
+        self.assertEqual(kept, [6.0, 3.0])
+
+    def test_без_итогов_ничего_не_выбрасываем(self) -> None:
+        from app.plan_vector import _drop_coefficient_twins
+        self.assertEqual(_drop_coefficient_twins([4.49, 2.25], 74.37, []), [4.49, 2.25])
+        self.assertEqual(_drop_coefficient_twins([4.49, 2.25], None, [76.62]), [4.49, 2.25])
+
+    def test_балкон_с_коэффициентом_0_3_тоже_повтор(self) -> None:
+        from app.plan_vector import _drop_coefficient_twins
+        kept = _drop_coefficient_twins([5.0, 1.5], 60.0, [60.0, 61.5, 65.0])
+        self.assertEqual(kept, [5.0])
+
+    def test_модели_говорят_сколько_лоджий_искать(self) -> None:
+        from app.plan_vector import read_plan
+        from app.plan_analysis import build_prompt
+        plan = read_plan(self.PDF, 1, 74.37)
+        prompt = build_prompt(plan, 1540, 1100, 15.24, 1.0)
+        self.assertIn("ровно одно", prompt)
+        self.assertNotIn("2.25", prompt)
+
+    def test_лишняя_лоджия_попадает_в_предупреждения(self) -> None:
+        from app.plan_analysis import Analysis, RoomGuess, _add_warnings
+        from app.plan_vector import VectorPlan
+        plan = VectorPlan()
+        plan.extra_areas = [4.49]
+        result = Analysis()
+        square = [(0, 0), (2000, 0), (2000, 2000), (0, 2000)]
+        result.rooms = [
+            RoomGuess("Лоджия", "balcony", square, 4.0),
+            RoomGuess("Балкон", "balcony", square, 2.0),
+        ]
+        _add_warnings(result, plan)
+        self.assertTrue(any("лоджия или балкон" in w for w in result.warnings))

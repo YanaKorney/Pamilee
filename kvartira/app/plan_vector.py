@@ -321,6 +321,45 @@ def _split_areas(
     return min(meaningful or reconciled, key=lambda row: row[0])
 
 
+# Лоджию и балкон в экспликации подписывают дважды: сначала полную
+# площадь, а следом её же с понижающим коэффициентом — 0,5 для лоджии
+# и 0,3 для балкона. Это одно помещение, а не два.
+COEFFICIENTS = (0.5, 0.3)
+
+
+def _drop_coefficient_twins(
+    values: list[float],
+    total: float | None,
+    summary: list[float],
+) -> list[float]:
+    """Убирает повторы вида «та же лоджия, но с коэффициентом».
+
+    Одного лишь отношения площадей мало: у кого-то может быть два
+    настоящих балкона, один ровно вдвое меньше другого, — и слить их
+    было бы потерей части квартиры. Поэтому догадка проверяется
+    арифметикой самого чертежа: в экспликации обязан найтись итог
+    «общая площадь плюс эта самая уменьшенная площадь». У неё это
+    74,37 + 2,25 = 76,62.
+    """
+    if not values or total is None or not summary:
+        return list(values)
+
+    kept: list[float] = []
+    for value in sorted(values, reverse=True):
+        matches_ratio = any(
+            abs(value - full * share) <= 0.02
+            for full in kept for share in COEFFICIENTS
+        )
+        confirmed = any(abs(total + value - line) <= 0.02 for line in summary)
+        if not (matches_ratio and confirmed):
+            kept.append(value)
+
+    dropped = len(values) - len(kept)
+    if dropped:
+        log.info("Убрано повторов площади с коэффициентом: %s", dropped)
+    return [value for value in values if value in kept]
+
+
 # ── Главная функция ───────────────────────────────────────────────────────
 
 def read_plan(
@@ -357,7 +396,9 @@ def read_plan(
         total, rooms, extra = _split_areas(plan.areas, plan.summary, expected_total_m2)
         plan.total_area_m2 = total
         plan.room_areas = rooms
-        plan.extra_areas = extra
+        plan.extra_areas = _drop_coefficient_twins(
+            extra, plan.total_area_m2, plan.summary
+        )
 
         if scale and plan.bbox:
             plan.drawing_width_mm = round((plan.bbox[2] - plan.bbox[0]) * scale)
