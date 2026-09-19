@@ -432,3 +432,32 @@ class TestRequirements(unittest.TestCase):
     def test_pillow_is_optional(self) -> None:
         optional = {line.split(">=")[0].lower() for line in self._lines("requirements-optional.txt")}
         self.assertIn("pillow", optional)
+
+
+class TestConnectionDiagnosis(unittest.TestCase):
+    """«Не удалось связаться» — бесполезно. Программа обязана назвать причину."""
+
+    def test_unknown_host(self) -> None:
+        from app.netcheck import diagnose
+        found = diagnose("https://takogo-servisa-net-12345.invalid/v1")
+        self.assertIn("найти", found.message.lower())
+        self.assertTrue(found.hint)
+        self.assertTrue(found.technical, "Разработчику нужна техническая строка")
+
+    def test_broken_address(self) -> None:
+        from app.netcheck import diagnose
+        found = diagnose("")
+        self.assertIn("неверный адрес", found.message.lower())
+        self.assertIn("aitunnel", found.hint)
+
+    def test_message_is_human(self) -> None:
+        """В сообщении для человека не должно быть кода и латиницы."""
+        from app.netcheck import diagnose
+        found = diagnose("https://takogo-servisa-net-12345.invalid/v1")
+        self.assertNotIn("Error", found.message)
+        self.assertNotIn("socket", found.message.lower())
+
+    def test_error_carries_technical_note(self) -> None:
+        from app.errors import UserError
+        error = UserError("Сообщение", "Подсказка", technical="TimeoutError: ...")
+        self.assertEqual(error.to_dict()["technical"], "TimeoutError: ...")

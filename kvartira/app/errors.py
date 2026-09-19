@@ -41,14 +41,23 @@ class UserError(Exception):
     hint    — что с этим делать.
     """
 
-    def __init__(self, message: str, hint: str = "", status: int = 400) -> None:
+    def __init__(
+        self,
+        message: str,
+        hint: str = "",
+        status: int = 400,
+        technical: str = "",
+    ) -> None:
         super().__init__(message)
         self.message = message
         self.hint = hint
         self.status = status
+        # Короткая строка для разработчика. Человеку показывается мелким
+        # шрифтом под подсказкой — чтобы было что переслать, если не помогло.
+        self.technical = technical
 
     def to_dict(self) -> dict[str, Any]:
-        return {"error": self.message, "hint": self.hint}
+        return {"error": self.message, "hint": self.hint, "technical": self.technical}
 
 
 # ── Готовые сообщения для типовых ситуаций ────────────────────────────────

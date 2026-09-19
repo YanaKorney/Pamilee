@@ -77,6 +77,16 @@ export function showError(err) {
     console.error(err);
 }
 
+// Техническая строка — мелко и серым. Человеку читать не обязательно,
+// но её удобно переслать разработчику, если подсказка не помогла.
+export function technicalNote(text) {
+    if (!text) return null;
+    return el('details', { class: 'tech' }, [
+        el('summary', { text: 'Подробности' }),
+        el('code', { text }),
+    ]);
+}
+
 // ── Мелкие помощники ─────────────────────────────────────────────────
 
 export function el(tag, props = {}, children = []) {

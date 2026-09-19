@@ -423,3 +423,26 @@ input:focus, textarea:focus, select:focus {
     color: #fff; font-size: 30px; line-height: 1;
     background: none; border: none; cursor: pointer;
 }
+
+/* Техническая подробность под сообщением об ошибке */
+.tech { margin-top: 8px; }
+.tech summary {
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 13px;
+    list-style: none;
+}
+.tech summary::-webkit-details-marker { display: none; }
+.tech summary::before { content: '▸ '; }
+.tech[open] summary::before { content: '▾ '; }
+.tech code {
+    display: block;
+    margin-top: 6px;
+    padding: 8px 10px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    color: var(--muted);
+    overflow-wrap: anywhere;
+}

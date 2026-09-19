@@ -91,6 +91,7 @@ def _service_report(
         "hint": "",
         "models_found": 0,
         "model_available": False,
+        "technical": "",
     }
 
     if not ready:
@@ -104,6 +105,7 @@ def _service_report(
     except UserError as exc:
         report["message"] = exc.message
         report["hint"] = exc.hint
+        report["technical"] = exc.technical
         return report
 
     report["models_found"] = len(models)
@@ -129,6 +131,7 @@ def _service_report(
         except UserError as exc:
             report["message"] = exc.message
             report["hint"] = exc.hint
+            report["technical"] = exc.technical
             return report
         log.info("Проверка %s прошла, ответ: %r", title, answer.text[:40])
 

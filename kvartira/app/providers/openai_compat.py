@@ -93,11 +93,11 @@ class OpenAiCompatProvider:
 
     def _network_error(self, exc: Exception) -> UserError:
         log.warning("Не удалось соединиться с %s: %s", self.base_url, exc)
-        return UserError(
-            "Не удалось связаться с сервисом.",
-            "Проверьте интернет. Если включён VPN — попробуйте выключить его. "
-            "Возможно, в настройках указан неверный адрес сервиса.",
-        )
+        from ..netcheck import diagnose
+
+        found = diagnose(self.base_url, exc)
+        log.warning("Разбор связи: %s | %s", found.message, found.technical)
+        return UserError(found.message, found.hint, technical=found.technical)
 
     # ── Каталог моделей ───────────────────────────────────────────────
 

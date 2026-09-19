@@ -1,6 +1,6 @@
 // Страница «Настройки»: что подключено, какие модели выбраны, проверка доступа.
 
-import { api, el, showError, toast } from './api.js';
+import { api, el, showError, technicalNote, toast } from './api.js';
 
 const content = document.getElementById('content');
 
@@ -44,6 +44,7 @@ function renderCheck(key, report) {
             el('strong', { text: report.message }),
         ]),
         report.hint ? el('div', { class: 'muted', text: report.hint }) : null,
+        technicalNote(report.technical),
     );
 }
 
