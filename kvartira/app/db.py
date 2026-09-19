@@ -17,7 +17,7 @@ from typing import Any, Iterator
 
 from .config import DB_PATH, ensure_dirs
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -159,6 +159,13 @@ CREATE TABLE IF NOT EXISTS spend (
     amount_usd  REAL    NOT NULL,
     note        TEXT    NOT NULL DEFAULT '',
     created_at  TEXT    NOT NULL
+);
+
+-- Настройки программы, которые меняются из интерфейса
+-- (в отличие от .env, который правится руками).
+CREATE TABLE IF NOT EXISTS app_settings (
+    key    TEXT PRIMARY KEY,
+    value  TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_files_project    ON files(project_id);
@@ -369,3 +376,26 @@ def project_stats(project_id: int) -> dict[str, int]:
             (project_id, project_id, project_id, project_id),
         ).fetchone()
     return {k: int(row[k]) for k in row.keys()}
+
+
+# ── Настройки, меняемые из интерфейса ─────────────────────────────────────
+
+def get_setting(key: str, default: str = "") -> str:
+    with connect() as conn:
+        row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(key: str, value: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+
+
+def all_settings() -> dict[str, str]:
+    with connect() as conn:
+        rows = conn.execute("SELECT key, value FROM app_settings").fetchall()
+    return {r["key"]: r["value"] for r in rows}

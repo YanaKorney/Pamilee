@@ -83,15 +83,13 @@ class Settings:
         # Пусто = сервис не настроен. Приложение при этом работает,
         # просто кнопка «Разобрать план» скажет, что нужен ключ.
         self.plan_api_key: str = _get("PLAN_API_KEY")
-        self.plan_base_url: str = _get("PLAN_BASE_URL", "https://api.anthropic.com")
+        self.plan_base_url: str = _get("PLAN_BASE_URL", "https://api.aitunnel.ru/v1")
         self.plan_model: str = _get("PLAN_MODEL", "claude-opus-5")
 
         # ── AI: создание визуализаций ─────────────────────────────────────
         self.image_api_key: str = _get("IMAGE_API_KEY")
-        self.image_base_url: str = _get(
-            "IMAGE_BASE_URL", "https://generativelanguage.googleapis.com"
-        )
-        self.image_model: str = _get("IMAGE_MODEL", "gemini-3.1-flash-image")
+        self.image_base_url: str = _get("IMAGE_BASE_URL", "https://api.aitunnel.ru/v1")
+        self.image_model: str = _get("IMAGE_MODEL", "flux.2-pro")
 
         # ── Защита от лишних трат ─────────────────────────────────────────
         self.daily_limit_usd: float = _get_float("DAILY_LIMIT_USD", 3.0)

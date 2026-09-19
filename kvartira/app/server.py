@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import __version__, db, plan_files, storage
+from . import __version__, ai, db, plan_files, storage
 from .config import WEB_DIR, settings
 from .errors import UserError, get_logger, project_not_found
 
@@ -77,12 +77,12 @@ def status() -> dict[str, Any]:
             "plan": {
                 "title": "Чтение чертежа",
                 "ready": settings.plan_ready,
-                "model": settings.plan_model,
+                "model": ai.plan_model(),
             },
             "image": {
                 "title": "Создание визуализаций",
                 "ready": settings.image_ready,
-                "model": settings.image_model,
+                "model": ai.image_model(),
             },
         },
     }
@@ -237,6 +237,50 @@ def api_file_preview(file_id: int) -> FileResponse:
 @app.get("/api/files/{file_id}/raw")
 def api_file_raw(file_id: int) -> FileResponse:
     return _file_response(file_id, preview=False)
+
+
+# ── AI-сервис: каталог моделей, выбор, проверка доступа ───────────────────
+
+class AiSettingsPatch(BaseModel):
+    plan_model: str | None = Field(default=None, max_length=200)
+    image_model: str | None = Field(default=None, max_length=200)
+
+
+@app.get("/api/ai/settings")
+def api_ai_settings() -> dict[str, Any]:
+    return {
+        "plan": {
+            "model": ai.plan_model(),
+            "ready": settings.plan_ready,
+            "base_url": settings.plan_base_url,
+        },
+        "image": {
+            "model": ai.image_model(),
+            "ready": settings.image_ready,
+            "base_url": settings.image_base_url,
+        },
+    }
+
+
+@app.patch("/api/ai/settings")
+def api_set_ai_settings(data: AiSettingsPatch) -> dict[str, Any]:
+    if data.plan_model is not None:
+        db.set_setting(ai.PLAN_MODEL_KEY, data.plan_model.strip())
+    if data.image_model is not None:
+        db.set_setting(ai.IMAGE_MODEL_KEY, data.image_model.strip())
+    return api_ai_settings()
+
+
+@app.get("/api/ai/models")
+def api_ai_models() -> dict[str, Any]:
+    """Каталог моделей сервиса — для выпадающих списков в настройках."""
+    return ai.catalogue()
+
+
+@app.post("/api/ai/check")
+def api_ai_check() -> dict[str, Any]:
+    """Кнопка «Проверить доступ»."""
+    return ai.check_access()
 
 
 # ── Страницы ──────────────────────────────────────────────────────────────

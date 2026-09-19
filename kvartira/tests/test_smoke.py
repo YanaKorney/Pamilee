@@ -241,3 +241,102 @@ class TestPlanUpload(TestBase):
     def test_plan_page_opens(self) -> None:
         response = self.client.get(f"/project/{self.project_id}/plan")
         self.assertEqual(response.status_code, 200)
+
+
+class TestAiSettings(TestBase):
+    """Выбор моделей и проверка доступа."""
+
+    def test_settings_have_defaults(self) -> None:
+        data = self.client.get("/api/ai/settings").json()
+        self.assertIn("plan", data)
+        self.assertIn("image", data)
+        self.assertTrue(data["plan"]["base_url"].startswith("http"))
+
+    def test_chosen_model_is_saved(self) -> None:
+        self.client.patch(
+            "/api/ai/settings",
+            json={"plan_model": "claude-sonnet-5", "image_model": "flux.2-max"},
+        )
+        data = self.client.get("/api/ai/settings").json()
+        self.assertEqual(data["plan"]["model"], "claude-sonnet-5")
+        self.assertEqual(data["image"]["model"], "flux.2-max")
+        # выбор из интерфейса важнее значения из .env
+        self.assertEqual(self.client.get("/api/status").json()
+                         ["services"]["plan"]["model"], "claude-sonnet-5")
+
+    def test_check_without_key_explains_itself(self) -> None:
+        report = self.client.post("/api/ai/check").json()
+        for part in ("plan", "image"):
+            with self.subTest(part=part):
+                self.assertFalse(report[part]["ok"])
+                self.assertIn("Ключ", report[part]["message"])
+                self.assertIn(".env", report[part]["hint"])
+
+
+class TestModelKind(unittest.TestCase):
+    """Программа должна сама понимать, какая модель рисует, а какая пишет."""
+
+    def test_image_models(self) -> None:
+        from app.providers.base import guess_kind
+        for model_id in ("flux.2-pro", "FLUX.2-max", "gemini-3-pro-image",
+                         "dall-e-3", "recraft-v3", "nano-banana"):
+            with self.subTest(model=model_id):
+                self.assertEqual(guess_kind(model_id), "image")
+
+    def test_text_models(self) -> None:
+        from app.providers.base import guess_kind
+        for model_id in ("claude-opus-5", "claude-sonnet-5", "gpt-5", "deepseek-v3"):
+            with self.subTest(model=model_id):
+                self.assertEqual(guess_kind(model_id), "text")
+
+    def test_service_models_are_skipped(self) -> None:
+        from app.providers.base import guess_kind
+        self.assertEqual(guess_kind("text-embedding-3-large"), "other")
+        self.assertEqual(guess_kind("whisper-1"), "other")
+
+    def test_output_modality_wins_over_name(self) -> None:
+        from app.providers.base import guess_kind
+        self.assertEqual(
+            guess_kind("mystery-model-7", {"output_modalities": ["image"]}), "image"
+        )
+
+
+class TestProviderErrors(unittest.TestCase):
+    """Ошибки сервиса должны превращаться в человеческие сообщения."""
+
+    def setUp(self) -> None:
+        from app.providers import OpenAiCompatProvider
+        self.provider = OpenAiCompatProvider("https://example.invalid/v1", "key", "Тест")
+
+    def _explain(self, status: int, body: dict | None = None):
+        import httpx
+        response = httpx.Response(status, json=body or {}, request=httpx.Request("GET", "https://x"))
+        return self.provider._explain(response)
+
+    def test_bad_key(self) -> None:
+        error = self._explain(401)
+        self.assertIn("ключ", error.message.lower())
+        self.assertIn(".env", error.hint)
+
+    def test_no_money(self) -> None:
+        error = self._explain(402)
+        self.assertIn("деньги", error.message.lower())
+        self.assertIn("Пополните", error.hint)
+
+    def test_unknown_model(self) -> None:
+        error = self._explain(404)
+        self.assertIn("модели", error.message.lower())
+        self.assertIn("Настройки", error.hint)
+
+    def test_too_many_requests(self) -> None:
+        self.assertIn("Подождите", self._explain(429).hint)
+
+    def test_service_down(self) -> None:
+        self.assertIn("недоступен", self._explain(503).message)
+
+    def test_никакого_технического_текста(self) -> None:
+        """В сообщении для человека не должно быть кода ошибки и латиницы."""
+        for status in (401, 402, 404, 429, 503):
+            with self.subTest(status=status):
+                message = self._explain(status).message
+                self.assertNotIn(str(status), message)
