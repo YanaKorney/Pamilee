@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import ai, align, db, geometry
+from . import ai, align, db, geometry, plan_walls, storage
 from .errors import UserError, get_logger, scale_unknown
 from .plan_vector import VectorPlan, read_plan
 
@@ -151,6 +151,10 @@ def build_prompt(
     mm_per_px: float | None = None,
     factor: float = 1.0,
 ) -> str:
+    # Сколько помещений подписано на чертеже — столько и проёмов
+    # должно найтись как минимум: в каждое надо как-то войти.
+    rooms_count = len(plan.room_areas) + len(plan.extra_areas) or "несколько"
+
     known: list[str] = []
     if plan.total_area_m2:
         known.append(
@@ -239,7 +243,15 @@ def build_prompt(
    Если рядом подписана площадь — укажи её в area_m2.
    Помещения не должны перекрываться.
 
-3. ПРОЁМЫ. Отметь двери и окна: точку в середине проёма и ширину в пикселях.
+3. ПРОЁМЫ — ДВЕРИ И ОКНА. Их на чертеже видно хорошо, и пропускать их
+   нельзя: без них в 3D получится квартира без единого входа.
+   • В каждое помещение ведёт хотя бы одна дверь или открытый проход.
+     Помещений {rooms_count} — значит, и проёмов не меньше.
+   • Окна ищи на наружных стенах: обычно это разрыв в стене с тонкими
+     линиями внутри.
+   • Открытый проход без двери (например, между кухней и гостиной) —
+     тоже проём, отметь его с настоящей шириной.
+   Для каждого укажи точку в середине проёма и ширину в пикселях.
 
 4. МЕБЕЛЬ, САНТЕХНИКА И ТЕХНИКА. Отметь только то, что занимает место:
    мебель, сантехнику, крупную технику. Мелкий декор, ковры, растения
@@ -613,6 +625,132 @@ def _add_warnings(result: Analysis, plan: VectorPlan) -> None:
         )
 
 
+# ── Сверка стен с чертежом ────────────────────────────────────────────────
+
+# Сколько стен сверка обязана оставить, чтобы ей можно было верить.
+# По одной-двум стенам о такой беде не судят — нужна целая квартира.
+KEEP_AT_LEAST = 0.4
+ENOUGH_TO_JUDGE = 4
+
+
+def vector_plan_page(project_id: int) -> tuple[Path, int, float] | None:
+    """Находит у проекта векторный лист плана и его масштаб."""
+    for row in db.list_files(project_id, kind="plan"):
+        if row.get("mime") != "application/pdf":
+            continue
+        path = storage.project_dir(project_id) / "uploads" / row["stored_name"]
+        if not path.exists():
+            continue
+        try:
+            plan = read_plan(path, row.get("page_no") or 1, None)
+        except UserError:
+            continue
+        if plan.scale_is_reliable and plan.scale_mm_per_unit:
+            return path, row.get("page_no") or 1, plan.scale_mm_per_unit
+    return None
+
+
+def check_walls_against_drawing(
+    walls: list[geometry.Wall],
+    path: Path,
+    page_number: int,
+    scale: float,
+) -> tuple[list[geometry.Wall], dict[str, int]]:
+    """Сверяет построенные стены с чертежом и правит их по нему.
+
+    Стены выводятся из контуров комнат, а контуры рисует AI по картинке.
+    Он может принять открытый проход между кухней и гостиной за границу
+    двух помещений — и на этом месте вырастет перегородка, которой нет.
+    А двери и окна он часто просто не замечает.
+
+    Чертёж знает и то, и другое. Стена на нём — две линии, проём — разрыв
+    в них. Поэтому каждую построенную стену проверяем по месту: нет линий
+    совсем — стены нет; есть с разрывом — там дверь или окно; а заодно
+    берём с чертежа настоящую толщину.
+    """
+    segments = plan_walls.drawing_segments(path, page_number, scale)
+    counted = {"убрано": 0, "проёмов": 0, "толщин": 0}
+    if not segments:
+        return walls, counted
+
+    kept: list[geometry.Wall] = []
+    for wall in walls:
+        horizontal = abs(wall.y2 - wall.y1) <= 1
+        vertical = abs(wall.x2 - wall.x1) <= 1
+        if not (horizontal or vertical):
+            kept.append(wall)          # косую стену по чертежу не проверить
+            continue
+
+        if horizontal:
+            centre = (wall.y1 + wall.y2) / 2
+            low, high = sorted((wall.x1, wall.x2))
+        else:
+            centre = (wall.x1 + wall.x2) / 2
+            low, high = sorted((wall.y1, wall.y2))
+
+        found = plan_walls.check_wall(
+            segments, horizontal, centre, low, high, wall.thickness_mm
+        )
+        if not found.exists:
+            counted["убрано"] += 1
+            log.info("Стены на чертеже нет, убираю: (%s,%s)→(%s,%s)",
+                     wall.x1, wall.y1, wall.x2, wall.y2)
+            continue
+
+        if found.thickness_mm:
+            wall.thickness_mm = found.thickness_mm
+            counted["толщин"] += 1
+
+        if found.gaps:
+            # Чертёж главнее: если он показал проёмы, прошлые догадки
+            # на этой стене больше не нужны.
+            wall.openings = []
+            window = wall.kind == "outer"
+            for a, b in found.gaps:
+                wall.openings.append({
+                    "kind": "window" if window else "door",
+                    "offset_mm": int(round(a - low)),
+                    "width_mm": int(round(b - a)),
+                    "height_mm": 1500 if window else 2100,
+                    "sill_mm": 800 if window else 0,
+                })
+                counted["проёмов"] += 1
+
+        kept.append(wall)
+
+    # Страховка. Если чертёж «не узнал» большинство стен, значит сошлось
+    # не то: другой лист, сбитый масштаб, необмерный план. Лучше оставить
+    # квартиру как была, чем снести её по ошибке.
+    if len(walls) >= ENOUGH_TO_JUDGE and len(kept) < len(walls) * KEEP_AT_LEAST:
+        log.warning(
+            "Сверка с чертежом убрала бы %s стен из %s — это не похоже "
+            "на правду, оставляю как есть", len(walls) - len(kept), len(walls)
+        )
+        return walls, {"убрано": 0, "проёмов": 0, "толщин": 0}
+
+    return kept, counted
+
+
+def _verify_by_drawing(project_id: int, walls: list[geometry.Wall]):
+    """Сверяет стены с чертежом, если он векторный.
+
+    Чертежа может и не быть — тогда работаем как раньше, по контурам.
+    Ошибка при сверке тоже не повод терять уже построенные стены.
+    """
+    try:
+        drawing = vector_plan_page(project_id)
+        if drawing is None:
+            return walls
+        path, page_number, scale = drawing
+        walls, counted = check_walls_against_drawing(
+            walls, path, page_number, scale
+        )
+        log.info("Сверка с чертежом: %s", counted)
+    except Exception as trouble:        # чертёж не должен ронять разбор
+        log.warning("Сверить стены с чертежом не удалось: %s", trouble)
+    return walls
+
+
 # ── Сохранение ────────────────────────────────────────────────────────────
 
 def store(project_id: int, result: Analysis) -> None:
@@ -639,6 +777,7 @@ def store(project_id: int, result: Analysis) -> None:
         {"kind": o.kind, "x": o.x, "y": o.y, "width_mm": o.width_mm}
         for o in result.openings
     ])
+    walls = _verify_by_drawing(project_id, walls)
     for wall in walls:
         wall_id = db.add_wall(
             project_id, wall.x1, wall.y1, wall.x2, wall.y2,
@@ -710,7 +849,9 @@ def analyse_page(
 # чему-то новому: иначе у тех, кто обновился, ничего не пересчитается.
 # v2 — стены строятся в промежутках между комнатами, а не поперёк граней.
 # v3 — убраны лишние квадраты на перекрестиях перегородок.
-ALIGNED_MARK = "rooms_aligned_v3"
+# v4 — стены сверяются с чертежом: выдуманные убираются, двери и окна
+#      берутся из разрывов в линиях стен, толщина — со чертежа.
+ALIGNED_MARK = "rooms_aligned_v4"
 
 
 def realign_saved_rooms(project_id: int) -> dict[str, Any] | None:
@@ -755,6 +896,7 @@ def realign_saved_rooms(project_id: int) -> dict[str, Any] | None:
     walls = geometry.walls_from_rooms(db.list_rooms(project_id))
     if openings:
         geometry.attach_openings(walls, openings)
+    walls = _verify_by_drawing(project_id, walls)
     for wall in walls:
         wall_id = db.add_wall(
             project_id, wall.x1, wall.y1, wall.x2, wall.y2,

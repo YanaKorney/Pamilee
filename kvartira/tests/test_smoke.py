@@ -2128,3 +2128,104 @@ class TestWallsDoNotPokeIntoRooms(unittest.TestCase):
                     f"Конец стены ({wall.x1},{wall.y1})→({wall.x2},{wall.y2}) "
                     "оказался внутри комнаты",
                 )
+
+
+# ── Стены сверяются с чертежом ───────────────────────────────────────
+
+class TestWallsCheckedAgainstDrawing(unittest.TestCase):
+    """Контуры комнат рисует AI, а стены нарисованы на чертеже.
+
+    Два её замечания были про одно: «стоят перегородки там, где их нет
+    на плане» и «окна и двери видны чётко на плане, но в 3D их нет».
+    И то и другое решается сверкой: стена на чертеже — две линии,
+    проём — разрыв в них.
+
+    Проверки идут по её настоящему чертежу, а не по выдуманному.
+    """
+
+    PDF = Path(__file__).parent / "fixtures" / "plan-zastroyshchik.pdf"
+    SCALE = 15.2414
+
+    def _check(self, wall):
+        from app.plan_analysis import check_walls_against_drawing
+        return check_walls_against_drawing([wall], self.PDF, 1, self.SCALE)
+
+    @staticmethod
+    def _wall(x1, y1, x2, y2, kind="inner"):
+        from app.geometry import Wall
+        return Wall(x1, y1, x2, y2, 120, kind, [1, 2])
+
+    def test_настоящая_стена_остаётся(self) -> None:
+        kept, _ = self._check(self._wall(1175, 1007, 1175, 7846, "outer"))
+        self.assertEqual(len(kept), 1)
+
+    def test_выдуманная_перегородка_убирается(self) -> None:
+        """Открытый проход AI принимает за границу двух комнат,
+        и на этом месте вырастает стена, которой на плане нет."""
+        for x1, y1, x2, y2 in (
+            (5000, 3000, 5000, 7000),
+            (3000, 5000, 9000, 5000),
+            (11000, 2500, 11000, 6000),
+            (4000, 6500, 10000, 6500),
+        ):
+            with self.subTest(wall=(x1, y1, x2, y2)):
+                kept, counted = self._check(self._wall(x1, y1, x2, y2))
+                self.assertEqual(kept, [], "Стены тут нет — её не должно быть в 3D")
+                self.assertEqual(counted["убрано"], 1)
+
+    def test_дверь_читается_из_разрыва(self) -> None:
+        kept, counted = self._check(self._wall(7836, 742, 7836, 8422))
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(counted["проёмов"], 1)
+        hole = kept[0].openings[0]
+        self.assertEqual(hole["kind"], "door")
+        self.assertAlmostEqual(hole["width_mm"], 1000, delta=60)
+
+    def test_толщина_берётся_с_чертежа(self) -> None:
+        """На её доме стены 80–270 мм, а не выдуманные 120 и 250."""
+        kept, _ = self._check(self._wall(1271, 1625, 8000, 1625, "outer"))
+        self.assertEqual(len(kept), 1)
+        self.assertNotEqual(kept[0].thickness_mm, 250, "Толщина осталась выдуманной")
+        self.assertTrue(100 <= kept[0].thickness_mm <= 300)
+
+    def test_в_наружной_стене_проём_это_окно(self) -> None:
+        from app.geometry import Wall
+        from app.plan_analysis import check_walls_against_drawing
+        wall = Wall(7836, 742, 7836, 8422, 120, "outer", [1])
+        kept, _ = check_walls_against_drawing([wall], self.PDF, 1, self.SCALE)
+        self.assertEqual(kept[0].openings[0]["kind"], "window")
+        self.assertGreater(kept[0].openings[0]["sill_mm"], 0, "У окна есть подоконник")
+
+    def test_без_чертежа_стены_не_трогаем(self) -> None:
+        """Если плана нет, работаем по контурам, как раньше."""
+        from app.plan_analysis import _verify_by_drawing
+        walls = [self._wall(0, 0, 3000, 0)]
+        self.assertEqual(len(_verify_by_drawing(999999, walls)), 1)
+
+    def test_косую_стену_не_выбрасываем(self) -> None:
+        """Скос по чертежу так не проверить — значит, оставляем как есть."""
+        kept, _ = self._check(self._wall(3000, 3000, 6000, 6000))
+        self.assertEqual(len(kept), 1)
+
+    def test_страховка_от_сноса_всей_квартиры(self) -> None:
+        """Если чертёж «не узнал» почти все стены — значит, сошлось не то.
+
+        Другой лист, сбитый масштаб, необмерный план. Снести квартиру
+        по такой ошибке нельзя: лучше оставить всё как было.
+        """
+        from app.plan_analysis import check_walls_against_drawing
+        outside = [self._wall(90000 + n * 500, 90000, 90000 + n * 500, 95000)
+                   for n in range(6)]
+        kept, counted = check_walls_against_drawing(
+            list(outside), self.PDF, 1, self.SCALE
+        )
+        self.assertEqual(len(kept), len(outside), "Квартира должна уцелеть")
+        self.assertEqual(counted["убрано"], 0)
+
+    def test_запрос_требует_двери_в_каждое_помещение(self) -> None:
+        from app.plan_vector import read_plan
+        from app.plan_analysis import build_prompt
+        plan = read_plan(self.PDF, 1, 74.37)
+        prompt = build_prompt(plan, 1540, 1100, 15.24, 1.0)
+        self.assertIn("Помещений 8", prompt)
+        self.assertIn("хотя бы одна дверь", prompt)
