@@ -1523,3 +1523,180 @@ class TestLongRequestIsExplained(unittest.TestCase):
                 found = diagnose("https://example.com/v1", error)
                 self.assertNotIn(".env", found.hint)
                 self.assertNotIn("опечатка", found.hint)
+
+
+# ── Подгонка контуров под чертёж ─────────────────────────────────────
+
+def _grid_flat(noise: int = 0, seed: int = 1):
+    """Выдуманная квартира: 7 комнат, перегородки, известные площади."""
+    import random
+    from app.align import area_m2
+    cx, cy = [0, 3400, 6200, 8000, 11000], [0, 3300, 4400, 7000]
+    outer, inner = 125, 60
+
+    def room(i, j, k, l):
+        x1 = cx[i] + (outer if i == 0 else inner)
+        x2 = cx[j] - (outer if j == len(cx) - 1 else inner)
+        y1 = cy[k] + (outer if k == 0 else inner)
+        y2 = cy[l] - (outer if l == len(cy) - 1 else inner)
+        return [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+
+    true = [room(0, 1, 0, 1), room(1, 3, 0, 1), room(3, 4, 0, 1),
+            room(0, 1, 1, 2), room(1, 2, 1, 3), room(2, 4, 1, 2),
+            room(2, 4, 2, 3)]
+    targets = [round(area_m2([(float(a), float(b)) for a, b in p]), 2) for p in true]
+    if not noise:
+        return true, true, targets
+    rnd = random.Random(seed)
+    guess = [[(x + rnd.randint(-noise, noise), y + rnd.randint(-noise, noise))
+              for x, y in p] for p in true]
+    return true, guess, targets
+
+
+def _area_error(polygons, targets) -> float:
+    from app.align import area_m2
+    return round(sum(
+        abs(area_m2([(float(x), float(y)) for x, y in poly]) - target)
+        for poly, target in zip(polygons, targets) if target
+    ), 3)
+
+
+class TestAlignment(unittest.TestCase):
+    """Площади из чертежа известны точно — контуры обязаны к ним сойтись.
+
+    «Квартира должна оставаться моей квартирой»: AI обводит комнаты
+    по картинке и промахивается на сантиметры, а экспликация на чертеже
+    даёт точную площадь каждой комнаты. Подгонка сводит их вместе.
+    """
+
+    def test_площади_сходятся_с_чертежом(self) -> None:
+        from app.align import align_rooms
+        true, guess, targets = _grid_flat(noise=100, seed=3)
+        fixed = align_rooms(guess, targets)
+        self.assertLess(_area_error(fixed, targets), 0.3)
+        self.assertGreater(_area_error(guess, targets), 1.0)
+
+    def test_никогда_не_делает_хуже(self) -> None:
+        """Главная гарантия: подгонка не имеет права испортить планировку."""
+        from app.align import align_rooms
+        for seed in range(15):
+            for noise in (40, 80, 120):
+                with self.subTest(seed=seed, noise=noise):
+                    _, guess, targets = _grid_flat(noise=noise, seed=seed)
+                    fixed = align_rooms(guess, targets)
+                    self.assertLessEqual(
+                        _area_error(fixed, targets),
+                        _area_error(guess, targets) + 0.01,
+                    )
+
+    def test_стены_остаются_на_месте(self) -> None:
+        """Комната не должна уехать: сдвиги — сантиметры, а не метры."""
+        from app.align import align_rooms, report
+        _, guess, targets = _grid_flat(noise=100, seed=5)
+        fixed = align_rooms(guess, targets)
+        self.assertLess(report(guess, fixed, targets)["biggest_shift_mm"], 350)
+
+    def test_форма_комнат_не_меняется(self) -> None:
+        from app.align import align_rooms
+        _, guess, targets = _grid_flat(noise=80, seed=2)
+        fixed = align_rooms(guess, targets)
+        self.assertEqual(len(fixed), len(guess))
+        for old, new in zip(guess, fixed):
+            self.assertEqual(len(old), len(new), "Углы не добавляются и не пропадают")
+
+    def test_повторная_подгонка_ничего_не_ломает(self) -> None:
+        from app.align import align_rooms
+        _, guess, targets = _grid_flat(noise=100, seed=8)
+        once = align_rooms(guess, targets)
+        twice = align_rooms(once, targets)
+        self.assertLessEqual(_area_error(twice, targets),
+                             _area_error(once, targets) + 0.01)
+
+    def test_без_площадей_контуры_не_трогаем(self) -> None:
+        from app.align import align_rooms
+        _, guess, _ = _grid_flat(noise=80, seed=4)
+        self.assertEqual(align_rooms(guess, [None] * len(guess)), guess)
+
+    def test_комната_без_подписанной_площади_переживает_подгонку(self) -> None:
+        from app.align import align_rooms
+        _, guess, targets = _grid_flat(noise=80, seed=6)
+        targets = list(targets)
+        targets[2] = None                      # площадь этой комнаты неизвестна
+        fixed = align_rooms(guess, targets)
+        self.assertEqual(len(fixed[2]), len(guess[2]))
+        self.assertLess(_area_error(fixed, targets), _area_error(guess, targets))
+
+    def test_обрывки_не_роняют_подгонку(self) -> None:
+        from app.align import align_rooms
+        self.assertEqual(align_rooms([], []), [])
+        self.assertEqual(align_rooms([[(0, 0), (10, 0)]], [1.0]), [[(0, 0), (10, 0)]])
+
+
+class TestOldProjectGetsFixed(TestBase):
+    """Разбор уже оплачен. Улучшать его надо без нового запроса к сервису."""
+
+    def _project_with_rooms(self) -> int:
+        project_id = db.create_project("Проверка", ceiling_height_mm=2900)
+        _, guess, targets = _grid_flat(noise=100, seed=11)
+        for order, (poly, target) in enumerate(zip(guess, targets)):
+            db.add_room(project_id=project_id, name=f"Комната {order + 1}",
+                        kind="room", polygon=json.dumps(poly),
+                        declared_area_m2=target, sort_order=order)
+        walls = geometry_module().walls_from_rooms(db.list_rooms(project_id))
+        for wall in walls:
+            db.add_wall(project_id, wall.x1, wall.y1, wall.x2, wall.y2,
+                        wall.thickness_mm, wall.kind)
+        self.targets = targets
+        return project_id
+
+    def test_сохранённые_комнаты_подтягиваются_сами(self) -> None:
+        from app import plan_analysis
+        project_id = self._project_with_rooms()
+        before = [geometry_module().parse_polygon(r["polygon"])
+                  for r in db.list_rooms(project_id)]
+        changes = plan_analysis.realign_saved_rooms(project_id)
+
+        self.assertTrue(changes and changes["applied"])
+        after = [geometry_module().parse_polygon(r["polygon"])
+                 for r in db.list_rooms(project_id)]
+        self.assertLess(_area_error(after, self.targets),
+                        _area_error(before, self.targets))
+        self.assertLess(_area_error(after, self.targets), 0.3)
+
+    def test_стены_перекладываются_под_новые_комнаты(self) -> None:
+        from app import plan_analysis
+        project_id = self._project_with_rooms()
+        plan_analysis.realign_saved_rooms(project_id)
+        walls = db.list_walls(project_id)
+        self.assertTrue(walls, "Стены должны остаться")
+
+        # Каждая стена обязана лежать на грани какой-нибудь комнаты.
+        corners = {
+            (x, y)
+            for room in db.list_rooms(project_id)
+            for x, y in geometry_module().parse_polygon(room["polygon"])
+        }
+        for wall in walls:
+            near = min(
+                abs(wall["x1"] - x) + abs(wall["y1"] - y) for x, y in corners
+            )
+            self.assertLess(near, 200, "Стена оторвалась от комнат")
+
+    def test_починка_идёт_один_раз_и_молча(self) -> None:
+        from app import server
+        project_id = self._project_with_rooms()
+        server.repair_old_projects()
+        first = [r["polygon"] for r in db.list_rooms(project_id)]
+        server.repair_old_projects()
+        self.assertEqual([r["polygon"] for r in db.list_rooms(project_id)], first)
+
+    def test_пустой_проект_не_ломает_запуск(self) -> None:
+        from app import plan_analysis, server
+        db.create_project("Совсем пустой", ceiling_height_mm=2900)
+        self.assertIsNone(plan_analysis.realign_saved_rooms(999999))
+        server.repair_old_projects()
+
+
+def geometry_module():
+    from app import geometry
+    return geometry

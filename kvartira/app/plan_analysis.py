@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import ai, db, geometry
+from . import ai, align, db, geometry
 from .errors import UserError, get_logger, scale_unknown
 from .plan_vector import VectorPlan, read_plan
 
@@ -121,6 +121,7 @@ class Analysis:
     cost_note: str = ""
     input_tokens: int = 0
     output_tokens: int = 0
+    alignment: dict[str, Any] | None = None   # насколько подтянули к чертежу
 
 
 # ── Картинка для модели ───────────────────────────────────────────────────
@@ -510,6 +511,8 @@ def interpret(data: dict[str, Any], plan: VectorPlan, factor: float) -> Analysis
             confidence=max(0.0, min(1.0, confidence)),
         ))
 
+    align_to_drawing(result)
+
     inside = [r for r in result.rooms if r.kind not in OUTSIDE_KINDS]
     result.total_area_m2 = round(sum(r.area_m2 for r in inside), 2)
     result.outside_area_m2 = round(
@@ -518,6 +521,42 @@ def interpret(data: dict[str, Any], plan: VectorPlan, factor: float) -> Analysis
     result.declared_total_m2 = plan.total_area_m2
     _add_warnings(result, plan)
     return result
+
+
+def align_to_drawing(result: Analysis) -> None:
+    """Подтягивает контуры комнат к точным площадям из чертежа.
+
+    AI обводит комнаты по картинке и промахивается на сантиметры.
+    Точные площади при этом уже прочитаны из экспликации. Здесь общие
+    линии стен чуть сдвигаются, чтобы площади сошлись, — форма и
+    расположение комнат не меняются.
+    """
+    targets = [r.declared_area_m2 for r in result.rooms]
+    if not any(targets):
+        return
+
+    before = [list(r.polygon_mm) for r in result.rooms]
+    after = align.align_rooms(before, targets)
+    changes = align.report(before, after, targets)
+
+    # Если подгонка ничего не улучшила — оставляем как было.
+    if changes["error_after_m2"] > changes["error_before_m2"]:
+        log.info("Подгонка не помогла, оставляю контуры AI: %s", changes)
+        result.alignment = dict(changes, applied=False)
+        return
+
+    for room, polygon in zip(result.rooms, after):
+        room.polygon_mm = polygon
+        room.area_m2 = round(align.area_m2(
+            [(float(x), float(y)) for x, y in polygon]
+        ), 2)
+        if room.declared_area_m2:
+            room.deviation_percent = round(
+                (room.area_m2 - room.declared_area_m2)
+                / room.declared_area_m2 * 100, 1
+            )
+    result.alignment = dict(changes, applied=True)
+    log.info("Контуры подтянуты к чертежу: %s", changes)
 
 
 def _add_warnings(result: Analysis, plan: VectorPlan) -> None:
@@ -647,3 +686,62 @@ def analyse_page(
         len(result.rooms), len(result.items), answer.input_tokens, answer.output_tokens,
     )
     return result
+
+
+# ── Починка уже сохранённого ──────────────────────────────────────────────
+
+ALIGNED_MARK = "rooms_aligned_v1"
+
+
+def realign_saved_rooms(project_id: int) -> dict[str, Any] | None:
+    """Подтягивает к чертежу комнаты, разобранные до появления подгонки.
+
+    Нужно, чтобы уже сделанный (и уже оплаченный) разбор стал точнее
+    сам, без повторного обращения к сервису.
+    """
+    rooms = db.list_rooms(project_id)
+    targets = [r.get("declared_area_m2") for r in rooms]
+    if not rooms or not any(targets):
+        return None
+
+    before = [geometry.parse_polygon(r.get("polygon", "[]")) for r in rooms]
+    after = align.align_rooms(before, targets)
+    changes = align.report(before, after, targets)
+    if changes["error_after_m2"] > changes["error_before_m2"]:
+        log.info("Проект %s: подгонка не помогла, оставляю как есть", project_id)
+        return dict(changes, applied=False)
+
+    for room, polygon in zip(rooms, after):
+        db.set_room_polygon(room["id"], json.dumps(polygon))
+        room["polygon"] = polygon
+
+    # Стены выводятся из комнат, поэтому их надо переложить заново.
+    # Двери и окна хранятся смещением вдоль стены — возвращаем им
+    # место на плане по старым стенам, чтобы привязать к новым.
+    openings: list[dict[str, Any]] = []
+    for wall in db.list_walls(project_id):
+        length = math.hypot(wall["x2"] - wall["x1"], wall["y2"] - wall["y1"])
+        if length <= 0:
+            continue
+        for hole in wall["openings"]:
+            share = hole["offset_mm"] / length
+            openings.append({
+                "kind": hole["kind"],
+                "x": wall["x1"] + (wall["x2"] - wall["x1"]) * share,
+                "y": wall["y1"] + (wall["y2"] - wall["y1"]) * share,
+                "width_mm": hole["width_mm"],
+            })
+    db.clear_walls(project_id)
+    walls = geometry.walls_from_rooms(db.list_rooms(project_id))
+    if openings:
+        geometry.attach_openings(walls, openings)
+    for wall in walls:
+        wall_id = db.add_wall(
+            project_id, wall.x1, wall.y1, wall.x2, wall.y2,
+            wall.thickness_mm, wall.kind,
+        )
+        for opening in wall.openings:
+            db.add_opening(wall_id, **opening)
+
+    log.info("Проект %s: контуры подтянуты к чертежу %s", project_id, changes)
+    return dict(changes, applied=True)

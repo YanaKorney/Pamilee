@@ -16,6 +16,8 @@ from pydantic import BaseModel, Field
 
 import dataclasses
 
+from contextlib import asynccontextmanager
+
 from . import __version__, ai, db, geometry, plan_analysis, plan_files, plan_vector, storage
 from .config import ENV_PATH, WEB_DIR, clean_secret, settings
 from .errors import (
@@ -27,7 +29,39 @@ from .errors import (
 
 log = get_logger()
 
-app = FastAPI(title="Моя квартира", version=__version__, docs_url=None, redoc_url=None)
+
+def repair_old_projects() -> None:
+    """Досчитывает то, чего не умели прошлые версии программы.
+
+    Разбор плана стоит денег, поэтому заново его не запрашиваем:
+    всё, что можно улучшить по уже сохранённому, программа делает сама
+    и молча — человеку ничего нажимать не надо.
+    """
+    if db.get_setting(plan_analysis.ALIGNED_MARK) == "да":
+        return
+    for project in db.list_projects():
+        try:
+            plan_analysis.realign_saved_rooms(int(project["id"]))
+        except Exception as trouble:        # одна кривая запись не должна
+            log.warning(                    # мешать программе запуститься
+                "Не удалось подтянуть проект %s: %s", project.get("id"), trouble
+            )
+    db.set_setting(plan_analysis.ALIGNED_MARK, "да")
+
+
+
+@asynccontextmanager
+async def on_start(_: FastAPI):
+    """Что программа делает сама при каждом запуске."""
+    db.init_db()
+    repair_old_projects()
+    yield
+
+
+app = FastAPI(
+    title="Моя квартира", version=__version__,
+    docs_url=None, redoc_url=None, lifespan=on_start,
+)
 
 
 # ── Обработка ошибок ──────────────────────────────────────────────────────
@@ -487,5 +521,4 @@ app.mount("/static", FreshFiles(directory=WEB_DIR), name="static")
 
 
 def create_app() -> FastAPI:
-    db.init_db()
     return app

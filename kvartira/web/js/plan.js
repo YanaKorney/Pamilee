@@ -120,6 +120,15 @@ function analysisResult(data) {
         ]));
     }
 
+    if (data.alignment && data.alignment.applied) {
+        const a = data.alignment;
+        blocks.push(el('div', { class: 'muted small', style: 'margin-top:8px',
+            text: 'Контуры комнат подтянуты к точным площадям из чертежа: '
+                + `расхождение уменьшено с ${formatArea(a.error_before_m2)} `
+                + `до ${formatArea(a.error_after_m2)}, `
+                + `стены сдвинуты не больше чем на ${a.biggest_shift_mm} мм.` }));
+    }
+
     if (data.notes) {
         blocks.push(el('div', { class: 'muted small', style: 'margin-top:8px',
             text: 'Замечания модели: ' + data.notes }));
@@ -338,7 +347,23 @@ function emptyState() {
     ]);
 }
 
-function nextStepNote(documents) {
+function nextStepNote(documents, project) {
+    // План уже разобран — звать разбирать его заново незачем.
+    const found = (project && project.room_count) || 0;
+    if (found > 0) {
+        return el('div', { class: 'notice' }, [
+            el('strong', { text: 'План разобран' }),
+            el('div', { class: 'small', style: 'margin-top:4px' }, [
+                document.createTextNode(
+                    `Найдено помещений: ${found}. Квартиру можно посмотреть в объёме — `),
+                el('a', { href: `/project/${projectId}/viewer`, text: '3D-модель' }),
+                document.createTextNode(
+                    '. Если что-то распознано неверно, нажмите «Разобрать план» '
+                    + 'ещё раз — прошлый разбор заменится новым.'),
+            ]),
+        ]);
+    }
+
     const hasVector = documents.some((d) => d.is_vector);
     const lines = hasVector
         ? 'Среди загруженного есть векторный чертёж — значит, размеры программа '
@@ -372,7 +397,7 @@ async function load() {
         }
         docsBox.appendChild(el('h2', { text: 'Загруженные файлы' }));
         documents.forEach((d) => docsBox.appendChild(documentCard(d)));
-        docsBox.appendChild(nextStepNote(documents));
+        docsBox.appendChild(nextStepNote(documents, project));
     } catch (err) {
         docsBox.replaceChildren(el('div', { class: 'notice notice-error' }, [
             el('strong', { text: (err && err.error) || 'Не удалось открыть раздел.' }),

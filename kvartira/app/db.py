@@ -460,6 +460,24 @@ def list_rooms(project_id: int) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def set_room_polygon(room_id: int, polygon: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE rooms SET polygon = ? WHERE id = ?", (polygon, room_id)
+        )
+
+
+def clear_walls(project_id: int) -> None:
+    """Убирает стены вместе с проёмами, не трогая комнаты и мебель."""
+    with connect() as conn:
+        conn.execute(
+            "DELETE FROM openings WHERE wall_id IN "
+            "(SELECT id FROM walls WHERE project_id = ?)",
+            (project_id,),
+        )
+        conn.execute("DELETE FROM walls WHERE project_id = ?", (project_id,))
+
+
 def add_item(
     project_id: int,
     category: str,
