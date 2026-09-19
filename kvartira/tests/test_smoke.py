@@ -461,3 +461,94 @@ class TestConnectionDiagnosis(unittest.TestCase):
         from app.errors import UserError
         error = UserError("Сообщение", "Подсказка", technical="TimeoutError: ...")
         self.assertEqual(error.to_dict()["technical"], "TimeoutError: ...")
+
+
+class TestVectorPlan(unittest.TestCase):
+    """Чтение геометрии из настоящего чертежа квартиры.
+
+    Проверяется на реальном плане застройщика: масштаб, площади,
+    разделение комнат и лоджии. Всё это считается без AI.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from app.plan_vector import read_plan
+        cls.plan = read_plan(BASE_DIR / "tests" / "fixtures" / "plan-zastroyshchik.pdf")
+
+    def test_recognised_as_vector(self) -> None:
+        self.assertTrue(self.plan.is_vector)
+
+    def test_scale_is_precise(self) -> None:
+        self.assertTrue(self.plan.scale_is_reliable)
+        self.assertGreaterEqual(self.plan.scale_samples, 20)
+        self.assertLessEqual(
+            self.plan.scale_worst_error_mm, 5,
+            "Масштаб проверяется по трём десяткам размеров — расхождение "
+            "больше нескольких миллиметров означает ошибку разбора",
+        )
+
+    def test_every_dimension_agrees_with_the_drawing(self) -> None:
+        """Каждая размерная линия должна сойтись со своей подписью."""
+        scale = self.plan.scale_mm_per_unit
+        self.assertIsNotNone(scale)
+        matched = [d for d in self.plan.dimensions if d.span_units]
+        self.assertGreaterEqual(len(matched), 20)
+
+    def test_total_area_matches_the_apartment(self) -> None:
+        self.assertEqual(self.plan.total_area_m2, 74.37)
+
+    def test_seven_rooms_add_up(self) -> None:
+        self.assertEqual(len(self.plan.room_areas), 7)
+        self.assertEqual(self.plan.rooms_sum_m2, 74.37)
+        self.assertEqual(
+            sorted(self.plan.room_areas, reverse=True),
+            [19.09, 13.95, 12.23, 10.59, 10.37, 4.48, 3.66],
+        )
+
+    def test_loggia_is_kept_apart(self) -> None:
+        """Лоджия не входит в общую площадь — её нельзя считать комнатой."""
+        self.assertIn(4.49, self.plan.extra_areas)
+
+    def test_bathroom_is_not_confused_with_loggia(self) -> None:
+        """4,48 и 4,49 почти одинаковы — их легко перепутать."""
+        self.assertIn(4.48, self.plan.room_areas)
+        self.assertNotIn(4.49, self.plan.room_areas)
+
+    def test_explication_is_read(self) -> None:
+        self.assertEqual(self.plan.summary, [43.63, 74.37, 76.62, 78.86])
+
+    def test_living_area_matches_three_rooms(self) -> None:
+        """Жилая площадь из штампа складывается ровно из трёх комнат.
+
+        Взять три самые большие нельзя: кухня 12,23 больше третьей
+        комнаты 10,59, но жилой не считается. Проверяем, что такая
+        тройка вообще находится — это сходится с экспликацией.
+        """
+        from itertools import combinations
+        triples = [
+            trio for trio in combinations(self.plan.room_areas, 3)
+            if abs(sum(trio) - 43.63) < 0.02
+        ]
+        self.assertTrue(triples, "Жилая площадь не сложилась ни из какой тройки комнат")
+        self.assertEqual(sorted(triples[0], reverse=True), [19.09, 13.95, 10.59])
+
+
+class TestRasterPlanIsHonest(unittest.TestCase):
+    """С картинки геометрию не прочитать — программа не должна притворяться."""
+
+    def test_raster_pdf_gives_no_scale(self) -> None:
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            import pymupdf
+
+        source = BASE_DIR / "tests" / "fixtures" / "plan-dizayner.jpg"
+        raster = _TMP / "raster-plan.pdf"
+        with pymupdf.open(source) as image:
+            raster.write_bytes(image.convert_to_pdf())
+
+        from app.plan_vector import read_plan
+        plan = read_plan(raster)
+        self.assertFalse(plan.is_vector)
+        self.assertIsNone(plan.scale_mm_per_unit)
+        self.assertFalse(plan.scale_is_reliable)

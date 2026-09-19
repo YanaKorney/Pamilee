@@ -263,7 +263,7 @@ input:focus, textarea:focus, select:focus {
 }
 .notice-warn { border-color: var(--warn); background: rgba(176,125,29,.08); }
 .notice-error { border-color: var(--danger); background: rgba(179,59,50,.07); }
-.notice strong { display: block; margin-bottom: 2px; }
+.notice > strong { display: block; margin-bottom: 2px; }
 
 .toast-area {
     position: fixed;

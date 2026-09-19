@@ -14,7 +14,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import __version__, ai, db, plan_files, storage
+import dataclasses
+
+from . import __version__, ai, db, plan_files, plan_vector, storage
 from .config import WEB_DIR, settings
 from .errors import UserError, get_logger, project_not_found
 
@@ -237,6 +239,47 @@ def api_file_preview(file_id: int) -> FileResponse:
 @app.get("/api/files/{file_id}/raw")
 def api_file_raw(file_id: int) -> FileResponse:
     return _file_response(file_id, preview=False)
+
+
+@app.get("/api/files/{file_id}/geometry")
+def api_file_geometry(file_id: int) -> dict[str, Any]:
+    """Что удалось прочитать из чертежа без участия AI.
+
+    Для векторного PDF это точный масштаб и площади помещений.
+    Для картинки честно возвращается «геометрии нет».
+    """
+    row = db.get_file(file_id)
+    if row is None:
+        raise UserError("Файл не найден.", "Обновите страницу.", status=404)
+
+    if row["mime"] != "application/pdf":
+        return {"is_vector": False, "reason": "Это изображение, а не чертёж."}
+
+    project = db.get_project(row["project_id"]) or {}
+    path = storage.project_dir(row["project_id"]) / "uploads" / row["stored_name"]
+    if not path.exists():
+        raise UserError(
+            "Файл на диске не найден.",
+            "Загрузите его заново.",
+            status=404,
+        )
+
+    plan = plan_vector.read_plan(
+        path,
+        page_number=row["page_no"] or 1,
+        expected_total_m2=project.get("declared_area_m2"),
+    )
+    data = dataclasses.asdict(plan)
+    data["scale_is_reliable"] = plan.scale_is_reliable
+    data["rooms_sum_m2"] = plan.rooms_sum_m2
+    data["declared_area_m2"] = project.get("declared_area_m2")
+    # Размерные подписи наружу отдаём только числом: список длинный,
+    # а на экране нужен сам факт, что их нашли.
+    data["dimensions_found"] = len(plan.dimensions)
+    data["dimensions_matched"] = sum(1 for d in plan.dimensions if d.span_units)
+    data.pop("dimensions", None)
+    data.pop("areas", None)
+    return data
 
 
 # ── AI-сервис: каталог моделей, выбор, проверка доступа ───────────────────

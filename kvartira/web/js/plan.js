@@ -1,6 +1,6 @@
 // Страница «Планировка»: загрузка файлов дизайн-проекта и их просмотр.
 
-import { api, el, showError, toast, plural, formatDate } from './api.js';
+import { api, el, showError, toast, plural, formatDate, formatArea } from './api.js';
 
 const projectId = Number(window.location.pathname.split('/')[2]);
 const docsBox = document.getElementById('docs');
@@ -62,6 +62,87 @@ function pageCard(page, documentName) {
     ]);
 }
 
+function metre(mm) {
+    return (mm / 1000).toFixed(2).replace('.', ',') + ' м';
+}
+
+// Карточка «что прочитано из чертежа» — появляется под векторным PDF.
+function geometryCard(pageId) {
+    const box = el('div', { class: 'notice', style: 'margin-top:14px' }, [
+        el('span', { class: 'spinner' }),
+    ]);
+
+    api.get(`/api/files/${pageId}/geometry`).then((g) => {
+        if (!g.is_vector || !g.scale_is_reliable) {
+            box.replaceChildren(
+                el('strong', { text: 'Размеры из этого листа прочитать не удалось' }),
+                el('div', {
+                    class: 'small muted',
+                    text: 'Ничего страшного: масштаб можно будет задать вручную, '
+                        + 'указав длину одной стены.',
+                }),
+            );
+            return;
+        }
+
+        const rows = [];
+        rows.push(el('div', { class: 'small' }, [
+            document.createTextNode('Масштаб определён по '),
+            el('strong', { text: `${g.dimensions_matched} размерным линиям` }),
+            document.createTextNode(`, расхождение не больше ${String(g.scale_worst_error_mm).replace('.', ',')} мм.`),
+        ]));
+
+        if (g.total_area_m2) {
+            rows.push(el('div', { class: 'small' }, [
+                document.createTextNode('Общая площадь по чертежу: '),
+                el('strong', { text: formatArea(g.total_area_m2) }),
+                document.createTextNode('.'),
+            ]));
+        }
+
+        if (g.room_areas && g.room_areas.length) {
+            const list = g.room_areas
+                .slice().sort((a, b) => b - a)
+                .map((v) => formatArea(v)).join(' · ');
+            rows.push(el('div', { class: 'small' }, [
+                document.createTextNode(
+                    `Помещений: ${g.room_areas.length} — `),
+                el('span', { class: 'muted', text: list }),
+            ]));
+        }
+
+        if (g.extra_areas && g.extra_areas.length) {
+            rows.push(el('div', {
+                class: 'small muted',
+                text: 'Вне общей площади (балкон или лоджия): '
+                    + g.extra_areas.map((v) => formatArea(v)).join(' · '),
+            }));
+        }
+
+        if (g.declared_area_m2) {
+            const diff = Math.abs(g.declared_area_m2 - (g.total_area_m2 || 0));
+            rows.push(el('div', { class: 'small' }, [
+                el('span', {
+                    class: diff < 0.05 ? 'badge badge-ok' : 'badge badge-warn',
+                    text: diff < 0.05 ? 'сходится с вашей площадью' : 'расходится с вашей площадью',
+                }),
+            ]));
+        }
+
+        box.replaceChildren(
+            el('strong', { text: 'Что программа прочитала из чертежа' }),
+            ...rows,
+        );
+    }).catch((err) => {
+        box.replaceChildren(
+            el('strong', { text: (err && err.error) || 'Не удалось разобрать чертёж.' }),
+            el('div', { class: 'small muted', text: (err && err.hint) || '' }),
+        );
+    });
+
+    return box;
+}
+
 function documentCard(doc) {
     const badge = doc.is_vector
         ? el('span', {
@@ -108,6 +189,7 @@ function documentCard(doc) {
             remove,
         ]),
         el('div', { class: 'pages' }, doc.pages.map((p) => pageCard(p, doc.original_name))),
+        doc.is_vector ? geometryCard(doc.pages.find((p) => p.is_vector).id) : null,
     ]);
 }
 
