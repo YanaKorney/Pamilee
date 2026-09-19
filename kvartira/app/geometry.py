@@ -26,6 +26,13 @@ SNAP_MM = 120
 OUTER_THICKNESS_MM = 250
 INNER_THICKNESS_MM = 120
 
+# Огрызок грани короче этого — не стена, а след от перекрестия:
+# там, где одна перегородка упирается в другую, у граней остаётся
+# незакрытый кусочек шириной ровно в перегородку. Сама перегородка
+# это место всё равно перекрывает, когда куски срастаются, а вот
+# отдельная стена из огрызка вырастает лишним квадратом посреди комнаты.
+MIN_FREE_PIECE_MM = 400
+
 # Промежуток между гранями двух комнат шире этого — уже не перегородка,
 # а что-то другое: не найденная комната или ошибка распознавания.
 MAX_PARTITION_MM = 450
@@ -191,6 +198,59 @@ def _overlaps(first, second):
     return shared
 
 
+# На каких расстояниях смотрим по сторонам от стены, ища комнату.
+LOOK_ASIDE_MM = (100, 200, 350)
+
+
+def _rooms_beside(wall: Wall, shapes) -> tuple[bool, bool]:
+    """Есть ли комната слева и справа от стены.
+
+    По этому и решается, что за стена. Комнаты с обеих сторон —
+    перегородка. С одной — наружная. Ни с одной — стена ниоткуда
+    в никуда: остаток неудачного распознавания.
+    """
+    length = wall.length_mm
+    if length <= 0:
+        return (False, False)
+    ux, uy = (wall.x2 - wall.x1) / length, (wall.y2 - wall.y1) / length
+    nx, ny = -uy, ux
+
+    sides = [False, False]
+    for share in (0.25, 0.5, 0.75):
+        base_x = wall.x1 + (wall.x2 - wall.x1) * share
+        base_y = wall.y1 + (wall.y2 - wall.y1) * share
+        for number, way in enumerate((1, -1)):
+            if sides[number]:
+                continue
+            for step in LOOK_ASIDE_MM:
+                point = (base_x + nx * way * step, base_y + ny * way * step)
+                if any(_point_inside(point, shape) for shape in shapes):
+                    sides[number] = True
+                    break
+    return (sides[0], sides[1])
+
+
+def _sort_out_walls(walls: list[Wall], shapes) -> list[Wall]:
+    """Расставляет всё по местам, глядя на готовые стены.
+
+    Пока стены строились по одной грани за раз, ошибиться было легко:
+    грань, не нашедшая пары, превращалась в наружную стену в четверть
+    метра — и такая вырастала посреди квартиры. Теперь вид на стену
+    открывается целиком, с обеих сторон.
+    """
+    kept: list[Wall] = []
+    for wall in walls:
+        left, right = _rooms_beside(wall, shapes)
+        if not left and not right:
+            continue                        # стена ниоткуда в никуда
+        if left and right and wall.kind == "outer":
+            # Комнаты с обеих сторон — это перегородка, а не фасад.
+            wall.thickness_mm = INNER_THICKNESS_MM
+            wall.kind = "inner"
+        kept.append(wall)
+    return kept
+
+
 def _make_wall(edge, offset: float, t1: float, t2: float,
                thickness: int, kind: str, rooms: list[int]) -> Wall:
     """Переводит «прямая плюс отрезок на ней» обратно в две точки."""
@@ -275,6 +335,9 @@ def walls_from_rooms(rooms: Iterable[dict[str, Any]]) -> list[Wall]:
     не нашло пары, остаётся наружной стеной и ставится снаружи от
     комнаты. Напоследок куски одной стены сращиваются.
     """
+    shapes = [parse_polygon(room.get("polygon", "[]")) for room in rooms]
+    shapes = [shape for shape in shapes if len(shape) >= 3]
+
     edges: list[dict[str, Any]] = []
     for room in rooms:
         edges.extend(_edges_of(room))
@@ -328,10 +391,12 @@ def walls_from_rooms(rooms: Iterable[dict[str, Any]]) -> list[Wall]:
                 low["free"] = _cut_out(low["free"], a, b)
                 high["free"] = _cut_out(high["free"], a, b)
 
-        # Что не нашло пары — наружная стена, снаружи от комнаты.
+        # Что не нашло пары — пока считаем наружной стеной и ставим
+        # снаружи от комнаты. Окончательно разберёмся в конце, когда
+        # стены срастутся и станет видно, что у них по сторонам.
         for edge in group:
             for a, b in edge["free"]:
-                if b - a < SNAP_MM:
+                if b - a < MIN_FREE_PIECE_MM:
                     continue
                 offset = edge["offset"] - edge["inside"] * OUTER_THICKNESS_MM / 2
                 walls.append(_make_wall(
@@ -339,16 +404,21 @@ def walls_from_rooms(rooms: Iterable[dict[str, Any]]) -> list[Wall]:
                     OUTER_THICKNESS_MM, "outer", [edge["room"]],
                 ))
 
-    return _close_corners(_join_collinear(walls))
+    return _close_corners(
+        _sort_out_walls(_join_collinear(walls), shapes), shapes
+    )
 
 
-def _close_corners(walls: list[Wall]) -> list[Wall]:
+def _close_corners(walls: list[Wall], shapes) -> list[Wall]:
     """Достраивает наружные стены до углов дома.
 
     Наружная стена заканчивается там, где заканчивается грань комнаты,
-    а это на пол-толщины не доходит до угла. Получается выемка.
-    Перегородки удлинять не надо: они и так упираются во внутреннюю
-    поверхность наружной стены.
+    а это на пол-толщины не доходит до угла дома: получается выемка.
+
+    Но удлинять вслепую нельзя. Стена может обрываться не на углу,
+    а там, где к ней подходит комната, — тогда продолжение влезет
+    прямо в комнату лишним выступом. Поэтому каждый конец проверяем
+    отдельно: если впереди комната, стену не трогаем.
     """
     for wall in walls:
         if wall.kind != "outer":
@@ -359,10 +429,14 @@ def _close_corners(walls: list[Wall]) -> list[Wall]:
         step = wall.thickness_mm / 2
         ux = (wall.x2 - wall.x1) / length
         uy = (wall.y2 - wall.y1) / length
-        wall.x1 = round(wall.x1 - ux * step)
-        wall.y1 = round(wall.y1 - uy * step)
-        wall.x2 = round(wall.x2 + ux * step)
-        wall.y2 = round(wall.y2 + uy * step)
+
+        ahead = (wall.x1 - ux * step, wall.y1 - uy * step)
+        if not any(_point_inside(ahead, shape) for shape in shapes):
+            wall.x1, wall.y1 = round(ahead[0]), round(ahead[1])
+
+        ahead = (wall.x2 + ux * step, wall.y2 + uy * step)
+        if not any(_point_inside(ahead, shape) for shape in shapes):
+            wall.x2, wall.y2 = round(ahead[0]), round(ahead[1])
     return walls
 
 
@@ -448,3 +522,47 @@ def polygon_area_m2(points: list[tuple[int, int]]) -> float:
         x2, y2 = points[(index + 1) % len(points)]
         doubled += x1 * y2 - x2 * y1
     return round(abs(doubled) / 2 / 1_000_000, 2)
+
+
+def rooms_without_doors(
+    rooms: list[dict[str, Any]],
+    walls: list[dict[str, Any]],
+) -> list[str]:
+    """Называет комнаты, в которые неоткуда войти.
+
+    В квартире нет комнат без входа. Если такая нашлась — значит,
+    дверь или проём не распознались, и человек увидит в 3D глухую
+    стену там, где на самом деле проход.
+    """
+    shapes = []
+    for room in rooms:
+        polygon = room.get("polygon")
+        if isinstance(polygon, str):
+            polygon = parse_polygon(polygon)
+        if polygon and len(polygon) >= 3:
+            shapes.append((str(room.get("name") or "Помещение"), polygon))
+
+    with_door = set()
+    for wall in walls:
+        if not wall.get("openings"):
+            continue
+        x1, y1 = wall["x1"], wall["y1"]
+        x2, y2 = wall["x2"], wall["y2"]
+        length = math.hypot(x2 - x1, y2 - y1)
+        if length <= 0:
+            continue
+        ux, uy = (x2 - x1) / length, (y2 - y1) / length
+        nx, ny = -uy, ux
+        reach = wall.get("thickness_mm", INNER_THICKNESS_MM) / 2 + 200
+
+        for hole in wall["openings"]:
+            share = min(1.0, max(0.0, hole["offset_mm"] / length))
+            base_x, base_y = x1 + (x2 - x1) * share, y1 + (y2 - y1) * share
+            # Проём соединяет то, что лежит по обе стороны от стены.
+            for way in (1, -1):
+                point = (base_x + nx * way * reach, base_y + ny * way * reach)
+                for name, shape in shapes:
+                    if _point_inside(point, shape):
+                        with_door.add(name)
+
+    return [name for name, _ in shapes if name not in with_door]

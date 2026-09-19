@@ -110,11 +110,31 @@ function savedResult(data) {
             `Балкон или лоджия: ${formatArea(data.outside_area_m2)} — `
             + 'в общую площадь не входит.' }));
     }
+    // В квартире нет комнат без входа. Если такая нашлась — в 3D
+    // на её месте будет глухая стена, и об этом надо сказать вслух.
+    const sealed = data.rooms_without_doors || [];
+    if (sealed.length) {
+        blocks.push(el('div', { class: 'small', style: 'color:var(--warn);margin-top:8px',
+            text: sealed.length === 1
+                ? `⚠ В «${sealed[0]}» не найдено ни двери, ни прохода — `
+                  + 'в 3D там будет глухая стена.'
+                : `⚠ Не найдено ни двери, ни прохода: ${sealed.join(', ')}. `
+                  + 'В 3D там будут глухие стены.' }));
+    }
+
     blocks.push(el('div', { class: 'small', style: 'margin-top:10px' }, [
         document.createTextNode(`Предметов найдено: ${data.items.length}`),
         document.createTextNode(data.unsure_items
             ? `, из них неуверенно — ${data.unsure_items}. ` : '. '),
         el('a', { href: `/project/${projectId}/viewer`, text: 'Открыть 3D-модель' }),
+    ]));
+
+    blocks.push(el('div', { class: 'muted small', style: 'margin-top:10px' }, [
+        document.createTextNode('Если в 3D что-то выглядит неправильно — '),
+        el('a', { href: `/api/projects/${projectId}/export`,
+                  text: 'скачайте файл с планировкой' }),
+        document.createTextNode(' и пришлите его: по числам причина видна '
+            + 'точнее, чем по картинке. Ключей и личных данных в файле нет.'),
     ]));
     return el('div', { class: 'notice', style: 'margin-top:14px' }, blocks);
 }

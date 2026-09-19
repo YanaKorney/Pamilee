@@ -10,11 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import dataclasses
+import json
 
 from contextlib import asynccontextmanager
 
@@ -386,7 +387,47 @@ def api_list_rooms(project_id: int) -> dict[str, Any]:
         "outside_area_m2": round(sum(r["area_m2"] for r in outside), 2),
         "declared_total_m2": project.get("declared_area_m2"),
         "unsure_items": sum(1 for i in items if (i.get("confidence") or 1) < 0.7),
+        "rooms_without_doors": geometry.rooms_without_doors(
+            rooms, db.list_walls(project_id)
+        ),
     }
+
+
+@app.get("/api/projects/{project_id}/export")
+def api_export(project_id: int) -> Response:
+    """Отдаёт разобранную планировку одним файлом.
+
+    Нужен, когда в 3D что-то выглядит неправильно: по картинке причину
+    видно не всегда, а по этим числам — сразу. Ключей и личных данных
+    в файле нет, только геометрия квартиры.
+    """
+    project = _require_project(project_id)
+    rooms = db.list_rooms(project_id)
+    walls = db.list_walls(project_id)
+    for room in rooms:
+        room["polygon"] = geometry.parse_polygon(room.get("polygon", "[]"))
+        room["area_m2"] = round(geometry.polygon_area_m2(room["polygon"]), 2)
+
+    payload = {
+        "версия программы": __version__,
+        "квартира": {
+            "название": project.get("name"),
+            "площадь по документам": project.get("declared_area_m2"),
+            "высота потолка": project.get("ceiling_height_mm"),
+        },
+        "комнаты": rooms,
+        "стены": walls,
+        "предметы": db.list_items(project_id),
+        "комнаты без двери": geometry.rooms_without_doors(rooms, walls),
+    }
+    return Response(
+        content=json.dumps(payload, ensure_ascii=False, indent=2),
+        media_type="application/json; charset=utf-8",
+        headers={
+            "Content-Disposition":
+                'attachment; filename="planirovka.json"',
+        },
+    )
 
 
 @app.get("/api/projects/{project_id}/scene")

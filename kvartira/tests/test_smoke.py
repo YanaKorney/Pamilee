@@ -2033,3 +2033,98 @@ class TestNoDoubleWalls(unittest.TestCase):
 
 def _flat_polygons():
     return [geometry_module().parse_polygon(r["polygon"]) for r in _flat_by_faces()]
+
+
+# ── Комната без входа и выгрузка планировки ──────────────────────────
+
+class TestSealedRoomIsNoticed(TestBase):
+    """В квартире нет комнат без входа.
+
+    Если дверь или проём не распознались, в 3D на их месте вырастает
+    глухая стена — именно это и видно на экране. Молчать об этом нельзя.
+    """
+
+    def _two_rooms(self) -> int:
+        from app import geometry
+        project_id = db.create_project("Коридор", ceiling_height_mm=2900)
+        db.add_room(project_id=project_id, name="Коридор", kind="hallway",
+                    polygon=json.dumps([[0, 0], [2000, 0], [2000, 6000], [0, 6000]]),
+                    declared_area_m2=12.0, sort_order=0)
+        db.add_room(project_id=project_id, name="Спальня", kind="bedroom",
+                    polygon=json.dumps([[2120, 0], [6000, 0], [6000, 6000], [2120, 6000]]),
+                    declared_area_m2=23.0, sort_order=1)
+        for wall in geometry.walls_from_rooms(db.list_rooms(project_id)):
+            db.add_wall(project_id, wall.x1, wall.y1, wall.x2, wall.y2,
+                        wall.thickness_mm, wall.kind)
+        return project_id
+
+    def test_глухая_комната_названа(self) -> None:
+        project_id = self._two_rooms()
+        data = self.client.get(f"/api/projects/{project_id}/rooms").json()
+        self.assertEqual(sorted(data["rooms_without_doors"]), ["Коридор", "Спальня"])
+
+    def test_дверь_снимает_предупреждение(self) -> None:
+        from app import geometry
+        project_id = self._two_rooms()
+        inner = [w for w in db.list_walls(project_id) if w["kind"] == "inner"]
+        self.assertTrue(inner, "Между комнатами должна быть перегородка")
+        db.add_opening(inner[0]["id"], "door", 3000, 900, 2100)
+        data = self.client.get(f"/api/projects/{project_id}/rooms").json()
+        self.assertEqual(data["rooms_without_doors"], [])
+
+    def test_проём_соединяет_обе_комнаты_сразу(self) -> None:
+        """Дверь в перегородке — вход и для той комнаты, и для этой."""
+        project_id = self._two_rooms()
+        inner = [w for w in db.list_walls(project_id) if w["kind"] == "inner"][0]
+        db.add_opening(inner["id"], "arch", 3000, 1400, 2100)
+        data = self.client.get(f"/api/projects/{project_id}/rooms").json()
+        self.assertNotIn("Коридор", data["rooms_without_doors"])
+        self.assertNotIn("Спальня", data["rooms_without_doors"])
+
+
+class TestPlanCanBeSent(TestBase):
+    """Чтобы разбирать ошибки в 3D, нужны числа, а не скриншот."""
+
+    def _project(self) -> int:
+        project_id = db.create_project("Выгрузка", ceiling_height_mm=2900)
+        db.update_project(project_id, declared_area_m2=35.0)
+        db.add_room(project_id=project_id, name="Гостиная", kind="living",
+                    polygon=json.dumps([[0, 0], [5000, 0], [5000, 4000], [0, 4000]]),
+                    declared_area_m2=20.0, sort_order=0)
+        return project_id
+
+    def test_файл_скачивается(self) -> None:
+        answer = self.client.get(f"/api/projects/{self._project()}/export")
+        self.assertEqual(answer.status_code, 200)
+        self.assertIn("attachment", answer.headers.get("content-disposition", ""))
+
+    def test_внутри_понятные_человеку_названия(self) -> None:
+        data = self.client.get(f"/api/projects/{self._project()}/export").json()
+        self.assertIn("комнаты", data)
+        self.assertIn("стены", data)
+        self.assertEqual(data["комнаты"][0]["name"], "Гостиная")
+        self.assertAlmostEqual(data["комнаты"][0]["area_m2"], 20.0, places=2)
+
+    def test_в_файле_нет_ключей(self) -> None:
+        """Файл она пришлёт мне — секретам там не место."""
+        raw = self.client.get(f"/api/projects/{self._project()}/export").text
+        for secret in ("api_key", "sk-", "PLAN_KEY", "IMAGE_KEY", "Bearer"):
+            self.assertNotIn(secret, raw)
+
+
+class TestWallsDoNotPokeIntoRooms(unittest.TestCase):
+    """Стену удлиняют до угла дома — но не внутрь комнаты."""
+
+    def test_стена_не_лезет_в_комнату(self) -> None:
+        from app.geometry import walls_from_rooms, _point_inside, parse_polygon
+        rooms = _flat_by_faces()
+        walls = walls_from_rooms(rooms)
+        shapes = [parse_polygon(r["polygon"]) for r in rooms]
+        for wall in walls:
+            for point in ((wall.x1, wall.y1), (wall.x2, wall.y2)):
+                deep = sum(1 for s in shapes if _point_inside(point, s))
+                self.assertEqual(
+                    deep, 0,
+                    f"Конец стены ({wall.x1},{wall.y1})→({wall.x2},{wall.y2}) "
+                    "оказался внутри комнаты",
+                )
