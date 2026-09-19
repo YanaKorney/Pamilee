@@ -26,6 +26,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 VENV_DIR = BASE_DIR / ".venv"
 REQUIREMENTS = BASE_DIR / "requirements.txt"
+OPTIONAL_REQUIREMENTS = BASE_DIR / "requirements-optional.txt"
 STAMP_FILE = VENV_DIR / ".requirements-stamp"
 ENV_FILE = BASE_DIR / ".env"
 ENV_EXAMPLE = BASE_DIR / ".env.example"
@@ -88,7 +89,10 @@ def running_inside_venv() -> bool:
 
 
 def requirements_stamp() -> str:
-    data = REQUIREMENTS.read_bytes() if REQUIREMENTS.exists() else b""
+    data = b""
+    for path in (REQUIREMENTS, OPTIONAL_REQUIREMENTS):
+        if path.exists():
+            data += path.read_bytes()
     return hashlib.sha256(data).hexdigest()
 
 
@@ -125,23 +129,47 @@ def install_requirements() -> None:
     title("Устанавливаю нужные библиотеки")
     say("Идёт загрузка — подождите, пожалуйста.")
     python = str(venv_python())
-    commands = [
+
+    subprocess.run(
         [python, "-m", "pip", "install", "--upgrade", "pip", "--quiet"],
-        [python, "-m", "pip", "install", "-r", str(REQUIREMENTS), "--quiet"],
-    ]
-    for command in commands:
-        result = subprocess.run(command, capture_output=True, text=True)
-        if result.returncode != 0 and command is commands[-1]:
-            tail = (result.stderr or result.stdout or "").strip().splitlines()[-3:]
-            fail(
-                "Не удалось скачать библиотеки.",
-                """
-                1. Проверьте, что интернет работает.
-                2. Если используете VPN — попробуйте выключить его и запустить снова.
-                3. Если не помогло, покажите разработчику эти строки:
-                """
-                + "\n".join(f"   {line}" for line in tail),
-            )
+        capture_output=True, text=True,
+    )
+
+    # --prefer-binary: берём готовые сборки, а не собираем из исходников.
+    # Сборка из исходников — самая частая причина, по которой установка
+    # падает у человека без инструментов разработчика.
+    result = subprocess.run(
+        [python, "-m", "pip", "install", "--prefer-binary", "-r", str(REQUIREMENTS), "--quiet"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        tail = (result.stderr or result.stdout or "").strip().splitlines()[-4:]
+        version = ".".join(str(n) for n in sys.version_info[:3])
+        fail(
+            "Не удалось скачать библиотеки.",
+            f"""
+            1. Проверьте, что интернет работает.
+            2. Если используете VPN — попробуйте выключить его и запустить снова.
+            3. У вас установлен Python {version}. Если это самая свежая версия,
+               вышедшая недавно, готовых сборок для неё может ещё не быть.
+               Поставьте Python 3.12 или 3.13 с сайта python.org, удалите
+               папку .venv рядом с программой и запустите снова.
+            4. Если не помогло, покажите разработчику эти строки:
+            """
+            + "\n".join(f"   {line}" for line in tail),
+        )
+
+    # Необязательное ставим отдельно и молча: не установилось — не беда.
+    if OPTIONAL_REQUIREMENTS.exists():
+        extra = subprocess.run(
+            [python, "-m", "pip", "install", "--prefer-binary",
+             "-r", str(OPTIONAL_REQUIREMENTS), "--quiet"],
+            capture_output=True, text=True,
+        )
+        if extra.returncode != 0:
+            say("Одна необязательная библиотека не установилась — это не помешает.")
+            say("Не будут открываться только файлы формата WEBP.")
+
     STAMP_FILE.write_text(requirements_stamp(), encoding="utf-8")
     say("Готово.")
 

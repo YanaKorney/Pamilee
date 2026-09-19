@@ -13,7 +13,6 @@
 
 from __future__ import annotations
 
-import io
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -147,28 +146,62 @@ def _ingest_pdf(project_id: int, original_name: str, path: Path, kind: str) -> I
     return Ingested(path.name, original_name, pages, document_is_vector, file_ids)
 
 
-def _ingest_image(project_id: int, original_name: str, path: Path, kind: str) -> Ingested:
-    from PIL import Image, UnidentifiedImageError
+def _make_image_preview(path: Path, target: Path, original_name: str) -> tuple[int, int]:
+    """Делает превью изображения и возвращает его настоящий размер в пикселях.
 
-    previews_dir = storage.project_dir(project_id) / "previews"
-    previews_dir.mkdir(parents=True, exist_ok=True)
+    JPG и PNG читает та же библиотека, что и PDF, — отдельная для этого
+    не нужна. WEBP она не умеет, поэтому для него нужна pillow; если её
+    нет, честно об этом говорим вместо непонятной ошибки.
+    """
+    suffix = path.suffix.lower()
+
+    if suffix in (".jpg", ".jpeg", ".png"):
+        pymupdf = _open_pdf_library()
+        try:
+            with pymupdf.open(path) as document:
+                page = document[0]
+                width = int(page.rect.width)
+                height = int(page.rect.height)
+                scale = min(1.0, PREVIEW_MAX_PX / max(width, height, 1))
+                pixmap = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale))
+                target.write_bytes(pixmap.tobytes("jpg"))
+            return width, height
+        except Exception:
+            pass  # попробуем запасной путь ниже
 
     try:
-        with Image.open(io.BytesIO(path.read_bytes())) as image:
+        from PIL import Image, UnidentifiedImageError
+    except ImportError as exc:
+        raise UserError(
+            f"Файл «{original_name}» в этом формате открыть не получилось.",
+            "Сохраните его как JPG или PNG и загрузите снова.",
+        ) from exc
+
+    try:
+        with Image.open(path) as image:
             image.load()
             width, height = image.size
             preview = image.convert("RGB")
             preview.thumbnail((PREVIEW_MAX_PX, PREVIEW_MAX_PX), Image.LANCZOS)
-            preview_name = f"{path.stem}-p1.jpg"
-            preview.save(previews_dir / preview_name, "JPEG", quality=88)
+            preview.save(target, "JPEG", quality=88)
+        return width, height
     except UnidentifiedImageError as exc:
         raise UserError(
             f"Файл «{original_name}» не похож на изображение.",
             "Подойдут JPG, PNG или WEBP.",
         ) from exc
 
+
+def _ingest_image(project_id: int, original_name: str, path: Path, kind: str) -> Ingested:
+    previews_dir = storage.project_dir(project_id) / "previews"
+    previews_dir.mkdir(parents=True, exist_ok=True)
+
+    preview_name = f"{path.stem}-p1.jpg"
+    width, height = _make_image_preview(path, previews_dir / preview_name, original_name)
+
     mime = {
-        ".jpg": "image/jpeg", ".png": "image/png", ".webp": "image/webp",
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".png": "image/png", ".webp": "image/webp",
     }.get(path.suffix.lower(), "image/jpeg")
 
     file_id = db.add_file(

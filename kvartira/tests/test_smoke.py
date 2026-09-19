@@ -340,3 +340,59 @@ class TestProviderErrors(unittest.TestCase):
             with self.subTest(status=status):
                 message = self._explain(status).message
                 self.assertNotIn(str(status), message)
+
+
+class TestWithoutPillow(TestBase):
+    """Программа не должна зависеть от необязательной библиотеки.
+
+    pillow нужна только для WEBP. Раньше она была обязательной и на свежих
+    версиях Python ломала весь запуск. Проверяем, что без неё всё живо.
+    """
+
+    FIXTURES = BASE_DIR / "tests" / "fixtures"
+
+    def setUp(self) -> None:
+        self.project_id = self.client.post(
+            "/api/projects", json={"name": "Без pillow"}
+        ).json()["id"]
+        # Делаем import PIL неудачным на время проверки.
+        self._saved = sys.modules.get("PIL", "отсутствовала")
+        sys.modules["PIL"] = None  # type: ignore[assignment]
+
+    def tearDown(self) -> None:
+        if self._saved == "отсутствовала":
+            sys.modules.pop("PIL", None)
+        else:
+            sys.modules["PIL"] = self._saved
+        self.client.delete(f"/api/projects/{self.project_id}")
+
+    def _upload(self, filename: str, data: bytes, mime: str):
+        return self.client.post(
+            f"/api/projects/{self.project_id}/files",
+            files={"files": (filename, data, mime)},
+        )
+
+    def test_jpg_works_without_pillow(self) -> None:
+        data = (self.FIXTURES / "plan-dizayner.jpg").read_bytes()
+        response = self._upload("plan-dizayner.jpg", data, "image/jpeg")
+        self.assertEqual(response.status_code, 201, "JPG обязан читаться без pillow")
+        added = response.json()["added"]
+        self.assertEqual(len(added), 1)
+
+        documents = self.client.get(f"/api/projects/{self.project_id}/documents").json()
+        page = documents[0]["pages"][0]
+        self.assertEqual((page["width_px"], page["height_px"]), (1701, 1184))
+        preview = self.client.get(f"/api/files/{page['id']}/preview")
+        self.assertEqual(preview.status_code, 200)
+
+    def test_pdf_works_without_pillow(self) -> None:
+        data = (self.FIXTURES / "plan-zastroyshchik.pdf").read_bytes()
+        response = self._upload("plan-zastroyshchik.pdf", data, "application/pdf")
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(response.json()["added"][0]["is_vector"])
+
+    def test_webp_explains_what_to_do(self) -> None:
+        response = self._upload("фото.webp", b"RIFF____WEBPVP8 ", "image/webp")
+        self.assertEqual(response.status_code, 400)
+        hint = response.json()["hint"]
+        self.assertIn("JPG", hint, "Человеку надо подсказать, что делать")
