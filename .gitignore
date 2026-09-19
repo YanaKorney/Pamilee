@@ -22,3 +22,6 @@ venv/
 # ос
 .DS_Store
 Thumbs.db
+
+# технические записи программы
+logs/

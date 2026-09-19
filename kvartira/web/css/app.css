@@ -1,0 +1,318 @@
+/* Внешний вид приложения «Моя квартира».
+   Тёплая спокойная палитра, крупный текст, никакого технического жаргона. */
+
+:root {
+    --bg:          #f7f5f2;
+    --surface:     #ffffff;
+    --surface-2:   #faf8f5;
+    --text:        #1d1b19;
+    --muted:       #6f6a64;
+    --border:      #e6e1d9;
+    --accent:      #b4643c;
+    --accent-dark: #97522f;
+    --accent-soft: #f6ebe4;
+    --ok:          #3f7d52;
+    --warn:        #b07d1d;
+    --danger:      #b33b32;
+    --radius:      14px;
+    --radius-sm:   9px;
+    --shadow:      0 1px 2px rgba(29, 27, 25, .05), 0 6px 20px rgba(29, 27, 25, .06);
+    --maxw:        1080px;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg:          #171614;
+        --surface:     #201e1b;
+        --surface-2:   #262320;
+        --text:        #f0ece6;
+        --muted:       #a39d94;
+        --border:      #34302b;
+        --accent:      #d9835a;
+        --accent-dark: #e89b76;
+        --accent-soft: #2e251f;
+        --ok:          #6aa87d;
+        --warn:        #d3a745;
+        --danger:      #d97a70;
+        --shadow:      0 1px 2px rgba(0,0,0,.3), 0 6px 20px rgba(0,0,0,.25);
+    }
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                 "Helvetica Neue", Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+}
+
+/* ── Шапка ─────────────────────────────────────────────────────────── */
+
+.topbar {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 20;
+}
+
+.topbar-inner {
+    max-width: var(--maxw);
+    margin: 0 auto;
+    padding: 14px 16px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+}
+
+.brand {
+    font-weight: 650;
+    font-size: 17px;
+    letter-spacing: -.01em;
+    text-decoration: none;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 9px;
+}
+
+.brand-mark {
+    width: 26px; height: 26px;
+    border-radius: 7px;
+    background: var(--accent);
+    color: #fff;
+    display: grid; place-items: center;
+    font-size: 14px;
+    flex: none;
+}
+
+.topbar .spacer { flex: 1; }
+
+/* ── Разметка ──────────────────────────────────────────────────────── */
+
+main {
+    max-width: var(--maxw);
+    margin: 0 auto;
+    padding: 28px 16px 72px;
+}
+
+h1 { font-size: 27px; line-height: 1.25; margin: 0 0 6px; letter-spacing: -.02em; }
+h2 { font-size: 19px; margin: 34px 0 14px; letter-spacing: -.01em; }
+h3 { font-size: 16px; margin: 0 0 4px; }
+p  { margin: 0 0 14px; }
+
+.lead { color: var(--muted); margin: 0 0 24px; max-width: 62ch; }
+.muted { color: var(--muted); }
+.small { font-size: 14px; }
+
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+/* ── Карточки ──────────────────────────────────────────────────────── */
+
+.card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    box-shadow: var(--shadow);
+}
+
+.cards { display: grid; gap: 14px; }
+
+@media (min-width: 680px) {
+    .cards-2 { grid-template-columns: repeat(2, 1fr); }
+    .cards-3 { grid-template-columns: repeat(3, 1fr); }
+}
+
+.project-card {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    text-decoration: none;
+    color: inherit;
+    transition: border-color .15s, transform .15s;
+}
+.project-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+.project-card .grow { flex: 1; min-width: 0; }
+.project-card .name { font-weight: 600; font-size: 17px; }
+.project-card .chev { color: var(--muted); font-size: 20px; flex: none; }
+
+/* Плитки разделов проекта */
+
+.tile {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    text-decoration: none;
+    color: inherit;
+    transition: border-color .15s, transform .15s;
+}
+.tile:not(.tile-off):hover { border-color: var(--accent); transform: translateY(-1px); }
+.tile-icon { font-size: 22px; line-height: 1; margin-bottom: 8px; }
+.tile-off { opacity: .55; }
+
+.badge {
+    display: inline-block;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 2px 9px;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent-dark);
+}
+.badge-soon { background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); }
+.badge-ok   { background: rgba(63,125,82,.12); color: var(--ok); }
+.badge-warn { background: rgba(176,125,29,.14); color: var(--warn); }
+
+/* ── Кнопки ────────────────────────────────────────────────────────── */
+
+.btn {
+    appearance: none;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    font-weight: 550;
+    padding: 11px 18px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: background .15s, border-color .15s;
+}
+.btn:hover { background: var(--surface-2); border-color: var(--muted); }
+.btn:disabled { opacity: .5; cursor: default; }
+
+.btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+.btn-primary:hover { background: var(--accent-dark); border-color: var(--accent-dark); }
+
+.btn-quiet { border-color: transparent; background: transparent; color: var(--muted); }
+.btn-quiet:hover { background: var(--surface-2); color: var(--text); }
+
+.btn-danger { color: var(--danger); }
+.btn-danger:hover { background: rgba(179,59,50,.08); border-color: var(--danger); }
+
+/* ── Поля ──────────────────────────────────────────────────────────── */
+
+label { display: block; font-weight: 550; margin-bottom: 6px; font-size: 15px; }
+
+input[type="text"], input[type="number"], textarea, select {
+    width: 100%;
+    font: inherit;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 11px 13px;
+}
+input:focus, textarea:focus, select:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: -1px;
+    border-color: var(--accent);
+}
+
+.field { margin-bottom: 18px; }
+.field .hint { color: var(--muted); font-size: 14px; margin-top: 5px; font-weight: 400; }
+
+.field-pair { display: grid; gap: 14px; }
+@media (min-width: 560px) { .field-pair { grid-template-columns: 1fr 1fr; } }
+
+/* ── Окно поверх страницы ──────────────────────────────────────────── */
+
+.overlay {
+    position: fixed; inset: 0;
+    background: rgba(29, 27, 25, .45);
+    display: grid; place-items: center;
+    padding: 16px;
+    z-index: 50;
+}
+.overlay[hidden] { display: none; }
+
+.modal {
+    background: var(--surface);
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    padding: 24px;
+    width: 100%;
+    max-width: 460px;
+    box-shadow: 0 20px 60px rgba(0,0,0,.25);
+}
+.modal h2 { margin: 0 0 6px; font-size: 20px; }
+
+/* ── Сообщения ─────────────────────────────────────────────────────── */
+
+.notice {
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    border-radius: var(--radius-sm);
+    padding: 14px 16px;
+    margin-bottom: 18px;
+}
+.notice-warn { border-color: var(--warn); background: rgba(176,125,29,.08); }
+.notice-error { border-color: var(--danger); background: rgba(179,59,50,.07); }
+.notice strong { display: block; margin-bottom: 2px; }
+
+.toast-area {
+    position: fixed;
+    left: 50%; bottom: 22px;
+    transform: translateX(-50%);
+    z-index: 60;
+    display: flex; flex-direction: column; gap: 8px;
+    width: min(520px, calc(100vw - 32px));
+}
+.toast {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--accent);
+    border-radius: var(--radius-sm);
+    padding: 13px 16px;
+    box-shadow: var(--shadow);
+    animation: rise .18s ease-out;
+}
+.toast-error { border-left-color: var(--danger); }
+.toast-ok { border-left-color: var(--ok); }
+.toast strong { display: block; }
+.toast .hint { color: var(--muted); font-size: 14px; }
+
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } }
+
+/* ── Пустое состояние ──────────────────────────────────────────────── */
+
+.empty {
+    text-align: center;
+    padding: 56px 20px;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+    background: var(--surface-2);
+}
+.empty .icon { font-size: 34px; margin-bottom: 10px; }
+
+.crumbs { color: var(--muted); font-size: 14px; margin-bottom: 14px; }
+.crumbs a { color: var(--muted); }
+
+.stat-row { display: flex; gap: 26px; flex-wrap: wrap; margin-top: 4px; }
+.stat .k { color: var(--muted); font-size: 13px; }
+.stat .v { font-size: 19px; font-weight: 600; }
+
+.spinner {
+    width: 16px; height: 16px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+    display: inline-block;
+}
+@keyframes spin { to { transform: rotate(360deg); } }

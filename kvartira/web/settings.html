@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Настройки · Моя квартира</title>
+<link rel="stylesheet" href="/static/css/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>&#127968;</text></svg>">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="/">
+      <span class="brand-mark">&#127968;</span>
+      Моя квартира
+    </a>
+    <span class="spacer"></span>
+    <a class="btn btn-quiet" href="/">Мои проекты</a>
+  </div>
+</header>
+
+<main>
+  <h1>Настройки</h1>
+  <p class="lead">
+    Здесь видно, что уже подключено. Сами ключи хранятся в файле
+    <code>.env</code> рядом с программой и никуда не передаются.
+  </p>
+  <div id="content"><div class="spinner"></div></div>
+</main>
+
+<script type="module" src="/static/js/settings.js"></script>
+</body>
+</html>
