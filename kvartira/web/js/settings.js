@@ -75,6 +75,89 @@ async function runCheck(button) {
     }
 }
 
+// ── Ключ доступа ─────────────────────────────────────────────────────
+
+function keysCard(aiSettings, reload) {
+    const field = el('input', {
+        type: 'password',
+        placeholder: 'вставьте ключ сюда',
+        autocomplete: 'off',
+        spellcheck: 'false',
+    });
+    const both = el('input', { type: 'checkbox', checked: 'checked' });
+    const save = el('button', { class: 'btn btn-primary', text: 'Сохранить ключ' });
+    const show = el('button', { class: 'btn', text: 'Показать' });
+
+    show.addEventListener('click', () => {
+        const hidden = field.type === 'password';
+        field.type = hidden ? 'text' : 'password';
+        show.textContent = hidden ? 'Скрыть' : 'Показать';
+    });
+
+    save.addEventListener('click', async () => {
+        const value = field.value.trim();
+        if (!value) {
+            showError({
+                error: 'Вы не вписали ключ.',
+                hint: 'Скопируйте его в личном кабинете сервиса и вставьте в поле.',
+            });
+            return;
+        }
+        save.disabled = true;
+        try {
+            await api.put('/api/ai/keys', {
+                plan_key: value,
+                image_key: both.checked ? value : null,
+                same_for_both: both.checked,
+            });
+            field.value = '';
+            toast('Ключ сохранён', 'Перезапускать программу не нужно', 'ok');
+            reload();
+        } catch (err) {
+            showError(err);
+        } finally {
+            save.disabled = false;
+        }
+    });
+
+    const state = aiSettings.plan.key_hint
+        ? el('div', { class: 'small' }, [
+            el('span', { class: 'badge badge-ok', text: 'ключ сохранён' }),
+            el('span', { class: 'muted', style: 'margin-left:8px',
+                text: aiSettings.plan.key_hint }),
+        ])
+        : el('div', { class: 'small' }, [
+            el('span', { class: 'badge badge-warn', text: 'ключа пока нет' }),
+        ]);
+
+    return el('div', { class: 'card' }, [
+        el('p', {
+            class: 'muted small',
+            style: 'margin-top:0',
+            text: 'Вставьте ключ из личного кабинета вашего AI-сервиса. '
+                + 'Он сохранится на вашем компьютере и никуда не передаётся, '
+                + 'кроме самого сервиса.',
+        }),
+        state,
+        el('div', { class: 'field', style: 'margin-top:14px' }, [
+            el('label', { text: 'Новый ключ' }),
+            el('div', { class: 'row', style: 'flex-wrap:nowrap' }, [
+                el('div', { style: 'flex:1 1 260px; min-width:0' }, [field]),
+                show,
+            ]),
+        ]),
+        el('label', { class: 'small', style: 'font-weight:400' }, [
+            both,
+            document.createTextNode(' Один и тот же ключ для чтения чертежа и для картинок'),
+        ]),
+        el('div', { class: 'row', style: 'margin-top:14px' }, [save]),
+        el('div', { class: 'muted small', style: 'margin-top:12px' }, [
+            document.createTextNode('Файл настроек: '),
+            el('code', { text: aiSettings.settings_file || '' }),
+        ]),
+    ]);
+}
+
 // ── Выбор моделей ────────────────────────────────────────────────────
 
 function modelField(labelText, hintText, listId, value) {
@@ -202,20 +285,14 @@ async function load() {
             ]),
         ];
 
+        blocks.push(el('h2', { text: 'Ключ доступа' }), keysCard(aiSettings, load));
+
         if (!aiSettings.plan.ready || !aiSettings.image.ready) {
             blocks.push(el('div', { class: 'notice notice-warn', style: 'margin-top:20px' }, [
-                el('strong', { text: 'Как вписать ключ' }),
-                el('div', { class: 'small' }, [
-                    document.createTextNode('Откройте файл '),
-                    el('code', { text: '.env' }),
-                    document.createTextNode(' рядом с программой Блокнотом или TextEdit, '),
-                    document.createTextNode('впишите ключ после знака = в строках '),
-                    el('code', { text: 'PLAN_API_KEY' }),
-                    document.createTextNode(' и '),
-                    el('code', { text: 'IMAGE_API_KEY' }),
-                    document.createTextNode(' — если сервис один, ключ в обеих строках '),
-                    document.createTextNode('одинаковый. Сохраните файл и перезапустите программу.'),
-                ]),
+                el('strong', { text: 'Ключа пока нет' }),
+                el('div', { class: 'small', text:
+                    'Вставьте его в поле выше — этого достаточно. Искать файлы '
+                    + 'и перезапускать программу не нужно.' }),
             ]));
         }
 

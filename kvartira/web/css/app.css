@@ -209,7 +209,12 @@ p  { margin: 0 0 14px; }
 
 label { display: block; font-weight: 550; margin-bottom: 6px; font-size: 15px; }
 
-input[type="text"], input[type="number"], textarea, select {
+input[type="text"],
+input[type="number"],
+input[type="password"],
+input[type="search"],
+textarea,
+select {
     width: 100%;
     font: inherit;
     color: var(--text);

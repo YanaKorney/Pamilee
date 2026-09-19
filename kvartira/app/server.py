@@ -17,8 +17,13 @@ from pydantic import BaseModel, Field
 import dataclasses
 
 from . import __version__, ai, db, plan_analysis, plan_files, plan_vector, storage
-from .config import WEB_DIR, settings
-from .errors import UserError, get_logger, project_not_found
+from .config import ENV_PATH, WEB_DIR, clean_secret, settings
+from .errors import (
+    UserError,
+    get_logger,
+    key_has_strange_characters,
+    project_not_found,
+)
 
 log = get_logger()
 
@@ -328,6 +333,12 @@ def api_list_rooms(project_id: int) -> dict[str, Any]:
 
 # ── AI-сервис: каталог моделей, выбор, проверка доступа ───────────────────
 
+class AiKeys(BaseModel):
+    plan_key: str | None = Field(default=None, max_length=400)
+    image_key: str | None = Field(default=None, max_length=400)
+    same_for_both: bool = False
+
+
 class AiSettingsPatch(BaseModel):
     plan_model: str | None = Field(default=None, max_length=200)
     image_model: str | None = Field(default=None, max_length=200)
@@ -340,12 +351,15 @@ def api_ai_settings() -> dict[str, Any]:
             "model": ai.plan_model(),
             "ready": settings.plan_ready,
             "base_url": settings.plan_base_url,
+            "key_hint": settings.mask(settings.plan_api_key),
         },
         "image": {
             "model": ai.image_model(),
             "ready": settings.image_ready,
             "base_url": settings.image_base_url,
+            "key_hint": settings.mask(settings.image_api_key),
         },
+        "settings_file": str(ENV_PATH),
     }
 
 
@@ -355,6 +369,33 @@ def api_set_ai_settings(data: AiSettingsPatch) -> dict[str, Any]:
         db.set_setting(ai.PLAN_MODEL_KEY, data.plan_model.strip())
     if data.image_model is not None:
         db.set_setting(ai.IMAGE_MODEL_KEY, data.image_model.strip())
+    return api_ai_settings()
+
+
+@app.put("/api/ai/keys")
+def api_set_keys(data: AiKeys) -> dict[str, Any]:
+    """Сохраняет ключ доступа, введённый прямо в программе.
+
+    Так человеку не приходится искать скрытый файл .env и открывать
+    его Блокнотом — самое хрупкое место во всей настройке.
+    """
+    plan_key = clean_secret(data.plan_key or "")
+    image_key = clean_secret(data.image_key or "")
+    if data.same_for_both and plan_key:
+        image_key = plan_key
+
+    if not plan_key and not image_key:
+        raise UserError(
+            "Вы не вписали ключ.",
+            "Скопируйте его в личном кабинете сервиса и вставьте в поле.",
+        )
+
+    for candidate in (plan_key, image_key):
+        if candidate and not candidate.isascii():
+            raise key_has_strange_characters()
+
+    settings.set_keys(plan_key or None, image_key or None)
+    log.info("Ключи доступа обновлены из интерфейса")
     return api_ai_settings()
 
 
@@ -396,7 +437,20 @@ def page_settings() -> FileResponse:
     return _page("settings.html")
 
 
-app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+class FreshFiles(StaticFiles):
+    """Отдаёт файлы интерфейса без кеширования.
+
+    Иначе после обновления программы браузер показывает старый экран,
+    и человек видит вчерашнюю версию, не понимая почему.
+    """
+
+    def file_response(self, *args: Any, **kwargs: Any):  # type: ignore[override]
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
+
+
+app.mount("/static", FreshFiles(directory=WEB_DIR), name="static")
 
 
 def create_app() -> FastAPI:

@@ -98,6 +98,53 @@ def load_env(path: Path = ENV_PATH) -> None:
             os.environ[key] = value
 
 
+# Невидимые символы, которые цепляются при копировании из браузера.
+INVISIBLE_CHARS = "\u00a0\u200b\u200c\u200d\ufeff\u2028\u2029"
+
+
+def clean_secret(value: str) -> str:
+    """Чистит ключ от того, что прилипло при копировании.
+
+    Неразрывный пробел и нулевой пробел не видны глазом, но ломают
+    запрос так, что причину не понять. Убираем их сразу.
+    """
+    cleaned = value.strip().strip("\"'")
+    for char in INVISIBLE_CHARS:
+        cleaned = cleaned.replace(char, "")
+    return cleaned.strip()
+
+
+def write_env_values(values: dict[str, str]) -> None:
+    """Записывает значения в .env, сохраняя комментарии и порядок строк.
+
+    Нужно, чтобы ключ доступа можно было вставить прямо в программе,
+    а не искать скрытый файл и открывать его Блокнотом.
+    """
+    APP_HOME.mkdir(parents=True, exist_ok=True)
+    if ENV_PATH.exists():
+        lines = ENV_PATH.read_text(encoding="utf-8").splitlines()
+    elif ENV_EXAMPLE_PATH.exists():
+        lines = ENV_EXAMPLE_PATH.read_text(encoding="utf-8").splitlines()
+    else:
+        lines = []
+
+    remaining = dict(values)
+    result: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip()
+            if key in remaining:
+                result.append(f"{key}={remaining.pop(key)}")
+                continue
+        result.append(line)
+
+    for key, value in remaining.items():
+        result.append(f"{key}={value}")
+
+    ENV_PATH.write_text("\n".join(result) + "\n", encoding="utf-8")
+
+
 def _get(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
@@ -158,6 +205,32 @@ class Settings:
 
         # ── Защита от лишних трат ─────────────────────────────────────────
         self.daily_limit_rub: float = _get_float("DAILY_LIMIT_RUB", 300.0)
+
+    def set_keys(self, plan_key: str | None, image_key: str | None) -> None:
+        """Сохраняет ключи доступа и сразу начинает ими пользоваться.
+
+        Перезапускать программу не нужно: значения меняются и в файле,
+        и в уже работающей программе.
+        """
+        values: dict[str, str] = {}
+        if plan_key is not None:
+            self.plan_api_key = clean_secret(plan_key)
+            os.environ["PLAN_API_KEY"] = self.plan_api_key
+            values["PLAN_API_KEY"] = self.plan_api_key
+        if image_key is not None:
+            self.image_api_key = clean_secret(image_key)
+            os.environ["IMAGE_API_KEY"] = self.image_api_key
+            values["IMAGE_API_KEY"] = self.image_api_key
+        if values:
+            write_env_values(values)
+
+    @staticmethod
+    def mask(secret: str) -> str:
+        """Показывает только хвост ключа — чтобы узнать, но не подсмотреть."""
+        if not secret:
+            return ""
+        tail = secret[-4:] if len(secret) > 8 else "…"
+        return f"вписан, оканчивается на {tail}"
 
     @property
     def plan_ready(self) -> bool:

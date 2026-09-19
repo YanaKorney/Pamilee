@@ -920,3 +920,128 @@ class TestBrokenDatabase(unittest.TestCase):
         finally:
             config.DATA_DIR, config.PROJECTS_DIR, config.LOGS_DIR = saved_config
             db.DB_PATH = saved_db
+
+
+class TestKeyFromTheInterface(TestBase):
+    """Ключ вставляется прямо в программе, без поиска скрытых файлов."""
+
+    def setUp(self) -> None:
+        from app import config
+        self.saved_env_path = config.ENV_PATH
+        self.saved_home = config.APP_HOME
+        config.APP_HOME = _TMP / "ключи"
+        config.ENV_PATH = config.APP_HOME / ".env"
+        config.APP_HOME.mkdir(parents=True, exist_ok=True)
+        self.saved_keys = (config.settings.plan_api_key, config.settings.image_api_key)
+
+    def tearDown(self) -> None:
+        from app import config
+        config.ENV_PATH = self.saved_env_path
+        config.APP_HOME = self.saved_home
+        config.settings.plan_api_key, config.settings.image_api_key = self.saved_keys
+
+    def test_one_key_serves_both_services(self) -> None:
+        response = self.client.put(
+            "/api/ai/keys", json={"plan_key": "sk-proverka-1234", "same_for_both": True}
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["plan"]["ready"])
+        self.assertTrue(data["image"]["ready"])
+
+    def test_key_starts_working_without_restart(self) -> None:
+        from app.config import settings
+        self.client.put(
+            "/api/ai/keys", json={"plan_key": "sk-srazu-9876", "same_for_both": True}
+        )
+        self.assertEqual(settings.plan_api_key, "sk-srazu-9876")
+        self.assertTrue(settings.plan_ready)
+
+    def test_key_is_written_to_the_settings_file(self) -> None:
+        from app import config
+        self.client.put(
+            "/api/ai/keys", json={"plan_key": "sk-v-fayl-5555", "same_for_both": True}
+        )
+        written = config.ENV_PATH.read_text(encoding="utf-8")
+        self.assertIn("PLAN_API_KEY=sk-v-fayl-5555", written)
+        self.assertIn("IMAGE_API_KEY=sk-v-fayl-5555", written)
+
+    def test_comments_in_the_settings_file_survive(self) -> None:
+        """Файл остаётся понятным человеку: подсказки не затираются."""
+        from app import config
+        config.ENV_PATH.write_text(
+            "# как пользоваться этим файлом\nPLAN_API_KEY=\nPLAN_MODEL=claude-opus-5\n",
+            encoding="utf-8",
+        )
+        self.client.put("/api/ai/keys", json={"plan_key": "noviy-klyuch", "same_for_both": False})
+        written = config.ENV_PATH.read_text(encoding="utf-8")
+        self.assertIn("# как пользоваться этим файлом", written)
+        self.assertIn("PLAN_MODEL=claude-opus-5", written)
+        self.assertIn("PLAN_API_KEY=noviy-klyuch", written)
+
+    def test_empty_key_is_refused_politely(self) -> None:
+        response = self.client.put("/api/ai/keys", json={"plan_key": "   "})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("не вписали", response.json()["error"])
+
+    def test_key_is_never_shown_in_full(self) -> None:
+        """На экране виден только хвост ключа — чтобы узнать, но не подсмотреть."""
+        self.client.put(
+            "/api/ai/keys", json={"plan_key": "sk-very-secret-abcd", "same_for_both": True}
+        )
+        shown = self.client.get("/api/ai/settings").json()["plan"]["key_hint"]
+        self.assertNotIn("very-secret", shown)
+        self.assertIn("abcd", shown)
+
+
+class TestKeyIsCleanedUp(TestBase):
+    """При копировании из браузера к ключу липнут невидимые символы.
+
+    Неразрывный пробел не видно глазом, но запрос из-за него падает
+    с ошибкой кодировки, по которой ничего не понять.
+    """
+
+    def setUp(self) -> None:
+        from app import config
+        self.saved = (config.ENV_PATH, config.APP_HOME,
+                      config.settings.plan_api_key, config.settings.image_api_key)
+        config.APP_HOME = _TMP / "чистка-ключей"
+        config.ENV_PATH = config.APP_HOME / ".env"
+        config.APP_HOME.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self) -> None:
+        from app import config
+        (config.ENV_PATH, config.APP_HOME,
+         config.settings.plan_api_key, config.settings.image_api_key) = self.saved
+
+    def test_invisible_characters_are_stripped(self) -> None:
+        from app.config import clean_secret
+        self.assertEqual(clean_secret("  sk-abc123  "), "sk-abc123")
+        self.assertEqual(clean_secret("﻿sk-abc123​"), "sk-abc123")
+        self.assertEqual(clean_secret('"sk-abc123"'), "sk-abc123")
+
+    def test_key_with_spaces_still_works(self) -> None:
+        response = self.client.put(
+            "/api/ai/keys",
+            json={"plan_key": " sk-with-spaces-0001  ", "same_for_both": True},
+        )
+        self.assertEqual(response.status_code, 200)
+        from app.config import settings
+        self.assertEqual(settings.plan_api_key, "sk-with-spaces-0001")
+
+    def test_russian_letters_are_refused_politely(self) -> None:
+        response = self.client.put(
+            "/api/ai/keys", json={"plan_key": "ключ-по-русски", "same_for_both": True}
+        )
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertIn("посторонние символы", body["error"])
+        self.assertIn("Скопируйте", body["hint"])
+
+    def test_service_refuses_a_broken_key_without_crashing(self) -> None:
+        """Последняя линия обороны: даже если ключ попал в настройки."""
+        from app.providers import OpenAiCompatProvider
+        provider = OpenAiCompatProvider("https://example.invalid/v1", "ключ-кириллицей")
+        with self.assertRaises(UserError) as caught:
+            provider.list_models()
+        self.assertIn("посторонние символы", caught.exception.message)
