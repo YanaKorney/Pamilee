@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterator
 
 from .config import DB_PATH, ensure_dirs
+from .errors import database_broken
 
 SCHEMA_VERSION = 2
 
@@ -205,11 +206,18 @@ def connect() -> Iterator[sqlite3.Connection]:
 
 def init_db() -> None:
     """Создаёт таблицы при первом запуске. Повторный вызов безопасен."""
-    with connect() as conn:
-        conn.executescript(SCHEMA)
-        row = conn.execute("SELECT version FROM schema_version").fetchone()
-        if row is None:
-            conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+    try:
+        with connect() as conn:
+            conn.executescript(SCHEMA)
+            row = conn.execute("SELECT version FROM schema_version").fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+                )
+    except sqlite3.DatabaseError as exc:
+        # Повреждённый файл базы не должен показывать человеку
+        # техническую ошибку — только понятную инструкцию.
+        raise database_broken(DB_PATH) from exc
 
 
 def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:

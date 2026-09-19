@@ -11,6 +11,11 @@ import shutil
 import sys
 import tempfile
 import unittest
+import warnings
+
+# Тестовый клиент ругается на библиотеку, которую мы не выбирали.
+warnings.filterwarnings("ignore", module="starlette.*")
+warnings.filterwarnings("ignore", message=".*httpx.*")
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -765,3 +770,153 @@ class TestPromptHelpsTheModel(TestBase):
     def test_balcony_rule_is_explained(self) -> None:
         self.assertIn("НЕ входят", self.fake.asked_prompt)
         self.assertIn("kind = balcony", self.fake.asked_prompt)
+
+
+class TestDataLivesOutsideTheProgram(unittest.TestCase):
+    """Проекты и ключ лежат отдельно от программы.
+
+    Иначе обновление стирает всё, что человек успел сделать: скачал
+    новую версию, распаковал — и нет ни ключа, ни загруженных планов.
+    """
+
+    def test_app_home_can_be_pointed_anywhere(self) -> None:
+        import os
+        from app.config import resolve_app_home
+        os.environ["APP_HOME"] = str(_TMP / "своя-папка")
+        try:
+            self.assertEqual(resolve_app_home(), _TMP / "своя-папка")
+        finally:
+            os.environ.pop("APP_HOME", None)
+
+    def test_default_home_is_in_documents(self) -> None:
+        from app.config import HOME_FOLDER_NAME, resolve_app_home
+        home = resolve_app_home()
+        self.assertEqual(home.name, HOME_FOLDER_NAME)
+        self.assertIn(str(Path.home()), str(home))
+
+    def test_migration_moves_key_and_projects(self) -> None:
+        from app import config
+
+        program = _TMP / "программа"
+        (program / "data" / "projects" / "1").mkdir(parents=True)
+        (program / "data" / "app.db").write_bytes("база".encode())
+        (program / ".env").write_text("PLAN_API_KEY=секрет", encoding="utf-8")
+        new_home = _TMP / "новый-дом"
+
+        saved = (config.BASE_DIR, config.APP_HOME, config.ENV_PATH,
+                 config.DATA_DIR, config.LOGS_DIR)
+        config.BASE_DIR = program
+        config.APP_HOME = new_home
+        config.ENV_PATH = new_home / ".env"
+        config.DATA_DIR = new_home / "data"
+        config.LOGS_DIR = new_home / "logs"
+        try:
+            moved = config.migrate_from_program_folder()
+
+            self.assertEqual(len(moved), 2, "Перенести надо и ключ, и проекты")
+            self.assertEqual(
+                (new_home / ".env").read_text(encoding="utf-8"), "PLAN_API_KEY=секрет"
+            )
+            self.assertEqual((new_home / "data" / "app.db").read_bytes(), "база".encode())
+            self.assertTrue((new_home / "data" / "projects" / "1").is_dir())
+
+            self.assertFalse((program / ".env").exists(), "Старое место должно опустеть")
+            self.assertFalse((program / "data").exists())
+
+            # Повторный запуск ничего не ломает
+            self.assertEqual(config.migrate_from_program_folder(), [])
+        finally:
+            (config.BASE_DIR, config.APP_HOME, config.ENV_PATH,
+             config.DATA_DIR, config.LOGS_DIR) = saved
+
+    def test_migration_never_overwrites_newer_data(self) -> None:
+        """Если в новом месте уже что-то есть — старое туда не лезет."""
+        from app import config
+
+        program = _TMP / "программа-2"
+        (program / "data").mkdir(parents=True)
+        (program / "data" / "app.db").write_bytes("старое".encode())
+        (program / ".env").write_text("старый ключ", encoding="utf-8")
+        new_home = _TMP / "дом-2"
+        (new_home / "data").mkdir(parents=True)
+        (new_home / "data" / "app.db").write_bytes("новое".encode())
+        (new_home / ".env").write_text("новый ключ", encoding="utf-8")
+
+        saved = (config.BASE_DIR, config.APP_HOME, config.ENV_PATH, config.DATA_DIR)
+        config.BASE_DIR = program
+        config.APP_HOME = new_home
+        config.ENV_PATH = new_home / ".env"
+        config.DATA_DIR = new_home / "data"
+        try:
+            self.assertEqual(config.migrate_from_program_folder(), [])
+            self.assertEqual((new_home / ".env").read_text(encoding="utf-8"), "новый ключ")
+            self.assertEqual((new_home / "data" / "app.db").read_bytes(), "новое".encode())
+        finally:
+            (config.BASE_DIR, config.APP_HOME, config.ENV_PATH, config.DATA_DIR) = saved
+
+
+class TestRussianPathsAreSafe(unittest.TestCase):
+    """Путь к данным содержит русские буквы — файлы должны открываться."""
+
+    def test_pdf_opens_from_a_russian_path(self) -> None:
+        from app.mupdf import open_file
+        folder = _TMP / "Документы" / "Моя квартира" / "планы"
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / "план застройщика.pdf"
+        target.write_bytes(
+            (BASE_DIR / "tests" / "fixtures" / "plan-zastroyshchik.pdf").read_bytes()
+        )
+        with open_file(target) as document:
+            self.assertEqual(document.page_count, 1)
+
+    def test_vector_reading_works_from_a_russian_path(self) -> None:
+        from app.plan_vector import read_plan
+        folder = _TMP / "Мои документы" / "квартира"
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / "чертёж.pdf"
+        target.write_bytes(
+            (BASE_DIR / "tests" / "fixtures" / "plan-zastroyshchik.pdf").read_bytes()
+        )
+        plan = read_plan(target)
+        self.assertTrue(plan.scale_is_reliable)
+        self.assertEqual(plan.total_area_m2, 74.37)
+
+    def test_image_preview_works_from_a_russian_path(self) -> None:
+        from app.plan_files import _make_image_preview
+        folder = _TMP / "Рабочий стол" / "планы квартиры"
+        folder.mkdir(parents=True, exist_ok=True)
+        source = folder / "план дизайнера.jpg"
+        source.write_bytes(
+            (BASE_DIR / "tests" / "fixtures" / "plan-dizayner.jpg").read_bytes()
+        )
+        size = _make_image_preview(source, folder / "превью.jpg", "план дизайнера.jpg")
+        self.assertEqual(size, (1701, 1184))
+
+
+class TestBrokenDatabase(unittest.TestCase):
+    """Повреждённый файл базы объясняется словами, а не трассировкой."""
+
+    def test_human_message_instead_of_crash(self) -> None:
+        from app import config, db
+
+        broken_home = _TMP / "сломанный-дом"
+        (broken_home / "data").mkdir(parents=True, exist_ok=True)
+        broken = broken_home / "data" / "app.db"
+        broken.write_text("это не база данных", encoding="utf-8")
+
+        saved_config = config.DATA_DIR, config.PROJECTS_DIR, config.LOGS_DIR
+        saved_db = db.DB_PATH
+        config.DATA_DIR = broken_home / "data"
+        config.PROJECTS_DIR = broken_home / "data" / "projects"
+        config.LOGS_DIR = broken_home / "logs"
+        db.DB_PATH = broken
+        try:
+            with self.assertRaises(UserError) as caught:
+                db.init_db()
+            message = caught.exception.message
+            self.assertIn("повреждён", message)
+            self.assertNotIn("sqlite", message.lower())
+            self.assertIn("app.db", caught.exception.hint)
+        finally:
+            config.DATA_DIR, config.PROJECTS_DIR, config.LOGS_DIR = saved_config
+            db.DB_PATH = saved_db

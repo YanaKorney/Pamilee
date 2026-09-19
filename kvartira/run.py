@@ -28,7 +28,6 @@ VENV_DIR = BASE_DIR / ".venv"
 REQUIREMENTS = BASE_DIR / "requirements.txt"
 OPTIONAL_REQUIREMENTS = BASE_DIR / "requirements-optional.txt"
 STAMP_FILE = VENV_DIR / ".requirements-stamp"
-ENV_FILE = BASE_DIR / ".env"
 ENV_EXAMPLE = BASE_DIR / ".env.example"
 
 MIN_PYTHON = (3, 10)
@@ -195,13 +194,26 @@ def restart_inside_venv() -> None:
 
 # ── Настройки ─────────────────────────────────────────────────────────────
 
-def ensure_env_file() -> None:
-    if ENV_FILE.exists() or not ENV_EXAMPLE.exists():
-        return
-    ENV_FILE.write_text(ENV_EXAMPLE.read_text(encoding="utf-8"), encoding="utf-8")
-    title("Создан файл настроек .env")
-    say("Пока он пустой — программа будет работать, но без AI-функций.")
-    say("Как вписать ключи доступа, написано в README.md, раздел «Ключи».")
+def prepare_home() -> None:
+    """Готовит папку с вашими данными и переносит старое, если нужно."""
+    sys.path.insert(0, str(BASE_DIR))
+    from app import config
+
+    if config.MIGRATED:
+        title("Ваши файлы переехали в «Документы»")
+        say("Перенесено: " + ", ".join(config.MIGRATED) + ".")
+        say("Теперь обновление программы не затрагивает ваши проекты:")
+        say("скачали новую версию, запустили — всё на месте.")
+
+    config.APP_HOME.mkdir(parents=True, exist_ok=True)
+    if not config.ENV_PATH.exists() and ENV_EXAMPLE.exists():
+        config.ENV_PATH.write_text(
+            ENV_EXAMPLE.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        title("Создан файл настроек")
+        say(f"Он лежит здесь: {config.ENV_PATH}")
+        say("Пока он пустой — программа работает, но без AI-функций.")
+        say("Как вписать ключи доступа, написано в README.md, раздел «Ключи».")
 
 
 # ── Порт ──────────────────────────────────────────────────────────────────
@@ -240,10 +252,19 @@ def serve(port: int) -> None:
     import uvicorn  # импорт здесь: до установки библиотек его ещё нет
 
     from app import __version__
-    from app.config import settings
+    from app.config import APP_HOME, settings
     from app.db import init_db
+    from app.errors import UserError
 
-    init_db()
+    try:
+        init_db()
+    except UserError as problem:
+        fail(problem.message, f"""
+            Папка с вашими данными:
+            {APP_HOME}
+
+            {problem.hint}
+            """)
 
     url = f"http://127.0.0.1:{port}"
     say()
@@ -259,6 +280,9 @@ def serve(port: int) -> None:
     image_state = "настроено" if settings.image_ready else "не настроено"
     say(f"  Чтение чертежа: {plan_state}   ·   Визуализации: {image_state}")
     say(f"  Версия: {__version__}")
+    say()
+    say(f"  Ваши проекты и настройки лежат здесь:")
+    say(f"  {APP_HOME}")
     say()
 
     open_browser_later(url)
@@ -292,8 +316,7 @@ def main() -> None:
         return
 
     os.chdir(BASE_DIR)
-    sys.path.insert(0, str(BASE_DIR))
-    ensure_env_file()
+    prepare_home()
 
     port = DEFAULT_PORT
     if "--port" in sys.argv:

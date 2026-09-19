@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-import warnings
+import io
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -84,17 +84,7 @@ def ingest(project_id: int, original_name: str, data: bytes, kind: str = "plan")
         ) from exc
 
 
-def _open_pdf_library():
-    """Библиотека чтения PDF ругается устаревшими предупреждениями своих
-    внутренних модулей. Пользователю это видеть незачем — глушим."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        import pymupdf
-    return pymupdf
-
-
 def _ingest_pdf(project_id: int, original_name: str, path: Path, kind: str) -> Ingested:
-    pymupdf = _open_pdf_library()
 
     previews_dir = storage.project_dir(project_id) / "previews"
     previews_dir.mkdir(parents=True, exist_ok=True)
@@ -102,7 +92,9 @@ def _ingest_pdf(project_id: int, original_name: str, path: Path, kind: str) -> I
     file_ids: list[int] = []
     document_is_vector = False
 
-    with pymupdf.open(path) as document:
+    from .mupdf import open_file
+
+    with open_file(path) as document:
         if document.page_count == 0:
             raise UserError(
                 f"В файле «{original_name}» нет ни одной страницы.",
@@ -156,9 +148,10 @@ def _make_image_preview(path: Path, target: Path, original_name: str) -> tuple[i
     suffix = path.suffix.lower()
 
     if suffix in (".jpg", ".jpeg", ".png"):
-        pymupdf = _open_pdf_library()
+        from .mupdf import library, open_file
+        pymupdf = library()
         try:
-            with pymupdf.open(path) as document:
+            with open_file(path) as document:
                 page = document[0]
                 width = int(page.rect.width)
                 height = int(page.rect.height)
@@ -178,7 +171,7 @@ def _make_image_preview(path: Path, target: Path, original_name: str) -> tuple[i
         ) from exc
 
     try:
-        with Image.open(path) as image:
+        with Image.open(io.BytesIO(path.read_bytes())) as image:
             image.load()
             width, height = image.size
             preview = image.convert("RGB")

@@ -7,18 +7,76 @@
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 
 # ── Пути ──────────────────────────────────────────────────────────────────
+# Программа живёт в одной папке, а ваши данные — в другой, в «Документах».
+# Так обновление программы не задевает проекты: скачали новую версию,
+# распаковали, запустили — ключ и проекты на месте.
+
 # BASE_DIR — папка kvartira/, в которой лежит run.py
 BASE_DIR = Path(__file__).resolve().parent.parent
 WEB_DIR = BASE_DIR / "web"
-DATA_DIR = BASE_DIR / "data"
-PROJECTS_DIR = DATA_DIR / "projects"
-LOGS_DIR = BASE_DIR / "logs"
-DB_PATH = DATA_DIR / "app.db"
-ENV_PATH = BASE_DIR / ".env"
 ENV_EXAMPLE_PATH = BASE_DIR / ".env.example"
+
+HOME_FOLDER_NAME = "Моя квартира"
+
+
+def _documents_dir() -> Path:
+    """Папка «Документы» пользователя, а если её нет — домашняя папка."""
+    home = Path.home()
+    for name in ("Documents", "Документы", "Мои документы"):
+        candidate = home / name
+        if candidate.is_dir():
+            return candidate
+    return home
+
+
+def resolve_app_home() -> Path:
+    """Где лежат данные. Можно задать переменной окружения APP_HOME."""
+    override = os.environ.get("APP_HOME", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return _documents_dir() / HOME_FOLDER_NAME
+
+
+APP_HOME = resolve_app_home()
+DATA_DIR = APP_HOME / "data"
+PROJECTS_DIR = DATA_DIR / "projects"
+LOGS_DIR = APP_HOME / "logs"
+DB_PATH = DATA_DIR / "app.db"
+ENV_PATH = APP_HOME / ".env"
+
+
+def migrate_from_program_folder() -> list[str]:
+    """Переносит настройки и данные из старого места — из папки программы.
+
+    Раньше всё лежало рядом с run.py и пропадало при обновлении.
+    Переносим бережно: сначала копия, и только после удачной копии
+    старое удаляется. Уже перенесённое не трогаем.
+    """
+    moved: list[str] = []
+
+    old_env = BASE_DIR / ".env"
+    if old_env.is_file() and not ENV_PATH.exists():
+        APP_HOME.mkdir(parents=True, exist_ok=True)
+        ENV_PATH.write_bytes(old_env.read_bytes())
+        old_env.unlink()
+        moved.append("настройки с ключом доступа")
+
+    old_data = BASE_DIR / "data"
+    if old_data.is_dir() and not DATA_DIR.exists():
+        APP_HOME.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(old_data, DATA_DIR)
+        shutil.rmtree(old_data, ignore_errors=True)
+        moved.append("проекты и загруженные планы")
+
+    old_logs = BASE_DIR / "logs"
+    if old_logs.is_dir() and not LOGS_DIR.exists():
+        shutil.rmtree(old_logs, ignore_errors=True)
+
+    return moved
 
 
 def load_env(path: Path = ENV_PATH) -> None:
@@ -109,6 +167,9 @@ class Settings:
     def image_ready(self) -> bool:
         return bool(self.image_api_key)
 
+
+# Переезд со старого расположения делается до чтения настроек.
+MIGRATED = migrate_from_program_folder()
 
 settings = Settings()
 

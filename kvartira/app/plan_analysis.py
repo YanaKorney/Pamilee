@@ -121,11 +121,10 @@ def render_page(path: Path, page_number: int) -> tuple[bytes, float]:
 
     Возвращает (картинка PNG, пикселей на единицу чертежа).
     """
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        import pymupdf
+    from .mupdf import library, open_file
 
-    with pymupdf.open(path) as document:
+    pymupdf = library()
+    with open_file(path) as document:
         page = document[page_number - 1]
         longest = max(page.rect.width, page.rect.height) or 1
         factor = min(3.0, IMAGE_MAX_PX / longest)
@@ -489,10 +488,9 @@ def analyse_page(
     else:
         image, factor = path.read_bytes(), 1.0
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        import pymupdf
-    pixmap = pymupdf.Pixmap(image)
+    from .mupdf import library
+
+    pixmap = library().Pixmap(image)
     width_px, height_px = pixmap.width, pixmap.height
 
     known_mm_per_px = (

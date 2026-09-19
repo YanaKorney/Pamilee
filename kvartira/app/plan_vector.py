@@ -90,10 +90,8 @@ class VectorPlan:
 
 
 def _load(pdf_path: Path):
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        import pymupdf
-    return pymupdf, pymupdf.open(pdf_path)
+    from .mupdf import library, open_file
+    return library(), open_file(pdf_path)
 
 
 # ── Текст ─────────────────────────────────────────────────────────────────
