@@ -96,7 +96,7 @@ def _service_report(
 
     if not ready:
         report["message"] = "Ключ доступа не вписан."
-        report["hint"] = "Откройте файл .env рядом с программой и впишите ключ."
+        report["hint"] = "Вставьте ключ в поле «Новый ключ» ниже на этой странице."
         return report
 
     try:

@@ -277,7 +277,10 @@ class TestAiSettings(TestBase):
             with self.subTest(part=part):
                 self.assertFalse(report[part]["ok"])
                 self.assertIn("Ключ", report[part]["message"])
-                self.assertIn(".env", report[part]["hint"])
+                # Подсказка должна вести к полю на этой же странице,
+                # а не отправлять человека искать файлы на диске.
+                self.assertIn("Новый ключ", report[part]["hint"])
+                self.assertNotIn(".env", report[part]["hint"])
 
 
 class TestModelKind(unittest.TestCase):
@@ -1195,3 +1198,40 @@ class TestSceneEndpoint(TestBase):
 
     def test_viewer_page_opens(self) -> None:
         self.assertEqual(self.client.get("/project/1/viewer").status_code, 200)
+
+
+class TestMessagesDoNotSendPeopleHunting(TestBase):
+    """Сообщения не должны отправлять человека искать файлы на диске.
+
+    Ключ вставляется в «Настройках», и все подсказки обязаны вести туда.
+    Иначе человек ищет скрытый файл в папке, где его уже нет.
+    """
+
+    def test_missing_key_points_to_the_settings_page(self) -> None:
+        from app.errors import ai_not_configured
+        error = ai_not_configured("Чтение чертежа")
+        self.assertIn("Настройки", error.hint)
+        self.assertIn("Новый ключ", error.hint)
+        self.assertNotIn("README", error.hint)
+        self.assertNotIn("рядом с программой", error.hint)
+
+    def test_analyse_without_key_explains_where_to_go(self) -> None:
+        project_id = self.client.post(
+            "/api/projects", json={"name": "Без ключа"}
+        ).json()["id"]
+        data = (BASE_DIR / "tests" / "fixtures" / "plan-zastroyshchik.pdf").read_bytes()
+        upload = self.client.post(
+            f"/api/projects/{project_id}/files",
+            files={"files": ("plan.pdf", data, "application/pdf")},
+        ).json()
+        documents = self.client.get(f"/api/projects/{project_id}/documents").json()
+        page_id = documents[0]["pages"][0]["id"]
+
+        response = self.client.post(
+            f"/api/projects/{project_id}/files/{page_id}/analyse"
+        )
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertIn("ключа доступа", body["error"])
+        self.assertIn("Настройки", body["hint"])
+        self.client.delete(f"/api/projects/{project_id}")
