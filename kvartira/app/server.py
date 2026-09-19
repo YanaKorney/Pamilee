@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 import dataclasses
 
-from . import __version__, ai, db, plan_files, plan_vector, storage
+from . import __version__, ai, db, plan_analysis, plan_files, plan_vector, storage
 from .config import WEB_DIR, settings
 from .errors import UserError, get_logger, project_not_found
 
@@ -74,7 +74,8 @@ def status() -> dict[str, Any]:
     return {
         "version": __version__,
         "ceiling_height_mm": settings.ceiling_height_mm,
-        "daily_limit_usd": settings.daily_limit_usd,
+        "daily_limit_rub": settings.daily_limit_rub,
+        "spent_today_rub": ai.spent_today_rub(),
         "services": {
             "plan": {
                 "title": "Чтение чертежа",
@@ -280,6 +281,49 @@ def api_file_geometry(file_id: int) -> dict[str, Any]:
     data.pop("dimensions", None)
     data.pop("areas", None)
     return data
+
+
+@app.post("/api/projects/{project_id}/files/{file_id}/analyse")
+def api_analyse_page(project_id: int, file_id: int) -> dict[str, Any]:
+    """«Разобрать план»: AI находит комнаты, проёмы и мебель на листе."""
+    project = _require_project(project_id)
+    row = db.get_file(file_id)
+    if row is None or row["project_id"] != project_id:
+        raise UserError("Файл не найден.", "Обновите страницу.", status=404)
+
+    ai.check_daily_limit()
+
+    path = storage.project_dir(project_id) / "uploads" / row["stored_name"]
+    if not path.exists():
+        raise UserError(
+            "Файл на диске не найден.", "Загрузите его заново.", status=404
+        )
+
+    result = plan_analysis.analyse_page(
+        project_id=project_id,
+        path=path,
+        page_number=row["page_no"] or 1,
+        is_pdf=row["mime"] == "application/pdf",
+        expected_total_m2=project.get("declared_area_m2"),
+    )
+    plan_analysis.store(project_id, result)
+
+    cost = ai.text_cost_rub(result.input_tokens, result.output_tokens)
+    ai.record_spend("plan", cost, f"разбор листа {row['original_name']}")
+
+    data = dataclasses.asdict(result)
+    data["cost_rub"] = cost
+    data["spent_today_rub"] = ai.spent_today_rub()
+    return data
+
+
+@app.get("/api/projects/{project_id}/rooms")
+def api_list_rooms(project_id: int) -> dict[str, Any]:
+    _require_project(project_id)
+    return {
+        "rooms": db.list_rooms(project_id),
+        "items": db.list_items(project_id),
+    }
 
 
 # ── AI-сервис: каталог моделей, выбор, проверка доступа ───────────────────

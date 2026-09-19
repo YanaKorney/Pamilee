@@ -91,8 +91,15 @@ class Settings:
         self.image_base_url: str = _get("IMAGE_BASE_URL", "https://api.aitunnel.ru/v1")
         self.image_model: str = _get("IMAGE_MODEL", "flux.2-pro")
 
+        # ── Цены сервиса, чтобы считать расходы в рублях ──────────────────
+        # Берутся из каталога вашего сервиса. Значения по умолчанию —
+        # для Claude Opus 5 и FLUX.2 в AITunnel на сентябрь 2026 года.
+        self.price_in_rub_per_million: float = _get_float("PRICE_IN_RUB_PER_MILLION", 100)
+        self.price_out_rub_per_million: float = _get_float("PRICE_OUT_RUB_PER_MILLION", 5000)
+        self.price_image_rub: float = _get_float("PRICE_IMAGE_RUB", 10.71)
+
         # ── Защита от лишних трат ─────────────────────────────────────────
-        self.daily_limit_usd: float = _get_float("DAILY_LIMIT_USD", 3.0)
+        self.daily_limit_rub: float = _get_float("DAILY_LIMIT_RUB", 300.0)
 
     @property
     def plan_ready(self) -> bool:

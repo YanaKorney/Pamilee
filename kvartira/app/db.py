@@ -399,3 +399,90 @@ def all_settings() -> dict[str, str]:
     with connect() as conn:
         rows = conn.execute("SELECT key, value FROM app_settings").fetchall()
     return {r["key"]: r["value"] for r in rows}
+
+
+# ── Комнаты, проёмы и предметы ────────────────────────────────────────────
+
+def clear_recognised(project_id: int) -> None:
+    """Убирает прошлый разбор плана перед новым.
+
+    Правки пользователя пока не защищаем: разбор — черновик, который
+    он подтверждает на следующем шаге. Когда появится экран проверки,
+    здесь будет сохранение подтверждённого.
+    """
+    with connect() as conn:
+        conn.execute("DELETE FROM items WHERE project_id = ?", (project_id,))
+        conn.execute(
+            "DELETE FROM openings WHERE wall_id IN "
+            "(SELECT id FROM walls WHERE project_id = ?)",
+            (project_id,),
+        )
+        conn.execute("DELETE FROM walls WHERE project_id = ?", (project_id,))
+        conn.execute("DELETE FROM rooms WHERE project_id = ?", (project_id,))
+
+
+def add_room(
+    project_id: int,
+    name: str,
+    kind: str,
+    polygon: str,
+    declared_area_m2: float | None = None,
+    ceiling_height_mm: int | None = None,
+    sort_order: int = 0,
+) -> int:
+    with connect() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO rooms (project_id, name, kind, polygon, declared_area_m2,
+                               ceiling_height_mm, sort_order)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (project_id, name, kind, polygon, declared_area_m2,
+             ceiling_height_mm, sort_order),
+        )
+        return int(cur.lastrowid)
+
+
+def list_rooms(project_id: int) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM rooms WHERE project_id = ? ORDER BY sort_order, id",
+            (project_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def add_item(
+    project_id: int,
+    category: str,
+    subtype: str,
+    label: str,
+    x: int,
+    y: int,
+    width_mm: int,
+    depth_mm: int,
+    height_mm: int,
+    rotation_deg: float = 0.0,
+    room_id: int | None = None,
+    confidence: float = 1.0,
+) -> int:
+    with connect() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO items (project_id, room_id, category, subtype, label,
+                               x, y, rotation_deg, width_mm, depth_mm, height_mm,
+                               confidence)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (project_id, room_id, category, subtype, label, x, y, rotation_deg,
+             width_mm, depth_mm, height_mm, confidence),
+        )
+        return int(cur.lastrowid)
+
+
+def list_items(project_id: int) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM items WHERE project_id = ? ORDER BY id", (project_id,)
+        ).fetchall()
+    return [dict(r) for r in rows]

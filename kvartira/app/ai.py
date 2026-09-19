@@ -171,3 +171,47 @@ def check_access() -> dict[str, Any]:
         image_provider, "image", probe=False,
     )
     return {"plan": plan, "image": image, "same_service": same_service}
+
+
+# ── Расходы ───────────────────────────────────────────────────────────────
+
+def text_cost_rub(input_tokens: int, output_tokens: int) -> float:
+    """Во сколько обошёлся запрос к текстовой модели, в рублях."""
+    return round(
+        input_tokens / 1_000_000 * settings.price_in_rub_per_million
+        + output_tokens / 1_000_000 * settings.price_out_rub_per_million,
+        2,
+    )
+
+
+def record_spend(kind: str, amount_rub: float, note: str = "") -> None:
+    from datetime import date
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO spend (day, kind, amount_usd, note, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (date.today().isoformat(), kind, amount_rub, note, db.now()),
+        )
+
+
+def spent_today_rub() -> float:
+    from datetime import date
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount_usd), 0) AS total FROM spend WHERE day = ?",
+            (date.today().isoformat(),),
+        ).fetchone()
+    return round(float(row["total"]), 2)
+
+
+def check_daily_limit(expected_rub: float = 0.0) -> None:
+    """Не даёт превысить дневной лимит трат."""
+    spent = spent_today_rub()
+    limit = settings.daily_limit_rub
+    if spent + expected_rub > limit:
+        raise UserError(
+            f"Достигнут дневной лимит трат: {limit:.0f} ₽.",
+            f"Сегодня уже потрачено {spent:.2f} ₽. Лимит меняется в файле .env, "
+            "строка DAILY_LIMIT_RUB. Он существует, чтобы случайное нажатие "
+            "не опустошило счёт.",
+        )

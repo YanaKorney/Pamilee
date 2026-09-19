@@ -62,6 +62,88 @@ function pageCard(page, documentName) {
     ]);
 }
 
+// ── Разбор листа ─────────────────────────────────────────────────────
+
+function roomRow(room) {
+    const parts = [el('strong', { text: room.name })];
+    parts.push(el('span', { class: 'muted', text: ` — ${formatArea(room.area_m2)}` }));
+    if (room.declared_area_m2) {
+        const off = Math.abs(room.deviation_percent || 0);
+        parts.push(el('span', {
+            class: off <= 5 ? 'badge badge-ok' : 'badge badge-warn',
+            style: 'margin-left:8px',
+            text: off <= 5
+                ? 'совпало'
+                : `на чертеже ${formatArea(room.declared_area_m2)}`,
+        }));
+    }
+    return el('div', { class: 'small', style: 'margin-bottom:4px' }, parts);
+}
+
+function analysisResult(data) {
+    const blocks = [el('strong', { text: 'Что распознано на листе' })];
+
+    if (data.warnings && data.warnings.length) {
+        data.warnings.forEach((w) => blocks.push(
+            el('div', { class: 'small', style: 'color:var(--warn)', text: '⚠ ' + w })
+        ));
+    }
+
+    blocks.push(el('div', { class: 'small', style: 'margin:8px 0 6px' }, [
+        document.createTextNode(
+            `Помещений: ${data.rooms.length} · предметов: ${data.items.length} · `
+            + `масштаб ${data.scale_source}`),
+    ]));
+
+    data.rooms.forEach((r) => blocks.push(roomRow(r)));
+
+    const sum = el('div', { class: 'small', style: 'margin-top:8px' }, [
+        document.createTextNode('Сумма площадей: '),
+        el('strong', { text: formatArea(data.total_area_m2) }),
+    ]);
+    if (data.declared_total_m2) {
+        sum.appendChild(document.createTextNode(
+            ` · по документам ${formatArea(data.declared_total_m2)}`));
+    }
+    blocks.push(sum);
+
+    if (data.notes) {
+        blocks.push(el('div', { class: 'muted small', style: 'margin-top:8px',
+            text: 'Замечания модели: ' + data.notes }));
+    }
+
+    blocks.push(el('div', { class: 'muted small', style: 'margin-top:10px',
+        text: `Потрачено на разбор: ${String(data.cost_rub).replace('.', ',')} ₽ · `
+            + `сегодня всего ${String(data.spent_today_rub).replace('.', ',')} ₽` }));
+
+    return el('div', { class: 'notice', style: 'margin-top:14px' }, blocks);
+}
+
+function analyseButton(pageId, host) {
+    const button = el('button', { class: 'btn btn-primary', text: 'Разобрать план' });
+    button.addEventListener('click', async () => {
+        if (!confirm(
+            'Программа отправит этот лист в AI-сервис и найдёт на нём комнаты, '
+            + 'двери, окна и мебель.\n\nОбычно это стоит 40–60 рублей. Продолжить?'
+        )) return;
+        button.disabled = true;
+        const original = button.textContent;
+        button.textContent = 'Разбираю… это займёт до минуты';
+        try {
+            const data = await api.post(
+                `/api/projects/${projectId}/files/${pageId}/analyse`, {});
+            host.replaceChildren(analysisResult(data));
+            toast('План разобран', `Найдено помещений: ${data.rooms.length}`, 'ok');
+        } catch (err) {
+            showError(err);
+        } finally {
+            button.disabled = false;
+            button.textContent = original;
+        }
+    });
+    return button;
+}
+
 function metre(mm) {
     return (mm / 1000).toFixed(2).replace('.', ',') + ' м';
 }
@@ -190,6 +272,22 @@ function documentCard(doc) {
         ]),
         el('div', { class: 'pages' }, doc.pages.map((p) => pageCard(p, doc.original_name))),
         doc.is_vector ? geometryCard(doc.pages.find((p) => p.is_vector).id) : null,
+        analyseBlock(doc),
+    ]);
+}
+
+function analyseBlock(doc) {
+    const host = el('div');
+    const page = doc.pages[0];
+    return el('div', { style: 'margin-top:14px' }, [
+        el('div', { class: 'row' }, [
+            analyseButton(page.id, host),
+            el('span', {
+                class: 'muted small',
+                text: 'Найдёт комнаты, двери, окна и мебель. Результат можно будет поправить.',
+            }),
+        ]),
+        host,
     ]);
 }
 
@@ -209,12 +307,13 @@ function emptyState() {
 function nextStepNote(documents) {
     const hasVector = documents.some((d) => d.is_vector);
     const lines = hasVector
-        ? 'Среди загруженного есть векторный чертёж — значит, размеры программа сможет '
-        + 'прочитать точно. Следующий шаг — «Разобрать план»: программа найдёт комнаты, '
-        + 'стены, окна и мебель. Этот шаг появится в ближайшем обновлении.'
+        ? 'Среди загруженного есть векторный чертёж — значит, размеры программа '
+        + 'прочитала точно. Теперь нажмите «Разобрать план» на нужном листе: '
+        + 'программа найдёт комнаты, двери, окна и мебель, а площади сверит '
+        + 'с теми, что уже прочитаны.'
         : 'Загружены только изображения. Программа сможет распознать по ним планировку, '
-        + 'но размеры нужно будет подтвердить вручную. Если у дизайнера есть PDF — '
-        + 'загрузите лучше его.';
+        + 'но масштаб будет определён по размерным подписям на картинке — это менее '
+        + 'надёжно. Если у дизайнера есть PDF, загрузите лучше его.';
     return el('div', { class: hasVector ? 'notice' : 'notice notice-warn' }, [
         el('strong', { text: 'Что дальше' }),
         el('div', { class: 'small', text: lines }),

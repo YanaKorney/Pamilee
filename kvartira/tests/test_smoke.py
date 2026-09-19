@@ -32,6 +32,8 @@ from app import db, storage  # noqa: E402
 db.DB_PATH = config.DB_PATH
 storage.PROJECTS_DIR = config.PROJECTS_DIR
 
+from app.errors import UserError  # noqa: E402
+
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.server import app  # noqa: E402
@@ -552,3 +554,137 @@ class TestRasterPlanIsHonest(unittest.TestCase):
         self.assertFalse(plan.is_vector)
         self.assertIsNone(plan.scale_mm_per_unit)
         self.assertFalse(plan.scale_is_reliable)
+
+
+class FakeProvider:
+    """Подставной сервис: отвечает заготовкой, в интернет не ходит."""
+
+    def __init__(self, answer_text: str) -> None:
+        self.answer_text = answer_text
+        self.asked_prompt = ""
+        self.asked_images = 0
+
+    def ask(self, model, prompt, images=None, pdf=None, max_tokens=8000):
+        from app.providers.base import TextAnswer
+        self.asked_prompt = prompt
+        self.asked_images = len(images or [])
+        return TextAnswer(self.answer_text, input_tokens=21000, output_tokens=4000,
+                          model=model)
+
+
+class TestPlanAnalysis(TestBase):
+    """Разбор листа: перевод ответа модели в миллиметры и проверка."""
+
+    PDF = BASE_DIR / "tests" / "fixtures" / "plan-zastroyshchik.pdf"
+
+    def _answer(self, rooms, items=(), page_kind="dimensioned_plan", refs=()):
+        import json as js
+        return js.dumps({
+            "page_kind": page_kind,
+            "scale_references": list(refs),
+            "rooms": rooms,
+            "items": list(items),
+            "notes": "",
+        })
+
+    def test_prompt_carries_known_numbers(self) -> None:
+        """Модели не дают угадывать то, что уже известно точно."""
+        from app.plan_analysis import analyse_page
+        fake = FakeProvider(self._answer([]))
+        analyse_page(1, self.PDF, 1, True, 74.37, provider=fake)
+        self.assertIn("74.37", fake.asked_prompt)
+        self.assertIn("Масштаб чертежа уже известен", fake.asked_prompt)
+        self.assertEqual(fake.asked_images, 1)
+
+    def test_pixels_become_millimetres(self) -> None:
+        from app.plan_analysis import analyse_page
+        # Прямоугольник 100×100 px при известном масштабе даёт понятную площадь.
+        rooms = [{"name": "Комната", "kind": "bedroom",
+                  "polygon": [[100, 100], [200, 100], [200, 200], [100, 200]]}]
+        fake = FakeProvider(self._answer(rooms))
+        result = analyse_page(1, self.PDF, 1, True, 74.37, provider=fake)
+        self.assertEqual(len(result.rooms), 1)
+        self.assertEqual(result.scale_source, "из чертежа")
+        room = result.rooms[0]
+        side_mm = room.polygon_mm[1][0] - room.polygon_mm[0][0]
+        self.assertAlmostEqual(side_mm, 100 * result.mm_per_px, delta=1)
+        self.assertAlmostEqual(room.area_m2, (side_mm / 1000) ** 2, delta=0.02)
+
+    def test_markdown_wrapper_is_survived(self) -> None:
+        from app.plan_analysis import parse_answer
+        data = parse_answer('Вот ответ:\n```json\n{"rooms": []}\n```\nГотово.')
+        self.assertEqual(data, {"rooms": []})
+
+    def test_nonsense_answer_gives_human_message(self) -> None:
+        from app.plan_analysis import analyse_page
+        fake = FakeProvider("Извините, я не могу прочитать этот чертёж.")
+        with self.assertRaises(UserError) as caught:
+            analyse_page(1, self.PDF, 1, True, 74.37, provider=fake)
+        self.assertIn("планировку", caught.exception.message)
+        self.assertTrue(caught.exception.hint)
+
+    def test_scale_from_dimension_lines_when_unknown(self) -> None:
+        """Для картинки масштаб берётся из размерных линий, найденных моделью."""
+        from app.plan_analysis import scale_from_references
+        mm_per_px = scale_from_references([
+            {"mm": 4200, "x1": 0, "y1": 0, "x2": 420, "y2": 0},
+            {"mm": 1900, "x1": 0, "y1": 0, "x2": 190, "y2": 0},
+        ])
+        self.assertAlmostEqual(mm_per_px, 10.0, places=3)
+
+    def test_area_mismatch_is_reported(self) -> None:
+        from app.plan_analysis import analyse_page
+        rooms = [{"name": "Крошечная", "kind": "bedroom", "area_m2": 19.09,
+                  "polygon": [[0, 0], [30, 0], [30, 30], [0, 30]]}]
+        fake = FakeProvider(self._answer(rooms))
+        result = analyse_page(1, self.PDF, 1, True, 74.37, provider=fake)
+        self.assertTrue(result.warnings)
+        self.assertTrue(any("Крошечная" in w for w in result.warnings))
+
+    def test_wild_item_size_falls_back_to_sensible(self) -> None:
+        from app.plan_analysis import analyse_page
+        items = [{"category": "furniture", "subtype": "bed", "label": "Кровать",
+                  "x": 100, "y": 100, "width_px": 99999, "depth_px": 1,
+                  "confidence": 0.9}]
+        fake = FakeProvider(self._answer([], items))
+        result = analyse_page(1, self.PDF, 1, True, 74.37, provider=fake)
+        self.assertEqual(len(result.items), 1)
+        self.assertEqual((result.items[0].width_mm, result.items[0].depth_mm), (1600, 2000))
+
+    def test_result_is_saved_and_readable(self) -> None:
+        from app.plan_analysis import analyse_page, store
+        project_id = self.client.post(
+            "/api/projects", json={"name": "С разбором", "declared_area_m2": 74.37}
+        ).json()["id"]
+        rooms = [{"name": "Гостиная", "kind": "living",
+                  "polygon": [[0, 0], [300, 0], [300, 200], [0, 200]]}]
+        items = [{"category": "furniture", "subtype": "sofa", "label": "Диван",
+                  "x": 150, "y": 100, "width_px": 60, "depth_px": 25, "confidence": 0.8}]
+        fake = FakeProvider(self._answer(rooms, items))
+        result = analyse_page(project_id, self.PDF, 1, True, 74.37, provider=fake)
+        store(project_id, result)
+
+        saved = self.client.get(f"/api/projects/{project_id}/rooms").json()
+        self.assertEqual(len(saved["rooms"]), 1)
+        self.assertEqual(saved["rooms"][0]["name"], "Гостиная")
+        self.assertEqual(len(saved["items"]), 1)
+        self.assertEqual(saved["items"][0]["label"], "Диван")
+        self.client.delete(f"/api/projects/{project_id}")
+
+
+class TestSpending(TestBase):
+    """Счётчик расходов и дневной лимит."""
+
+    def test_cost_is_counted_in_roubles(self) -> None:
+        from app import ai
+        # 21000 входных и 4000 выходных при цене 100 / 5000 ₽ за миллион
+        self.assertAlmostEqual(ai.text_cost_rub(21000, 4000), 2.1 + 20.0, places=2)
+
+    def test_limit_stops_before_spending(self) -> None:
+        from app import ai
+        from app.config import settings
+        ai.record_spend("plan", settings.daily_limit_rub + 1, "проверка лимита")
+        with self.assertRaises(UserError) as caught:
+            ai.check_daily_limit()
+        self.assertIn("лимит", caught.exception.message.lower())
+        self.assertIn("DAILY_LIMIT_RUB", caught.exception.hint)

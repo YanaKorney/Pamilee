@@ -227,17 +227,20 @@ async function load() {
                 el('div', { class: 'stat-row' }, [
                     el('div', { class: 'stat' }, [
                         el('div', { class: 'k', text: 'Дневной лимит' }),
-                        el('div', { class: 'v', text: '$' + status.daily_limit_usd }),
+                        el('div', { class: 'v', text: status.daily_limit_rub + ' ₽' }),
                     ]),
                     el('div', { class: 'stat' }, [
                         el('div', { class: 'k', text: 'Потрачено сегодня' }),
-                        el('div', { class: 'v', text: '$0,00' }),
+                        el('div', {
+                            class: 'v',
+                            text: String(status.spent_today_rub.toFixed(2)).replace('.', ',') + ' ₽',
+                        }),
                     ]),
                 ]),
                 el('div', {
                     class: 'muted small', style: 'margin-top:12px',
                     text: 'Дойдёт до лимита — программа остановится и спросит вас. '
-                        + 'Лимит меняется в файле .env, строка DAILY_LIMIT_USD.',
+                        + 'Лимит меняется в файле .env, строка DAILY_LIMIT_RUB.',
                 }),
             ]),
 
