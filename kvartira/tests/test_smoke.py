@@ -396,3 +396,39 @@ class TestWithoutPillow(TestBase):
         self.assertEqual(response.status_code, 400)
         hint = response.json()["hint"]
         self.assertIn("JPG", hint, "Человеку надо подсказать, что делать")
+
+
+class TestRequirements(unittest.TestCase):
+    """Список библиотек должен пережить смену версии Python.
+
+    На Python 3.14 жёстко закреплённая версия pillow не нашла готовой
+    сборки и попыталась собраться из исходников — запуск оборвался.
+    Чтобы это не повторилось, версии указываем как «не ниже».
+    """
+
+    def _lines(self, name: str) -> list[str]:
+        path = BASE_DIR / name
+        return [
+            line.strip()
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+
+    def test_versions_are_not_frozen(self) -> None:
+        for line in self._lines("requirements.txt"):
+            with self.subTest(line=line):
+                self.assertNotIn("==", line, "Жёсткая версия ломает запуск на новом Python")
+                self.assertIn(">=", line, "Нужна нижняя граница версии")
+
+    def test_only_one_compiled_dependency(self) -> None:
+        """Чем меньше библиотек с компиляцией, тем надёжнее установка."""
+        compiled = {"pymupdf", "pillow", "numpy", "lxml", "opencv-python"}
+        required = {line.split(">=")[0].lower() for line in self._lines("requirements.txt")}
+        self.assertEqual(
+            required & compiled, {"pymupdf"},
+            "В обязательных должна остаться только pymupdf",
+        )
+
+    def test_pillow_is_optional(self) -> None:
+        optional = {line.split(">=")[0].lower() for line in self._lines("requirements-optional.txt")}
+        self.assertIn("pillow", optional)
