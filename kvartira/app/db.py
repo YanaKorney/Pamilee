@@ -494,3 +494,55 @@ def list_items(project_id: int) -> list[dict[str, Any]]:
             "SELECT * FROM items WHERE project_id = ? ORDER BY id", (project_id,)
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def add_wall(
+    project_id: int,
+    x1: int, y1: int, x2: int, y2: int,
+    thickness_mm: int = 120,
+    kind: str = "inner",
+    height_mm: int | None = None,
+) -> int:
+    with connect() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO walls (project_id, x1, y1, x2, y2, thickness_mm, height_mm, kind)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (project_id, x1, y1, x2, y2, thickness_mm, height_mm, kind),
+        )
+        return int(cur.lastrowid)
+
+
+def add_opening(
+    wall_id: int,
+    kind: str,
+    offset_mm: int,
+    width_mm: int,
+    height_mm: int,
+    sill_mm: int = 0,
+    swing: str = "",
+) -> int:
+    with connect() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO openings (wall_id, kind, offset_mm, width_mm, height_mm,
+                                  sill_mm, swing)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (wall_id, kind, offset_mm, width_mm, height_mm, sill_mm, swing),
+        )
+        return int(cur.lastrowid)
+
+
+def list_walls(project_id: int) -> list[dict[str, Any]]:
+    with connect() as conn:
+        walls = [dict(r) for r in conn.execute(
+            "SELECT * FROM walls WHERE project_id = ? ORDER BY id", (project_id,)
+        ).fetchall()]
+        for wall in walls:
+            wall["openings"] = [dict(r) for r in conn.execute(
+                "SELECT * FROM openings WHERE wall_id = ? ORDER BY offset_mm",
+                (wall["id"],),
+            ).fetchall()]
+    return walls

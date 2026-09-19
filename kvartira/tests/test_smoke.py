@@ -1045,3 +1045,153 @@ class TestKeyIsCleanedUp(TestBase):
         with self.assertRaises(UserError) as caught:
             provider.list_models()
         self.assertIn("посторонние символы", caught.exception.message)
+
+
+class TestWallsFromRooms(unittest.TestCase):
+    """Стены выводятся из границ комнат, а не приходят от AI.
+
+    Поэтому разойтись с комнатами они не могут. Главная тонкость —
+    соседи часто граничат не всей стеной, а её частью.
+    """
+
+    @staticmethod
+    def _room(room_id, polygon, name="Комната"):
+        import json as js
+        return {"id": room_id, "name": name, "polygon": js.dumps(polygon)}
+
+    def test_two_rooms_share_one_wall(self) -> None:
+        from app.geometry import walls_from_rooms
+        walls = walls_from_rooms([
+            self._room(1, [[0, 0], [3000, 0], [3000, 4000], [0, 4000]]),
+            self._room(2, [[3000, 0], [6000, 0], [6000, 4000], [3000, 4000]]),
+        ])
+        inner = [w for w in walls if w.kind == "inner"]
+        self.assertEqual(len(inner), 1, "Общая граница — одна стена, а не две")
+        self.assertEqual(sorted(inner[0].rooms), [1, 2])
+        self.assertEqual(inner[0].thickness_mm, 120)
+
+    def test_partial_overlap_is_split(self) -> None:
+        """Длинная стена одной комнаты и две коротких с той стороны.
+
+        Раньше такие грани не склеивались, и на границе вырастали две
+        стены вместо одной: дверь упиралась в лишнюю.
+        """
+        from app.geometry import walls_from_rooms
+        walls = walls_from_rooms([
+            self._room(1, [[0, 0], [6000, 0], [6000, 3000], [0, 3000]]),
+            self._room(2, [[0, 3000], [3000, 3000], [3000, 6000], [0, 6000]]),
+            self._room(3, [[3000, 3000], [6000, 3000], [6000, 6000], [3000, 6000]]),
+        ])
+        border = [w for w in walls if w.y1 == 3000 and w.y2 == 3000]
+        self.assertEqual(len(border), 2, "Длинная грань режется по границе соседей")
+        self.assertTrue(
+            all(w.kind == "inner" for w in border),
+            "Оба куска граничат с комнатой сверху — значит это перегородки",
+        )
+        self.assertEqual(sum(w.length_mm for w in border), 6000)
+        self.assertEqual(sorted(border[0].rooms), sorted(border[0].rooms))
+        self.assertEqual({tuple(sorted(w.rooms)) for w in border}, {(1, 2), (1, 3)})
+
+    def test_outer_walls_are_thicker(self) -> None:
+        from app.geometry import walls_from_rooms
+        walls = walls_from_rooms([
+            self._room(1, [[0, 0], [4000, 0], [4000, 3000], [0, 3000]]),
+        ])
+        self.assertEqual(len(walls), 4)
+        self.assertTrue(all(w.kind == "outer" for w in walls))
+        self.assertTrue(all(w.thickness_mm == 250 for w in walls))
+
+    def test_perimeter_is_preserved(self) -> None:
+        """Сумма наружных стен обязана дать периметр квартиры."""
+        from app.geometry import walls_from_rooms
+        walls = walls_from_rooms([
+            self._room(1, [[0, 0], [5000, 0], [5000, 4000], [0, 4000]]),
+            self._room(2, [[5000, 0], [9000, 0], [9000, 4000], [5000, 4000]]),
+            self._room(3, [[0, 4000], [9000, 4000], [9000, 7500], [0, 7500]]),
+        ])
+        outer = sum(w.length_mm for w in walls if w.kind == "outer")
+        self.assertAlmostEqual(outer, 2 * (9000 + 7500), delta=1)
+
+
+class TestOpenings(unittest.TestCase):
+    """Двери и окна привязываются к ближайшей стене."""
+
+    @staticmethod
+    def _walls():
+        from app.geometry import Wall
+        return [
+            Wall(0, 0, 4000, 0, 250, "outer"),
+            Wall(4000, 0, 4000, 3000, 120, "inner"),
+        ]
+
+    def test_door_lands_on_the_right_wall(self) -> None:
+        from app.geometry import attach_openings
+        walls = self._walls()
+        attached = attach_openings(walls, [{"kind": "door", "x": 4000, "y": 1500, "width_mm": 900}])
+        self.assertEqual(attached, 1)
+        self.assertEqual(len(walls[0].openings), 0)
+        self.assertEqual(len(walls[1].openings), 1)
+        opening = walls[1].openings[0]
+        self.assertEqual(opening["width_mm"], 900)
+        self.assertEqual(opening["offset_mm"], 1050)
+
+    def test_window_keeps_its_sill(self) -> None:
+        from app.geometry import attach_openings
+        walls = self._walls()
+        attach_openings(walls, [{"kind": "window", "x": 2000, "y": 0, "width_mm": 1500}])
+        opening = walls[0].openings[0]
+        self.assertEqual(opening["kind"], "window")
+        self.assertEqual(opening["sill_mm"], 800)
+
+    def test_opening_in_the_middle_of_nowhere_is_dropped(self) -> None:
+        """Дверь посреди комнаты — ошибка распознавания, а не дверь."""
+        from app.geometry import attach_openings
+        walls = self._walls()
+        self.assertEqual(
+            attach_openings(walls, [{"kind": "door", "x": 2000, "y": 9000, "width_mm": 900}]), 0
+        )
+
+    def test_opening_never_hangs_off_the_wall_end(self) -> None:
+        from app.geometry import attach_openings
+        walls = self._walls()
+        attach_openings(walls, [{"kind": "door", "x": 0, "y": 0, "width_mm": 900}])
+        opening = walls[0].openings[0]
+        self.assertGreaterEqual(opening["offset_mm"], 0)
+        self.assertLessEqual(opening["offset_mm"] + opening["width_mm"], 4000)
+
+
+class TestSceneEndpoint(TestBase):
+    """Данные для трёхмерной модели отдаются в миллиметрах."""
+
+    def test_scene_of_an_empty_project(self) -> None:
+        project_id = self.client.post(
+            "/api/projects", json={"name": "Пустой", "ceiling_height_mm": 2900}
+        ).json()["id"]
+        scene = self.client.get(f"/api/projects/{project_id}/scene").json()
+        self.assertEqual(scene["rooms"], [])
+        self.assertEqual(scene["ceiling_height_mm"], 2900)
+        self.client.delete(f"/api/projects/{project_id}")
+
+    def test_scene_carries_rooms_walls_and_bounds(self) -> None:
+        import json as js
+        from app import db, geometry
+        project_id = self.client.post(
+            "/api/projects", json={"name": "Со сценой", "ceiling_height_mm": 2700}
+        ).json()["id"]
+        db.add_room(project_id, "Гостиная", "living",
+                    js.dumps([[0, 0], [4000, 0], [4000, 3000], [0, 3000]]), 12.0)
+        for wall in geometry.walls_from_rooms(db.list_rooms(project_id)):
+            db.add_wall(project_id, wall.x1, wall.y1, wall.x2, wall.y2,
+                        wall.thickness_mm, wall.kind)
+
+        scene = self.client.get(f"/api/projects/{project_id}/scene").json()
+        self.assertEqual(len(scene["rooms"]), 1)
+        self.assertEqual(scene["rooms"][0]["area_m2"], 12.0)
+        self.assertEqual(scene["rooms"][0]["height_mm"], 2700)
+        self.assertEqual(len(scene["walls"]), 4)
+        self.assertEqual(scene["bounds"]["width"], 4000)
+        self.assertEqual(scene["bounds"]["depth"], 3000)
+        self.client.delete(f"/api/projects/{project_id}")
+
+    def test_viewer_page_opens(self) -> None:
+        self.assertEqual(self.client.get("/project/1/viewer").status_code, 200)

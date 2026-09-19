@@ -451,3 +451,28 @@ input:focus, textarea:focus, select:focus {
     color: var(--muted);
     overflow-wrap: anywhere;
 }
+
+/* ── Трёхмерный просмотр ────────────────────────────────────────────── */
+
+.viewport {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    background: var(--surface-2);
+    box-shadow: var(--shadow);
+    touch-action: none;
+}
+.viewport canvas { display: block; }
+
+.viewport-info {
+    position: absolute;
+    left: 14px;
+    bottom: 14px;
+    display: none;
+    background: rgba(29, 27, 25, .82);
+    color: #fff;
+    font-size: 14px;
+    padding: 7px 12px;
+    border-radius: 999px;
+    pointer-events: none;
+}

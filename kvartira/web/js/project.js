@@ -26,7 +26,7 @@ const SECTIONS = [
     {
         key: 'model', icon: '🧱', title: '3D-модель',
         text: 'Объёмная модель квартиры, построенная по вашему плану. Можно крутить и рассматривать.',
-        href: (id) => `/project/${id}/viewer`, ready: false,
+        href: (id) => `/project/${id}/viewer`, ready: true,
     },
     {
         key: 'renders', icon: '✨', title: 'Визуализации',

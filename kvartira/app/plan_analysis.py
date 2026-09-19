@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import ai, db
+from . import ai, db, geometry
 from .errors import UserError, get_logger, plan_not_recognised, scale_unknown
 from .plan_vector import VectorPlan, read_plan
 
@@ -97,12 +97,21 @@ class ItemGuess:
 
 
 @dataclass
+class OpeningGuess:
+    kind: str          # door | window
+    x: int
+    y: int
+    width_mm: int
+
+
+@dataclass
 class Analysis:
     """Результат разбора одного листа."""
     page_kind: str = "other"
     mm_per_px: float | None = None
     scale_source: str = ""
     rooms: list[RoomGuess] = field(default_factory=list)
+    openings: list[OpeningGuess] = field(default_factory=list)
     items: list[ItemGuess] = field(default_factory=list)
     notes: str = ""
     warnings: list[str] = field(default_factory=list)
@@ -365,6 +374,20 @@ def interpret(data: dict[str, Any], plan: VectorPlan, factor: float) -> Analysis
             ),
         ))
 
+    for raw in data.get("openings") or []:
+        try:
+            x = round(float(raw["x"]) * result.mm_per_px)
+            y = round(float(raw["y"]) * result.mm_per_px)
+        except (KeyError, TypeError, ValueError):
+            continue
+        width = raw.get("width_px")
+        width_mm = round(float(width) * result.mm_per_px) if width else 900
+        # Дверь уже метра полтора или уже полуметра — это не дверь.
+        if not (500 <= width_mm <= 4000):
+            width_mm = 900
+        kind = "window" if str(raw.get("kind")) == "window" else "door"
+        result.openings.append(OpeningGuess(kind, x, y, width_mm))
+
     for raw in data.get("items") or []:
         subtype = str(raw.get("subtype") or "other")
         default = DEFAULT_SIZES.get(subtype, DEFAULT_SIZES["other"])
@@ -445,17 +468,37 @@ def _add_warnings(result: Analysis, plan: VectorPlan) -> None:
 # ── Сохранение ────────────────────────────────────────────────────────────
 
 def store(project_id: int, result: Analysis) -> None:
-    """Записывает распознанное в базу, заменяя прошлый разбор."""
+    """Записывает распознанное в базу, заменяя прошлый разбор.
+
+    Стены не приходят от AI — они выводятся из контуров комнат,
+    поэтому разойтись с комнатами не могут.
+    """
     db.clear_recognised(project_id)
+    room_ids: list[int] = []
     for order, room in enumerate(result.rooms):
-        db.add_room(
+        room_ids.append(db.add_room(
             project_id=project_id,
             name=room.name,
             kind=room.kind,
             polygon=json.dumps(room.polygon_mm),
             declared_area_m2=room.declared_area_m2,
             sort_order=order,
+        ))
+
+    saved_rooms = db.list_rooms(project_id)
+    walls = geometry.walls_from_rooms(saved_rooms)
+    geometry.attach_openings(walls, [
+        {"kind": o.kind, "x": o.x, "y": o.y, "width_mm": o.width_mm}
+        for o in result.openings
+    ])
+    for wall in walls:
+        wall_id = db.add_wall(
+            project_id, wall.x1, wall.y1, wall.x2, wall.y2,
+            wall.thickness_mm, wall.kind,
         )
+        for opening in wall.openings:
+            db.add_opening(wall_id, **opening)
+
     for item in result.items:
         db.add_item(
             project_id=project_id,

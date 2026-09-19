@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3D-модель · Моя квартира</title>
+<link rel="stylesheet" href="/static/css/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>&#127968;</text></svg>">
+<script type="importmap">
+{ "imports": { "three": "/static/vendor/three.module.min.js" } }
+</script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="/">
+      <span class="brand-mark">&#127968;</span>
+      Моя квартира
+    </a>
+    <span class="spacer"></span>
+    <a class="btn btn-quiet" href="/settings">Настройки</a>
+  </div>
+</header>
+
+<main>
+  <div class="crumbs">
+    <a href="/">Мои проекты</a> → <a id="crumb-project" href="#">…</a> → 3D-модель
+  </div>
+
+  <h1>3D-модель</h1>
+  <p class="lead" id="lead">
+    Ваша квартира в объёме — с настоящими размерами, снятыми с чертежа.
+    Крутите мышью, приближайте колесом.
+  </p>
+
+  <div id="content"><div class="spinner"></div></div>
+</main>
+
+<script type="module" src="/static/js/viewer.js"></script>
+</body>
+</html>

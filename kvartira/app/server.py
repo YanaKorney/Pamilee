@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 import dataclasses
 
-from . import __version__, ai, db, plan_analysis, plan_files, plan_vector, storage
+from . import __version__, ai, db, geometry, plan_analysis, plan_files, plan_vector, storage
 from .config import ENV_PATH, WEB_DIR, clean_secret, settings
 from .errors import (
     UserError,
@@ -331,6 +331,34 @@ def api_list_rooms(project_id: int) -> dict[str, Any]:
     }
 
 
+@app.get("/api/projects/{project_id}/scene")
+def api_scene(project_id: int) -> dict[str, Any]:
+    """Всё, что нужно для построения 3D-модели, в миллиметрах."""
+    project = _require_project(project_id)
+    rooms = db.list_rooms(project_id)
+    walls = db.list_walls(project_id)
+    items = db.list_items(project_id)
+
+    default_height = int(project.get("ceiling_height_mm") or 2900)
+    for room in rooms:
+        room["polygon"] = geometry.parse_polygon(room.get("polygon", "[]"))
+        room["area_m2"] = geometry.polygon_area_m2(room["polygon"])
+        room["height_mm"] = int(room.get("ceiling_height_mm") or default_height)
+    for wall in walls:
+        wall["height_mm"] = int(wall.get("height_mm") or default_height)
+
+    return {
+        "name": project.get("name"),
+        "ceiling_height_mm": default_height,
+        "bounds": geometry.bounds(
+            [{"polygon": r["polygon"]} for r in rooms]
+        ),
+        "rooms": rooms,
+        "walls": walls,
+        "items": items,
+    }
+
+
 # ── AI-сервис: каталог моделей, выбор, проверка доступа ───────────────────
 
 class AiKeys(BaseModel):
@@ -430,6 +458,11 @@ def page_project(project_id: int) -> FileResponse:
 @app.get("/project/{project_id}/plan")
 def page_plan(project_id: int) -> FileResponse:
     return _page("plan.html")
+
+
+@app.get("/project/{project_id}/viewer")
+def page_viewer(project_id: int) -> FileResponse:
+    return _page("viewer.html")
 
 
 @app.get("/settings")
