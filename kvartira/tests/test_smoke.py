@@ -1078,11 +1078,14 @@ class TestWallsFromRooms(unittest.TestCase):
         self.assertEqual(sorted(inner[0].rooms), [1, 2])
         self.assertEqual(inner[0].thickness_mm, 120)
 
-    def test_partial_overlap_is_split(self) -> None:
+    def test_partial_overlap_is_covered(self) -> None:
         """Длинная стена одной комнаты и две коротких с той стороны.
 
-        Раньше такие грани не склеивались, и на границе вырастали две
-        стены вместо одной: дверь упиралась в лишнюю.
+        Такие грани обязаны дать ровно одну перегородку по всей длине
+        границы — без второй стены поверх и без дыр между кусками.
+        Куски одной прямой одинаковой толщины теперь сращиваются,
+        поэтому здесь получается одна стена на 6 метров, а не две
+        по три: в доме это и есть одна стена.
         """
         from app.geometry import walls_from_rooms
         walls = walls_from_rooms([
@@ -1091,14 +1094,16 @@ class TestWallsFromRooms(unittest.TestCase):
             self._room(3, [[3000, 3000], [6000, 3000], [6000, 6000], [3000, 6000]]),
         ])
         border = [w for w in walls if w.y1 == 3000 and w.y2 == 3000]
-        self.assertEqual(len(border), 2, "Длинная грань режется по границе соседей")
         self.assertTrue(
             all(w.kind == "inner" for w in border),
-            "Оба куска граничат с комнатой сверху — значит это перегородки",
+            "Вдоль границы стоят комнаты с обеих сторон — значит перегородка",
         )
-        self.assertEqual(sum(w.length_mm for w in border), 6000)
-        self.assertEqual(sorted(border[0].rooms), sorted(border[0].rooms))
-        self.assertEqual({tuple(sorted(w.rooms)) for w in border}, {(1, 2), (1, 3)})
+        self.assertEqual(sum(w.length_mm for w in border), 6000,
+                         "Граница закрыта целиком и ровно один раз")
+        self.assertEqual(
+            sorted({r for w in border for r in w.rooms}), [1, 2, 3],
+            "Перегородка знает все комнаты, которые к ней примыкают",
+        )
 
     def test_outer_walls_are_thicker(self) -> None:
         from app.geometry import walls_from_rooms
@@ -1110,15 +1115,40 @@ class TestWallsFromRooms(unittest.TestCase):
         self.assertTrue(all(w.thickness_mm == 250 for w in walls))
 
     def test_perimeter_is_preserved(self) -> None:
-        """Сумма наружных стен обязана дать периметр квартиры."""
-        from app.geometry import walls_from_rooms
+        """Сумма наружных стен обязана дать периметр квартиры.
+
+        Каждая стена доведена до угла дома — иначе на углах оставались
+        бы выемки. Поэтому к периметру добавляется по половине толщины
+        на каждый из четырёх углов.
+        """
+        from app.geometry import walls_from_rooms, OUTER_THICKNESS_MM
         walls = walls_from_rooms([
             self._room(1, [[0, 0], [5000, 0], [5000, 4000], [0, 4000]]),
             self._room(2, [[5000, 0], [9000, 0], [9000, 4000], [5000, 4000]]),
             self._room(3, [[0, 4000], [9000, 4000], [9000, 7500], [0, 7500]]),
         ])
         outer = sum(w.length_mm for w in walls if w.kind == "outer")
-        self.assertAlmostEqual(outer, 2 * (9000 + 7500), delta=1)
+        corners = 4 * OUTER_THICKNESS_MM
+        self.assertAlmostEqual(outer, 2 * (9000 + 7500) + corners, delta=1)
+
+    def test_наружная_стена_не_ест_площадь_комнаты(self) -> None:
+        """Наружная стена стоит СНАРУЖИ от комнаты, а не поперёк неё.
+
+        Иначе половина стены съедала бы площадь комнаты, и квартира
+        в 3D оказалась бы меньше, чем на чертеже.
+        """
+        from app.geometry import walls_from_rooms
+        walls = walls_from_rooms([
+            self._room(1, [[0, 0], [4000, 0], [4000, 3000], [0, 3000]]),
+        ])
+        vertical = [w for w in walls if w.x1 == w.x2]
+        self.assertEqual(len(vertical), 2, "У комнаты две вертикальные стены")
+        left = min(vertical, key=lambda w: w.x1)
+        right = max(vertical, key=lambda w: w.x1)
+        self.assertLess(left.x1, 0, "Левая стена вынесена левее грани комнаты")
+        self.assertGreater(right.x1, 4000, "Правая — правее")
+        self.assertAlmostEqual(abs(left.x1), left.thickness_mm / 2, delta=1)
+        self.assertAlmostEqual(right.x1 - 4000, right.thickness_mm / 2, delta=1)
 
 
 class TestOpenings(unittest.TestCase):
@@ -1672,17 +1702,20 @@ class TestOldProjectGetsFixed(TestBase):
         walls = db.list_walls(project_id)
         self.assertTrue(walls, "Стены должны остаться")
 
-        # Каждая стена обязана лежать на грани какой-нибудь комнаты.
-        corners = {
-            (x, y)
-            for room in db.list_rooms(project_id)
-            for x, y in geometry_module().parse_polygon(room["polygon"])
-        }
+        # Ни одна стена не должна улететь за пределы квартиры.
+        # Наружные стены стоят снаружи от граней комнат, поэтому запас —
+        # ровно толщина наружной стены.
+        from app.geometry import OUTER_THICKNESS_MM
+        edge = geometry_module().bounds([
+            {"polygon": geometry_module().parse_polygon(r["polygon"])}
+            for r in db.list_rooms(project_id)
+        ])
         for wall in walls:
-            near = min(
-                abs(wall["x1"] - x) + abs(wall["y1"] - y) for x, y in corners
-            )
-            self.assertLess(near, 200, "Стена оторвалась от комнат")
+            for x, y in ((wall["x1"], wall["y1"]), (wall["x2"], wall["y2"])):
+                self.assertGreaterEqual(x, edge["min_x"] - OUTER_THICKNESS_MM)
+                self.assertLessEqual(x, edge["max_x"] + OUTER_THICKNESS_MM)
+                self.assertGreaterEqual(y, edge["min_y"] - OUTER_THICKNESS_MM)
+                self.assertLessEqual(y, edge["max_y"] + OUTER_THICKNESS_MM)
 
     def test_починка_идёт_один_раз_и_молча(self) -> None:
         from app import server
@@ -1872,3 +1905,131 @@ class TestSecondCopyIsNoticed(unittest.TestCase):
         finally:
             server.should_exit = True
             thread.join(timeout=5)
+
+
+# ── Стены без двойников и дыр ────────────────────────────────────────
+
+def _flat_by_faces(noise: int = 0, seed: int = 1):
+    """Квартира, обведённая по ВНУТРЕННИМ граням, — как это делает AI.
+
+    Комнаты при этом не соприкасаются: между ними остаётся промежуток
+    ровно в перегородку. Настоящая геометрия, а не комнаты вплотную.
+    """
+    import random
+    cx, cy = [0, 3400, 6200, 8000, 11000], [0, 3300, 4400, 7000]
+    outer, inner = 125, 60
+
+    def room(i, j, k, l):
+        x1 = cx[i] + (outer if i == 0 else inner)
+        x2 = cx[j] - (outer if j == len(cx) - 1 else inner)
+        y1 = cy[k] + (outer if k == 0 else inner)
+        y2 = cy[l] - (outer if l == len(cy) - 1 else inner)
+        return [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+
+    flat = [room(0, 1, 0, 1), room(1, 3, 0, 1), room(3, 4, 0, 1),
+            room(0, 1, 1, 2), room(1, 2, 1, 3), room(2, 4, 1, 2),
+            room(2, 4, 2, 3)]
+    if noise:
+        rnd = random.Random(seed)
+        flat = [[(x + rnd.randint(-noise, noise), y + rnd.randint(-noise, noise))
+                 for x, y in poly] for poly in flat]
+    return [{"id": n + 1, "polygon": json.dumps(poly)}
+            for n, poly in enumerate(flat)]
+
+
+def _stacked_pairs(walls) -> int:
+    """Считает стены, стоящие одна на другой."""
+    import math
+    stacked = 0
+    for first in range(len(walls)):
+        for second in range(first + 1, len(walls)):
+            a, b = walls[first], walls[second]
+            cross = abs((a.x2 - a.x1) * (b.y2 - b.y1) - (a.y2 - a.y1) * (b.x2 - b.x1))
+            if cross > 1000:
+                continue                    # не параллельны
+            mid_a = ((a.x1 + a.x2) / 2, (a.y1 + a.y2) / 2)
+            mid_b = ((b.x1 + b.x2) / 2, (b.y1 + b.y2) / 2)
+            if math.hypot(mid_a[0] - mid_b[0], mid_a[1] - mid_b[1]) < 200:
+                stacked += 1
+    return stacked
+
+
+class TestNoDoubleWalls(unittest.TestCase):
+    """То, что она обвела на скриншоте: двойные стены и обрывки.
+
+    AI обводит комнаты по внутренним граням стен. Программа же считала,
+    что у соседних комнат общая граница, — и на месте одной перегородки
+    в 120 мм строила ДВЕ стены по 250 мм с щелью между ними.
+    """
+
+    def test_перегородка_одна_и_нужной_толщины(self) -> None:
+        from app.geometry import walls_from_rooms
+        walls = walls_from_rooms([
+            {"id": 1, "polygon": json.dumps(
+                [[0, 0], [3000, 0], [3000, 4000], [0, 4000]])},
+            {"id": 2, "polygon": json.dumps(
+                [[3120, 0], [6000, 0], [6000, 4000], [3120, 4000]])},
+        ])
+        inner = [w for w in walls if w.kind == "inner"]
+        self.assertEqual(len(inner), 1, "Перегородка одна, а не две")
+        self.assertEqual(inner[0].thickness_mm, 120,
+                         "Толщина взята из промежутка на чертеже")
+        self.assertEqual(sorted(inner[0].rooms), [1, 2])
+
+    def test_наружная_стена_не_рвётся_у_перегородки(self) -> None:
+        """Раньше в фасаде оставалась дыра там, где в него упирается
+        перегородка: грани соседних комнат там заканчиваются."""
+        from app.geometry import walls_from_rooms
+        walls = walls_from_rooms([
+            {"id": 1, "polygon": json.dumps(
+                [[0, 0], [3000, 0], [3000, 4000], [0, 4000]])},
+            {"id": 2, "polygon": json.dumps(
+                [[3120, 0], [6000, 0], [6000, 4000], [3120, 4000]])},
+        ])
+        top = [w for w in walls if w.kind == "outer" and w.y1 == w.y2 and w.y1 < 0]
+        self.assertEqual(len(top), 1, "Фасад сверху — одна стена, а не два куска")
+        self.assertGreaterEqual(top[0].length_mm, 6000)
+
+    def test_на_квартире_нет_двойных_стен(self) -> None:
+        from app.geometry import walls_from_rooms
+        self.assertEqual(_stacked_pairs(walls_from_rooms(_flat_by_faces())), 0)
+
+    def test_двойных_стен_нет_и_при_промахе_ai(self) -> None:
+        """Главная проверка: кривой обвод не должен плодить стены."""
+        from app.geometry import walls_from_rooms
+        from app.align import align_rooms, area_m2
+        for seed in range(12):
+            with self.subTest(seed=seed):
+                rooms = _flat_by_faces(noise=90, seed=seed)
+                polygons = [geometry_module().parse_polygon(r["polygon"])
+                            for r in rooms]
+                targets = [round(area_m2([(float(x), float(y)) for x, y in p]), 2)
+                           for p in _flat_polygons()]
+                fixed = align_rooms(polygons, targets)
+                ready = [{"id": n + 1, "polygon": json.dumps(p)}
+                         for n, p in enumerate(fixed)]
+                walls = walls_from_rooms(ready)
+                self.assertEqual(_stacked_pairs(walls), 0, "Стены встали друг на друга")
+                self.assertLess(len(walls), 24, "Стен развелось слишком много")
+
+    def test_кривой_обвод_выпрямляется(self) -> None:
+        from app.align import rectify
+        crooked = [(0, 0), (4000, 40), (3960, 3000), (30, 2980)]
+        straight = rectify([(float(x), float(y)) for x, y in crooked])
+        self.assertAlmostEqual(straight[0][1], straight[1][1], delta=1)
+        self.assertAlmostEqual(straight[1][0], straight[2][0], delta=1)
+        self.assertAlmostEqual(straight[2][1], straight[3][1], delta=1)
+        self.assertAlmostEqual(straight[3][0], straight[0][0], delta=1)
+
+    def test_косая_стена_остаётся_косой(self) -> None:
+        """Скос в 45° — это настоящая стена, а не кривой обвод."""
+        from app.align import rectify
+        slanted = [(0.0, 0.0), (4000.0, 0.0), (4000.0, 3000.0), (0.0, 3000.0),
+                   (-2000.0, 1500.0)]
+        kept = rectify(slanted)
+        self.assertAlmostEqual(kept[4][0], -2000, delta=1)
+        self.assertAlmostEqual(kept[4][1], 1500, delta=1)
+
+
+def _flat_polygons():
+    return [geometry_module().parse_polygon(r["polygon"]) for r in _flat_by_faces()]

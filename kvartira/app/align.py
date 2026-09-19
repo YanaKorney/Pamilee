@@ -53,6 +53,47 @@ def area_m2(points: list[tuple[float, float]]) -> float:
     return abs(signed_area_mm2(points)) / 1_000_000
 
 
+# Грань, отклонившаяся от вертикали или горизонтали меньше чем на
+# столько градусов, считается просто кривовато обведённой.
+STRAIGHTEN_DEG = 20
+
+
+def rectify(polygon: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Выпрямляет контур, обведённый от руки.
+
+    Стены в квартире прямые, а AI обводит комнаты по картинке, и грань,
+    которая на чертеже строго вертикальна, у него уходит на несколько
+    сантиметров. Из-за этого программа перестаёт узнавать в двух гранях
+    одну стену и строит вместо перегородки две отдельные.
+
+    Здесь каждая почти вертикальная грань становится строго
+    вертикальной, а почти горизонтальная — строго горизонтальной.
+    Угол берётся средний между концами, поэтому контур не съезжает.
+    """
+    count = len(polygon)
+    if count < 3:
+        return list(polygon)
+
+    limit = math.tan(math.radians(STRAIGHTEN_DEG))
+    new_x = [point[0] for point in polygon]
+    new_y = [point[1] for point in polygon]
+
+    for index in range(count):
+        following = (index + 1) % count
+        x1, y1 = polygon[index]
+        x2, y2 = polygon[following]
+        dx, dy = abs(x2 - x1), abs(y2 - y1)
+
+        if dy > dx and dx <= dy * limit:            # почти вертикальная
+            middle = (x1 + x2) / 2
+            new_x[index] = new_x[following] = middle
+        elif dx > dy and dy <= dx * limit:          # почти горизонтальная
+            middle = (y1 + y2) / 2
+            new_y[index] = new_y[following] = middle
+
+    return [(new_x[n], new_y[n]) for n in range(count)]
+
+
 def _cluster(values: Iterable[float], tolerance: float) -> list[list[float]]:
     """Собирает близкие координаты в группы — это линии стен.
 
@@ -151,7 +192,7 @@ def align_rooms(
     комнаты по чертежу в квадратных метрах (None, если неизвестна).
     Возвращает исправленные контуры в том же порядке.
     """
-    rooms = [[(float(x), float(y)) for x, y in poly] for poly in polygons]
+    rooms = [rectify([(float(x), float(y)) for x, y in poly]) for poly in polygons]
     usable = [index for index, poly in enumerate(rooms) if len(poly) >= 3]
     if not usable:
         return [list(poly) for poly in polygons]

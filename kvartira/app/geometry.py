@@ -1,11 +1,16 @@
 """Построение стен по контурам комнат.
 
-AI обводит помещения, а стены программа выводит сама: граница комнаты
-и есть стена. Там, где две комнаты граничат друг с другом, стена одна
-на двоих — перегородка. Там, где у грани соседа нет, это наружная стена.
+AI обводит помещения по ВНУТРЕННИМ граням стен — так его просят,
+и так площадь комнаты выходит настоящей. Значит, соседние комнаты
+не соприкасаются: между ними остаётся промежуток шириной ровно
+в перегородку. В этом промежутке стена и стоит.
 
-Такой подход даёт главное: стены не могут разойтись с комнатами,
-потому что они и есть комнаты.
+Наружная стена ставится снаружи от грани комнаты, а не поперёк неё:
+иначе половина стены съедала бы площадь комнаты.
+
+Главное свойство остаётся прежним: стены не могут разойтись
+с комнатами, потому что выводятся из них. Но теперь и толщина стен
+берётся с чертежа, а не из общих соображений.
 """
 
 from __future__ import annotations
@@ -15,11 +20,26 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-# Точность склейки: две грани считаются одной, если концы ближе этого.
+# Короче этого кусок стены не строим — это остаток от округлений.
 SNAP_MM = 120
 
 OUTER_THICKNESS_MM = 250
 INNER_THICKNESS_MM = 120
+
+# Промежуток между гранями двух комнат шире этого — уже не перегородка,
+# а что-то другое: не найденная комната или ошибка распознавания.
+MAX_PARTITION_MM = 450
+
+# Грани сошлись вплотную — перегородку ставим стандартной толщины
+# по осевой линии, иначе стены между комнатами не будет вовсе.
+TOUCHING_MM = 50
+
+# Насколько грань может быть перекошена и всё-таки считаться
+# параллельной соседней. AI обводит комнаты от руки, и грань, которая
+# на чертеже строго вертикальна, у него уходит на несколько градусов.
+# Без этого допуска программа не узнаёт в двух гранях одну стену
+# и строит вместо перегородки две отдельные.
+ANGLE_TOLERANCE_DEG = 8
 
 
 @dataclass
@@ -38,16 +58,6 @@ class Wall:
         return math.hypot(self.x2 - self.x1, self.y2 - self.y1)
 
 
-def _snap(value: float) -> int:
-    return int(round(value / SNAP_MM) * SNAP_MM)
-
-
-def _edge_key(p1: tuple[int, int], p2: tuple[int, int]) -> tuple:
-    a = (_snap(p1[0]), _snap(p1[1]))
-    b = (_snap(p2[0]), _snap(p2[1]))
-    return (a, b) if a <= b else (b, a)
-
-
 def parse_polygon(raw: str | list) -> list[tuple[int, int]]:
     points = json.loads(raw) if isinstance(raw, str) else (raw or [])
     result: list[tuple[int, int]] = []
@@ -57,101 +67,302 @@ def parse_polygon(raw: str | list) -> list[tuple[int, int]]:
     return result
 
 
-def _line_key(start: tuple[int, int], end: tuple[int, int]) -> tuple:
-    """Опознаёт прямую, на которой лежит грань.
+def _point_inside(point: tuple[float, float], polygon: list[tuple[int, int]]) -> bool:
+    """Лежит ли точка внутри контура. Нужно, чтобы понять, с какой
+    стороны от грани находится комната, — туда стену ставить нельзя."""
+    x, y = point
+    inside = False
+    for index in range(len(polygon)):
+        x1, y1 = polygon[index]
+        x2, y2 = polygon[(index + 1) % len(polygon)]
+        if (y1 > y) != (y2 > y):
+            crossing = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
+            if x < crossing:
+                inside = not inside
+    return inside
 
-    Две грани разных комнат лежат на одной прямой, если совпадает
-    направление и расстояние до начала координат.
-    """
-    dx, dy = end[0] - start[0], end[1] - start[1]
-    length = math.hypot(dx, dy)
-    if length == 0:
-        return (0.0, 0.0)
-    ux, uy = dx / length, dy / length
-    # Направление приводим к одному виду, чтобы грань туда и обратно
-    # считалась одной и той же прямой.
+
+def _canonical(ux: float, uy: float) -> tuple[float, float]:
+    """Грань туда и обратно — одна и та же прямая."""
     if ux < -1e-9 or (abs(ux) <= 1e-9 and uy < 0):
-        ux, uy = -ux, -uy
-    # Расстояние от начала координат до прямой со знаком.
-    offset = -uy * start[0] + ux * start[1]
-    return (round(ux, 3), round(uy, 3), _snap(offset))
+        return -ux, -uy
+    return ux, uy
 
 
-def _along(point: tuple[int, int], direction: tuple[float, float]) -> float:
-    return point[0] * direction[0] + point[1] * direction[1]
+def _group_directions(edges: list[dict[str, Any]]) -> None:
+    """Собирает почти параллельные грани в одно направление.
+
+    Длинная грань задаёт направление точнее короткой, поэтому за основу
+    берутся самые длинные: вокруг них и собираются остальные.
+    """
+    limit = math.cos(math.radians(ANGLE_TOLERANCE_DEG))
+    axes: list[tuple[float, float]] = []
+
+    for edge in sorted(edges, key=lambda e: -e["length"]):
+        ux, uy = edge["raw_unit"]
+        found = None
+        for number, (ax, ay) in enumerate(axes):
+            if abs(ux * ax + uy * ay) >= limit:
+                found = number
+                break
+        if found is None:
+            axes.append((ux, uy))
+            found = len(axes) - 1
+        edge["axis"] = found
+
+    # Пересчитываем грани по направлению их общей прямой: так
+    # перекошенная грань встаёт ровно и находит себе пару.
+    for edge in edges:
+        ux, uy = axes[edge["axis"]]
+        nx, ny = -uy, ux
+        start, end = edge["start"], edge["end"]
+        middle = ((start[0] + end[0]) / 2, (start[1] + end[1]) / 2)
+        t1 = start[0] * ux + start[1] * uy
+        t2 = end[0] * ux + end[1] * uy
+        if t1 > t2:
+            t1, t2 = t2, t1
+        edge.update({
+            "unit": (ux, uy), "normal": (nx, ny),
+            "offset": middle[0] * nx + middle[1] * ny,
+            "t1": t1, "t2": t2, "free": [(t1, t2)],
+        })
+
+
+def _edges_of(room: dict[str, Any]) -> list[dict[str, Any]]:
+    """Разбирает контур комнаты на грани в удобных для стен величинах.
+
+    Каждая грань описывается направлением прямой, расстоянием до неё
+    от начала координат, отрезком вдоль прямой — и стороной, с которой
+    лежит сама комната.
+    """
+    points = parse_polygon(room.get("polygon", "[]"))
+    if len(points) < 3:
+        return []
+    room_id = int(room["id"]) if room.get("id") else None
+
+    edges: list[dict[str, Any]] = []
+    for index in range(len(points)):
+        start_point = points[index]
+        end_point = points[(index + 1) % len(points)]
+        dx = end_point[0] - start_point[0]
+        dy = end_point[1] - start_point[1]
+        length = math.hypot(dx, dy)
+        if length < SNAP_MM:
+            continue
+
+        ux, uy = _canonical(dx / length, dy / length)
+        nx, ny = -uy, ux
+
+        # С какой стороны комната: отходим от середины грани по нормали.
+        middle = ((start_point[0] + end_point[0]) / 2,
+                  (start_point[1] + end_point[1]) / 2)
+        probe = (middle[0] + nx * SNAP_MM / 4, middle[1] + ny * SNAP_MM / 4)
+        inside = 1 if _point_inside(probe, points) else -1
+
+        edges.append({
+            "start": start_point, "end": end_point, "length": length,
+            "raw_unit": (ux, uy), "room": room_id, "inside": inside,
+        })
+    return edges
+
+
+def _cut_out(spans: list[tuple[float, float]], a: float, b: float):
+    """Вычёркивает занятый кусок из списка свободных."""
+    left: list[tuple[float, float]] = []
+    for start, end in spans:
+        if end <= a or start >= b:
+            left.append((start, end))
+            continue
+        if start < a:
+            left.append((start, a))
+        if end > b:
+            left.append((b, end))
+    return left
+
+
+def _overlaps(first, second):
+    """Общие куски двух списков отрезков."""
+    shared = []
+    for a1, a2 in first:
+        for b1, b2 in second:
+            low, high = max(a1, b1), min(a2, b2)
+            if high - low >= SNAP_MM:
+                shared.append((low, high))
+    return shared
+
+
+def _make_wall(edge, offset: float, t1: float, t2: float,
+               thickness: int, kind: str, rooms: list[int]) -> Wall:
+    """Переводит «прямая плюс отрезок на ней» обратно в две точки."""
+    ux, uy = edge["unit"]
+    nx, ny = edge["normal"]
+    return Wall(
+        x1=round(ux * t1 + nx * offset), y1=round(uy * t1 + ny * offset),
+        x2=round(ux * t2 + nx * offset), y2=round(uy * t2 + ny * offset),
+        thickness_mm=thickness, kind=kind,
+        rooms=[r for r in rooms if r],
+    )
+
+
+def _join_collinear(walls: list[Wall]) -> list[Wall]:
+    """Сращивает соседние куски одной стены.
+
+    Наружная стена рвётся там, где в неё упирается перегородка:
+    у комнат слева и справа от перегородки грани заканчиваются, и
+    между ними остаётся щель шириной в саму перегородку. В доме такой
+    дыры нет — куски надо срастить.
+    """
+    groups: dict[tuple, list[Wall]] = {}
+    for wall in walls:
+        dx, dy = wall.x2 - wall.x1, wall.y2 - wall.y1
+        length = math.hypot(dx, dy) or 1
+        ux, uy = dx / length, dy / length
+        if ux < -1e-9 or (abs(ux) <= 1e-9 and uy < 0):
+            ux, uy = -ux, -uy
+        nx, ny = -uy, ux
+        offset = wall.x1 * nx + wall.y1 * ny
+        key = (round(ux, 2), round(uy, 2), round(offset / 20),
+               wall.thickness_mm, wall.kind)
+        groups.setdefault(key, []).append(wall)
+
+    joined: list[Wall] = []
+    for group in groups.values():
+        sample = group[0]
+        dx, dy = sample.x2 - sample.x1, sample.y2 - sample.y1
+        length = math.hypot(dx, dy) or 1
+        ux, uy = dx / length, dy / length
+        if ux < -1e-9 or (abs(ux) <= 1e-9 and uy < 0):
+            ux, uy = -ux, -uy
+        nx, ny = -uy, ux
+
+        spans = []
+        for wall in group:
+            a = wall.x1 * ux + wall.y1 * uy
+            b = wall.x2 * ux + wall.y2 * uy
+            spans.append((min(a, b), max(a, b), wall))
+        spans.sort()
+
+        current_a, current_b, first = spans[0]
+        rooms = list(first.rooms)
+        offset = first.x1 * nx + first.y1 * ny
+        for a, b, wall in spans[1:]:
+            if a - current_b <= MAX_PARTITION_MM:
+                current_b = max(current_b, b)
+                rooms.extend(r for r in wall.rooms if r not in rooms)
+                continue
+            joined.append(_make_wall(
+                {"unit": (ux, uy), "normal": (nx, ny)},
+                offset, current_a, current_b,
+                first.thickness_mm, first.kind, rooms,
+            ))
+            current_a, current_b, first = a, b, wall
+            rooms = list(wall.rooms)
+            offset = wall.x1 * nx + wall.y1 * ny
+        joined.append(_make_wall(
+            {"unit": (ux, uy), "normal": (nx, ny)},
+            offset, current_a, current_b,
+            first.thickness_mm, first.kind, rooms,
+        ))
+    return joined
 
 
 def walls_from_rooms(rooms: Iterable[dict[str, Any]]) -> list[Wall]:
     """Собирает стены из границ комнат.
 
-    Соседние комнаты часто граничат не всей стеной, а её частью:
-    у комнаты одна длинная стена, а с той стороны к ней примыкают две
-    разные. Поэтому грани сначала режутся на общие куски, и только
-    потом совпавшие склеиваются. Иначе на границе выросли бы две стены
-    вместо одной, и дверь упёрлась бы в лишнюю.
+    Порядок такой. Сначала ищем пары граней, которые смотрят друг на
+    друга через небольшой промежуток, — это перегородки, и стена
+    занимает промежуток целиком, какой он есть на чертеже. Всё, что
+    не нашло пары, остаётся наружной стеной и ставится снаружи от
+    комнаты. Напоследок куски одной стены сращиваются.
     """
-    # 1. Собираем грани, разложенные по прямым
-    lines: dict[tuple, dict[str, Any]] = {}
+    edges: list[dict[str, Any]] = []
     for room in rooms:
-        points = parse_polygon(room.get("polygon", "[]"))
-        if len(points) < 3:
-            continue
-        room_id = int(room["id"]) if room.get("id") else None
-        for index in range(len(points)):
-            start = points[index]
-            end = points[(index + 1) % len(points)]
-            if math.hypot(end[0] - start[0], end[1] - start[1]) < SNAP_MM:
-                continue
-            key = _line_key(start, end)
-            line = lines.setdefault(key, {"direction": None, "edges": [], "cuts": set()})
-            if line["direction"] is None:
-                length = math.hypot(end[0] - start[0], end[1] - start[1])
-                ux, uy = (end[0] - start[0]) / length, (end[1] - start[1]) / length
-                if ux < -1e-9 or (abs(ux) <= 1e-9 and uy < 0):
-                    ux, uy = -ux, -uy
-                line["direction"] = (ux, uy)
-            direction = line["direction"]
-            t1, t2 = _along(start, direction), _along(end, direction)
-            if t1 > t2:
-                t1, t2 = t2, t1
-            line["edges"].append((t1, t2, room_id, start, end))
-            line["cuts"].update((round(t1, 1), round(t2, 1)))
+        edges.extend(_edges_of(room))
+    if not edges:
+        return []
+    _group_directions(edges)
 
-    # 2. Режем грани по общим точкам и считаем, сколько комнат у каждого куска
-    pieces: dict[tuple, dict[str, Any]] = {}
-    for key, line in lines.items():
-        direction = line["direction"]
-        cuts = sorted(line["cuts"])
-        for t1, t2, room_id, start, end in line["edges"]:
-            inner_cuts = [c for c in cuts if t1 + 1 < c < t2 - 1]
-            marks = [t1, *inner_cuts, t2]
-            for a, b in zip(marks, marks[1:]):
+    by_direction: dict[int, list[dict[str, Any]]] = {}
+    for edge in edges:
+        by_direction.setdefault(edge["axis"], []).append(edge)
+
+    walls: list[Wall] = []
+    for group in by_direction.values():
+        # Пары перебираем от самых близких: если грань смотрит сразу
+        # на две, ближняя и есть её перегородка.
+        pairs = []
+        for i, first in enumerate(group):
+            for second in group[i + 1:]:
+                if first["room"] and first["room"] == second["room"]:
+                    continue
+                low, high = (first, second) if first["offset"] <= second["offset"] \
+                    else (second, first)
+                gap = high["offset"] - low["offset"]
+                if gap > MAX_PARTITION_MM:
+                    continue
+                # Комнаты обязаны быть по разные стороны промежутка,
+                # иначе это две грани одной и той же стороны.
+                # Когда грани сошлись вплотную, «ниже» и «выше» теряют
+                # смысл — тогда достаточно, что комнаты смотрят в разные
+                # стороны от общей границы.
+                if gap <= TOUCHING_MM:
+                    if low["inside"] == high["inside"]:
+                        continue
+                elif not (low["inside"] < 0 < high["inside"]):
+                    continue
+                pairs.append((gap, i, low, high))
+        pairs.sort(key=lambda row: (row[0], row[1]))
+
+        for gap, _, low, high in pairs:
+            for a, b in _overlaps(low["free"], high["free"]):
+                if gap <= TOUCHING_MM:
+                    thickness = INNER_THICKNESS_MM
+                    middle = (low["offset"] + high["offset"]) / 2
+                else:
+                    thickness = int(round(gap))
+                    middle = (low["offset"] + high["offset"]) / 2
+                walls.append(_make_wall(
+                    low, middle, a, b, thickness, "inner",
+                    [low["room"], high["room"]],
+                ))
+                low["free"] = _cut_out(low["free"], a, b)
+                high["free"] = _cut_out(high["free"], a, b)
+
+        # Что не нашло пары — наружная стена, снаружи от комнаты.
+        for edge in group:
+            for a, b in edge["free"]:
                 if b - a < SNAP_MM:
                     continue
-                piece_key = (key, round(a, 1), round(b, 1))
-                piece = pieces.get(piece_key)
-                if piece is None:
-                    origin_t = _along(start, direction)
-                    pieces[piece_key] = {
-                        "x1": round(start[0] + direction[0] * (a - origin_t)),
-                        "y1": round(start[1] + direction[1] * (a - origin_t)),
-                        "x2": round(start[0] + direction[0] * (b - origin_t)),
-                        "y2": round(start[1] + direction[1] * (b - origin_t)),
-                        "rooms": [room_id] if room_id else [],
-                    }
-                elif room_id and room_id not in piece["rooms"]:
-                    piece["rooms"].append(room_id)
+                offset = edge["offset"] - edge["inside"] * OUTER_THICKNESS_MM / 2
+                walls.append(_make_wall(
+                    edge, offset, a, b,
+                    OUTER_THICKNESS_MM, "outer", [edge["room"]],
+                ))
 
-    # 3. Кусок, который принадлежит двум комнатам, — перегородка
-    walls: list[Wall] = []
-    for piece in pieces.values():
-        shared = len(piece["rooms"]) >= 2
-        walls.append(Wall(
-            x1=piece["x1"], y1=piece["y1"], x2=piece["x2"], y2=piece["y2"],
-            thickness_mm=INNER_THICKNESS_MM if shared else OUTER_THICKNESS_MM,
-            kind="inner" if shared else "outer",
-            rooms=piece["rooms"],
-        ))
+    return _close_corners(_join_collinear(walls))
+
+
+def _close_corners(walls: list[Wall]) -> list[Wall]:
+    """Достраивает наружные стены до углов дома.
+
+    Наружная стена заканчивается там, где заканчивается грань комнаты,
+    а это на пол-толщины не доходит до угла. Получается выемка.
+    Перегородки удлинять не надо: они и так упираются во внутреннюю
+    поверхность наружной стены.
+    """
+    for wall in walls:
+        if wall.kind != "outer":
+            continue
+        length = wall.length_mm
+        if length <= 0:
+            continue
+        step = wall.thickness_mm / 2
+        ux = (wall.x2 - wall.x1) / length
+        uy = (wall.y2 - wall.y1) / length
+        wall.x1 = round(wall.x1 - ux * step)
+        wall.y1 = round(wall.y1 - uy * step)
+        wall.x2 = round(wall.x2 + ux * step)
+        wall.y2 = round(wall.y2 + uy * step)
     return walls
 
 
