@@ -59,7 +59,8 @@ def _check_size(data: bytes, name: str) -> None:
         raise UserError(f"Файл «{name}» пустой.", "Выберите другой файл.")
 
 
-def ingest(project_id: int, original_name: str, data: bytes, kind: str = "plan") -> Ingested:
+def ingest(project_id: int, original_name: str, data: bytes,
+           kind: str = "plan", room_id: int | None = None) -> Ingested:
     """Сохраняет файл и готовит его к показу. Возвращает описание результата."""
     _check_size(data, original_name)
     suffix = _suffix_of(original_name)
@@ -70,8 +71,8 @@ def ingest(project_id: int, original_name: str, data: bytes, kind: str = "plan")
 
     try:
         if suffix == ".pdf":
-            return _ingest_pdf(project_id, original_name, target, kind)
-        return _ingest_image(project_id, original_name, target, kind)
+            return _ingest_pdf(project_id, original_name, target, kind, room_id)
+        return _ingest_image(project_id, original_name, target, kind, room_id)
     except UserError:
         target.unlink(missing_ok=True)
         raise
@@ -84,7 +85,8 @@ def ingest(project_id: int, original_name: str, data: bytes, kind: str = "plan")
         ) from exc
 
 
-def _ingest_pdf(project_id: int, original_name: str, path: Path, kind: str) -> Ingested:
+def _ingest_pdf(project_id: int, original_name: str, path: Path,
+                kind: str, room_id: int | None = None) -> Ingested:
 
     previews_dir = storage.project_dir(project_id) / "previews"
     previews_dir.mkdir(parents=True, exist_ok=True)
@@ -127,6 +129,7 @@ def _ingest_pdf(project_id: int, original_name: str, path: Path, kind: str) -> I
                 width_px=pixmap.width,
                 height_px=pixmap.height,
                 is_vector=page_is_vector,
+                room_id=room_id,
             ))
 
         pages = document.page_count
@@ -185,7 +188,8 @@ def _make_image_preview(path: Path, target: Path, original_name: str) -> tuple[i
         ) from exc
 
 
-def _ingest_image(project_id: int, original_name: str, path: Path, kind: str) -> Ingested:
+def _ingest_image(project_id: int, original_name: str, path: Path,
+                  kind: str, room_id: int | None = None) -> Ingested:
     previews_dir = storage.project_dir(project_id) / "previews"
     previews_dir.mkdir(parents=True, exist_ok=True)
 
@@ -208,6 +212,7 @@ def _ingest_image(project_id: int, original_name: str, path: Path, kind: str) ->
         width_px=width,
         height_px=height,
         is_vector=False,
+        room_id=room_id,
     )
     log.info("Загружено изображение %s: %s×%s", original_name, width, height)
     return Ingested(path.name, original_name, 1, False, [file_id])

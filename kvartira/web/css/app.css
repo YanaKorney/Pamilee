@@ -531,3 +531,9 @@ input:focus, textarea:focus, select:focus {
     grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
     margin-top: 12px;
 }
+
+.card-chosen {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-soft), var(--shadow);
+}
+.dropzone.busy { opacity: .6; pointer-events: none; }

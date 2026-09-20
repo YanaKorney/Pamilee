@@ -2408,3 +2408,159 @@ class TestVisualisation(TestBase):
                   text_provider=FakeProvider("  A bright modern bedroom  "),
                   image_provider=painter)
         self.assertEqual(painter.asked, "A bright modern bedroom")
+
+
+# ── Референсы ────────────────────────────────────────────────────────
+
+def _picture_bytes(colour: tuple[int, int, int] = (200, 160, 120)) -> bytes:
+    """Настоящая картинка 64×64, чтобы загрузка шла как у человека."""
+    import pymupdf
+    page = pymupdf.open()
+    sheet = page.new_page(width=64, height=64)
+    sheet.draw_rect(sheet.rect, color=None,
+                    fill=(colour[0] / 255, colour[1] / 255, colour[2] / 255))
+    pixmap = sheet.get_pixmap()
+    data = pixmap.tobytes("png")
+    page.close()
+    return data
+
+
+class SeeingProvider:
+    """Подставная текстовая модель, которая считает присланные картинки."""
+
+    def __init__(self, answer: str = "A warm bright room") -> None:
+        self.answer = answer
+        self.seen = 0
+        self.prompt = ""
+
+    def ask(self, model, prompt, images=None, pdf=None, max_tokens=8000,
+            stream=True):
+        from app.providers.base import TextAnswer
+        self.seen = len(images or [])
+        self.prompt = prompt
+        return TextAnswer(self.answer, input_tokens=2000, output_tokens=200,
+                          model=model)
+
+
+class TestReferences(TestBase):
+    """«Вот так мне нравится» — картинки, с которых берут настроение.
+
+    Планировку с них брать нельзя: комната остаётся её.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        with db.connect() as conn:
+            conn.execute("DELETE FROM spend")
+
+    def _project(self) -> tuple[int, int]:
+        project_id = db.create_project("С референсами", ceiling_height_mm=2900)
+        room_id = db.add_room(
+            project_id=project_id, name="Гостиная", kind="living",
+            polygon=json.dumps([[0, 0], [4900, 0], [4900, 3900], [0, 3900]]),
+            declared_area_m2=19.11, sort_order=0,
+        )
+        return project_id, room_id
+
+    def _upload(self, project_id: int, room_id: int | None = None, count: int = 1):
+        files = [("files", (f"вдохновение-{n}.png", _picture_bytes(), "image/png"))
+                 for n in range(count)]
+        data = {"room_id": str(room_id)} if room_id else {}
+        return self.client.post(
+            f"/api/projects/{project_id}/references", files=files, data=data
+        )
+
+    def test_картинки_загружаются(self) -> None:
+        project_id, _ = self._project()
+        answer = self._upload(project_id, count=2)
+        self.assertEqual(answer.status_code, 201)
+        found = self.client.get(f"/api/projects/{project_id}/references").json()
+        self.assertEqual(len(found["references"]), 2)
+
+    def test_русское_имя_файла_переживает_загрузку(self) -> None:
+        project_id, _ = self._project()
+        self._upload(project_id)
+        found = self.client.get(f"/api/projects/{project_id}/references").json()
+        self.assertIn("вдохновение", found["references"][0]["name"])
+
+    def test_картинку_можно_привязать_к_комнате(self) -> None:
+        project_id, room_id = self._project()
+        self._upload(project_id, room_id=room_id)
+        found = self.client.get(f"/api/projects/{project_id}/references").json()
+        self.assertEqual(found["references"][0]["room"], "Гостиная")
+
+    def test_картинка_показывается(self) -> None:
+        project_id, _ = self._project()
+        self._upload(project_id)
+        found = self.client.get(f"/api/projects/{project_id}/references").json()
+        answer = self.client.get(found["references"][0]["image"])
+        self.assertEqual(answer.status_code, 200)
+
+    def test_картинку_можно_удалить(self) -> None:
+        project_id, _ = self._project()
+        self._upload(project_id)
+        found = self.client.get(f"/api/projects/{project_id}/references").json()
+        self.client.delete(f"/api/references/{found['references'][0]['id']}")
+        after = self.client.get(f"/api/projects/{project_id}/references").json()
+        self.assertEqual(after["references"], [])
+
+    def test_модель_действительно_видит_референсы(self) -> None:
+        """Главное: картинки доходят до модели, а не просто лежат."""
+        from app.design import visualise
+        project_id, room_id = self._project()
+        self._upload(project_id, count=2)
+        ids = [r["id"] for r in
+               self.client.get(f"/api/projects/{project_id}/references").json()["references"]]
+
+        looker = SeeingProvider()
+        made = visualise(project_id, room_id, "scandi", "", reference_ids=ids,
+                         text_provider=looker, image_provider=FakePainter())
+        self.assertEqual(looker.seen, 2, "Референсы не дошли до модели")
+        self.assertEqual(len(made["references"]), 2)
+
+    def test_модели_объясняют_что_брать_с_референсов(self) -> None:
+        from app.design import visualise
+        project_id, room_id = self._project()
+        self._upload(project_id)
+        ids = [r["id"] for r in
+               self.client.get(f"/api/projects/{project_id}/references").json()["references"]]
+        looker = SeeingProvider()
+        visualise(project_id, room_id, "loft", "", reference_ids=ids,
+                  text_provider=looker, image_provider=FakePainter())
+        self.assertIn("настроение", looker.prompt)
+        self.assertIn("планировку", looker.prompt.lower())
+
+    def test_больше_четырёх_референсов_не_отправляем(self) -> None:
+        """Иначе модель усредняет вместо того, чтобы взять главное."""
+        from app.design import visualise
+        project_id, room_id = self._project()
+        self._upload(project_id, count=6)
+        ids = [r["id"] for r in
+               self.client.get(f"/api/projects/{project_id}/references").json()["references"]]
+        looker = SeeingProvider()
+        visualise(project_id, room_id, "modern", "", reference_ids=ids,
+                  text_provider=looker, image_provider=FakePainter())
+        self.assertEqual(looker.seen, 4)
+
+    def test_без_референсов_всё_работает_по_прежнему(self) -> None:
+        from app.design import visualise
+        project_id, room_id = self._project()
+        looker = SeeingProvider()
+        made = visualise(project_id, room_id, "cosy", "уютно",
+                         text_provider=looker, image_provider=FakePainter())
+        self.assertEqual(looker.seen, 0)
+        self.assertEqual(made["references"], [])
+        self.assertNotIn("настроение", looker.prompt)
+
+    def test_чужой_референс_не_подставишь(self) -> None:
+        """Номер картинки из другого проекта не должен сработать."""
+        from app.design import visualise
+        first, room_id = self._project()
+        second, _ = self._project()
+        self._upload(second)
+        alien = [r["id"] for r in
+                 self.client.get(f"/api/projects/{second}/references").json()["references"]]
+        looker = SeeingProvider()
+        visualise(first, room_id, "scandi", "", reference_ids=alien,
+                  text_provider=looker, image_provider=FakePainter())
+        self.assertEqual(looker.seen, 0)

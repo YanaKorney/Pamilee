@@ -4,6 +4,9 @@ import { api, el, showError, technicalNote, toast, formatArea } from './api.js';
 
 const projectId = Number(window.location.pathname.split('/')[2]);
 const workBox = document.getElementById('work');
+const refsBox = document.getElementById('refs');
+const dropzone = document.getElementById('dropzone');
+const picker = document.getElementById('picker');
 const galleryBox = document.getElementById('gallery');
 const lightbox = document.getElementById('lightbox');
 const lightboxImg = document.getElementById('lightbox-img');
@@ -11,6 +14,8 @@ const lightboxImg = document.getElementById('lightbox-img');
 let state = null;
 let chosenRoom = null;
 let chosenStyle = 'scandi';
+let references = [];
+let chosenRefs = new Set();
 
 // ── Картинка во весь экран ───────────────────────────────────────────
 
@@ -126,6 +131,12 @@ function draw() {
                 + `Сегодня потрачено ${String(state.spent_today_rub).replace('.', ',')} ₽.` }),
     ]));
 
+    if (chosenRefs.size) {
+        blocks.push(el('div', { class: 'muted small', style: 'margin-top:8px',
+            text: `Взять настроение с выбранных картинок: ${chosenRefs.size}. `
+                + 'Они отмечены ниже, в разделе «Референсы».' }));
+    }
+
     blocks.push(el('div', { id: 'result', style: 'margin-top:18px' }));
     workBox.replaceChildren(...blocks);
 }
@@ -151,6 +162,7 @@ async function make(button, wishes) {
             room_id: chosenRoom,
             style: chosenStyle,
             wishes: wishes.value,
+            reference_ids: [...chosenRefs],
         });
         resultBox.replaceChildren(picture(made, true));
         toast('Готово', `${made.room}: ${made.style.split('—')[0].trim()}`, 'ok');
@@ -218,6 +230,132 @@ function gallery() {
     );
 }
 
+// ── Референсы ────────────────────────────────────────────────────────
+
+function referenceCard(picture) {
+    const chosen = chosenRefs.has(picture.id);
+    const image = el('img', {
+        src: picture.image, alt: picture.name, class: 'render',
+        loading: 'lazy',
+    });
+
+    const pick = el('button', {
+        class: chosen ? 'chip chip-on' : 'chip',
+        style: 'margin-top:8px',
+        text: chosen ? '✓ взять за основу' : 'взять за основу',
+    });
+    pick.addEventListener('click', () => {
+        if (chosenRefs.has(picture.id)) {
+            chosenRefs.delete(picture.id);
+        } else if (chosenRefs.size >= 4) {
+            toast('Больше четырёх не нужно',
+                  'Программа начнёт усреднять вместо того, чтобы взять главное.');
+            return;
+        } else {
+            chosenRefs.add(picture.id);
+        }
+        drawReferences();
+        draw();
+    });
+
+    const remove = el('button', {
+        class: 'btn btn-quiet btn-small', style: 'margin-left:8px',
+        text: 'Удалить',
+    });
+    remove.addEventListener('click', async () => {
+        if (!confirm(`Удалить «${picture.name}»?`)) return;
+        try {
+            await api.del(`/api/references/${picture.id}`);
+            chosenRefs.delete(picture.id);
+            await loadReferences();
+            draw();
+        } catch (err) { showError(err); }
+    });
+
+    const card = el('div', { class: chosen ? 'card-picture card-chosen' : 'card-picture' },
+        [image]);
+    if (picture.room) {
+        card.appendChild(el('div', { class: 'muted small', style: 'margin-top:6px',
+            text: `Для комнаты: ${picture.room}` }));
+    }
+    card.appendChild(el('div', { style: 'margin-top:4px' }, [pick, remove]));
+    return card;
+}
+
+function drawReferences() {
+    if (!references.length) {
+        refsBox.replaceChildren(el('div', { class: 'muted small',
+            text: 'Пока ничего не загружено. Без референсов тоже можно — '
+                + 'тогда программа возьмёт только выбранное направление.' }));
+        return;
+    }
+    refsBox.replaceChildren(
+        el('div', { class: 'pictures' }, references.map(referenceCard)),
+    );
+}
+
+async function loadReferences() {
+    try {
+        const data = await api.get(`/api/projects/${projectId}/references`);
+        references = data.references;
+        // Выбранное могло исчезнуть вместе с картинкой.
+        const alive = new Set(references.map((r) => r.id));
+        chosenRefs = new Set([...chosenRefs].filter((id) => alive.has(id)));
+        drawReferences();
+    } catch (err) {
+        refsBox.replaceChildren(el('div', { class: 'notice notice-error' }, [
+            el('strong', { text: 'Не удалось показать референсы.' }),
+            el('div', { class: 'small muted', text: (err && err.hint) || '' }),
+        ]));
+    }
+}
+
+// ── Загрузка референсов с компьютера ─────────────────────────────────
+
+async function upload(files) {
+    if (!files.length) return;
+    const form = new FormData();
+    for (const file of files) form.append('files', file);
+    if (chosenRoom) form.append('room_id', String(chosenRoom));
+
+    dropzone.classList.add('busy');
+    try {
+        const answer = await fetch(`/api/projects/${projectId}/references`, {
+            method: 'POST', body: form,
+        });
+        const data = await answer.json();
+        if (!answer.ok) throw data;
+        if (data.problems && data.problems.length) {
+            toast('Часть картинок не загрузилась',
+                  data.problems.map((p) => p.name).join(', '));
+        } else {
+            toast('Загружено', `Картинок: ${data.added.length}`, 'ok');
+        }
+        await loadReferences();
+        draw();
+    } catch (err) {
+        showError(err);
+    } finally {
+        dropzone.classList.remove('busy');
+        picker.value = '';
+    }
+}
+
+picker.addEventListener('change', () => upload([...picker.files]));
+['dragenter', 'dragover'].forEach((name) => {
+    dropzone.addEventListener(name, (e) => {
+        e.preventDefault();
+        dropzone.classList.add('over');
+    });
+});
+['dragleave', 'drop'].forEach((name) => {
+    dropzone.addEventListener(name, (e) => {
+        e.preventDefault();
+        dropzone.classList.remove('over');
+    });
+});
+dropzone.addEventListener('drop', (e) => upload([...e.dataTransfer.files]));
+
 // ── Загрузка ─────────────────────────────────────────────────────────
 
 async function load(withSpinner = true) {
@@ -235,6 +373,7 @@ async function load(withSpinner = true) {
         if (chosenRoom === null && data.rooms.length) chosenRoom = data.rooms[0].id;
         draw();
         gallery();
+        await loadReferences();
     } catch (err) {
         workBox.replaceChildren(el('div', { class: 'notice notice-error' }, [
             el('strong', { text: (err && err.error) || 'Не удалось открыть раздел.' }),

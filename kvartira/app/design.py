@@ -154,7 +154,8 @@ SIZES = {
 }
 
 
-def brief(facts: RoomFacts, style: str, wishes: str) -> str:
+def brief(facts: RoomFacts, style: str, wishes: str,
+          references: int = 0) -> str:
     """Что мы просим сочинить — по-русски, чтобы было видно человеку."""
     style_words = STYLES.get(style, style or "на ваш вкус")
     room_word = ROOM_WORDS.get(facts.kind, facts.kind)
@@ -187,6 +188,15 @@ def brief(facts: RoomFacts, style: str, wishes: str) -> str:
     if wishes.strip():
         lines.append(f"ПОЖЕЛАНИЯ ХОЗЯЙКИ: {wishes.strip()}")
 
+    if references:
+        lines += [
+            "",
+            f"К письму приложено картинок «вот так мне нравится»: {references}.",
+            "Посмотри на них и возьми оттуда настроение: цвета, материалы,"
+            " фактуры, характер мебели, каким должен быть свет.",
+            "Брать оттуда планировку НЕ надо — комната своя, её размеры выше.",
+        ]
+
     lines += [
         "",
         "Правила:",
@@ -201,13 +211,23 @@ def brief(facts: RoomFacts, style: str, wishes: str) -> str:
     return "\n".join(lines)
 
 
-def compose(facts: RoomFacts, style: str, wishes: str, provider=None):
-    """Просит текстовую модель сочинить задание художнику."""
+def compose(facts: RoomFacts, style: str, wishes: str, provider=None,
+            references: list[bytes] | None = None):
+    """Просит текстовую модель сочинить задание художнику.
+
+    Если хозяйка приложила референсы, модель смотрит на них сама
+    и переносит в задание то, что на них нравится: цвет, материалы,
+    свет. Планировку с них брать нельзя — комната своя.
+    """
     from . import ai
 
     service = provider or ai.plan_provider()
-    answer = service.ask(ai.plan_model(), brief(facts, style, wishes),
-                         max_tokens=700)
+    answer = service.ask(
+        ai.plan_model(),
+        brief(facts, style, wishes, len(references or [])),
+        images=references or None,
+        max_tokens=700,
+    )
     text = " ".join(answer.text.split()).strip().strip('"')
     if not text:
         raise_empty()
@@ -224,12 +244,57 @@ def raise_empty():
 
 # ── Создание картинки ────────────────────────────────────────────────
 
+# Сколько референсов имеет смысл показывать модели за раз. Больше —
+# дороже и мутнее: она начинает усреднять вместо того, чтобы взять
+# главное.
+MAX_REFERENCES = 4
+
+# До каких размеров ужимаем референс перед отправкой. Модели хватает,
+# а запрос не раздувается на мегабайты.
+REFERENCE_SIDE_PX = 1024
+
+
+def reference_images(project_id: int, ids: list[int]) -> tuple[list[bytes], list[str]]:
+    """Готовит выбранные референсы к отправке модели."""
+    from . import mupdf, storage
+
+    pictures: list[bytes] = []
+    names: list[str] = []
+    for file_id in ids[:MAX_REFERENCES]:
+        row = db.get_file(file_id)
+        if row is None or row["kind"] != "reference":
+            continue
+        if int(row["project_id"]) != project_id:
+            continue
+        path = storage.project_dir(project_id) / "uploads" / row["stored_name"]
+        if not path.exists():
+            continue
+        try:
+            pictures.append(_shrink(path, mupdf))
+            names.append(str(row["original_name"]))
+        except Exception as trouble:
+            log.warning("Референс %s не прочитался: %s", file_id, trouble)
+    return pictures, names
+
+
+def _shrink(path, mupdf) -> bytes:
+    """Ужимает картинку до разумного размера."""
+    with mupdf.open_file(path) as document:
+        page = document[0]
+        side = max(page.rect.width, page.rect.height) or 1
+        zoom = min(1.0, REFERENCE_SIDE_PX / side)
+        import pymupdf
+        pixmap = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+        return pixmap.tobytes("png")
+
+
 def visualise(
     project_id: int,
     room_id: int,
     style: str,
     wishes: str = "",
     shape: str = "wide",
+    reference_ids: list[int] | None = None,
     text_provider=None,
     image_provider=None,
 ) -> dict[str, Any]:
@@ -247,7 +312,8 @@ def visualise(
 
     ai.check_daily_limit()
 
-    prompt, answer = compose(facts, style, wishes, text_provider)
+    references, reference_names = reference_images(project_id, reference_ids or [])
+    prompt, answer = compose(facts, style, wishes, text_provider, references)
     text_cost = ai.text_cost_rub(answer.input_tokens, answer.output_tokens)
 
     painter = image_provider or ai.image_provider()
@@ -278,6 +344,7 @@ def visualise(
         "facts": facts.как_текст(),
         "style": STYLES.get(style, style),
         "wishes": wishes,
+        "references": reference_names,
         "prompt": prompt,
         "image": f"/api/renders/{render_id}/image",
         "cost_rub": round(text_cost + image_cost, 2),

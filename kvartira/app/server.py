@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Request, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -430,6 +430,70 @@ def api_export(project_id: int) -> Response:
     )
 
 
+# ── Референсы: картинки, которые нравятся ────────────────────────────────
+
+@app.post("/api/projects/{project_id}/references", status_code=201)
+async def api_upload_references(
+    project_id: int,
+    files: list[UploadFile] = File(...),
+    room_id: int | None = Form(default=None),
+) -> dict[str, Any]:
+    """Приём картинок «вот так мне нравится».
+
+    Их можно привязать к комнате, а можно оставить общими на квартиру —
+    тогда они годятся для любой.
+    """
+    _require_project(project_id)
+    if not files:
+        raise UserError("Вы не выбрали ни одной картинки.",
+                        "Нажмите «Выбрать файлы».")
+
+    added: list[dict[str, Any]] = []
+    problems: list[dict[str, str]] = []
+    for upload in files:
+        name = upload.filename or "картинка"
+        try:
+            result = plan_files.ingest(
+                project_id, name, await upload.read(),
+                kind="reference", room_id=room_id,
+            )
+            added.append({"original_name": result.original_name,
+                          "ids": result.file_ids})
+        except UserError as exc:
+            problems.append({"name": name, "error": exc.message, "hint": exc.hint})
+
+    if not added and problems:
+        first = problems[0]
+        raise UserError(first["error"], first["hint"])
+    return {"added": added, "problems": problems}
+
+
+@app.get("/api/projects/{project_id}/references")
+def api_list_references(project_id: int) -> dict[str, Any]:
+    _require_project(project_id)
+    rooms = {int(r["id"]): r["name"] for r in db.list_rooms(project_id)}
+    pictures = []
+    for row in db.list_files(project_id, kind="reference"):
+        pictures.append({
+            "id": int(row["id"]),
+            "name": row["original_name"],
+            "label": row["label"],
+            "room_id": row["room_id"],
+            "room": rooms.get(row["room_id"]) if row["room_id"] else None,
+            "image": f"/api/files/{row['id']}/preview",
+        })
+    return {"references": pictures}
+
+
+@app.delete("/api/references/{file_id}")
+def api_delete_reference(file_id: int) -> dict[str, bool]:
+    row = db.get_file(file_id)
+    if row is None or row["kind"] != "reference":
+        raise UserError("Картинка не найдена.", "Обновите страницу.", status=404)
+    db.delete_file_group(row["project_id"], row["stored_name"])
+    return {"deleted": True}
+
+
 # ── Дизайн: как комната будет выглядеть ──────────────────────────────────
 
 class DesignWish(BaseModel):
@@ -437,6 +501,7 @@ class DesignWish(BaseModel):
     style: str = Field(default="scandi", max_length=40)
     wishes: str = Field(default="", max_length=600)
     shape: str = Field(default="wide", max_length=20)
+    reference_ids: list[int] = Field(default_factory=list)
 
 
 @app.get("/api/projects/{project_id}/design")
@@ -482,7 +547,8 @@ def api_design_make(project_id: int, wish: DesignWish) -> dict[str, Any]:
     """«Показать, как будет выглядеть»."""
     _require_project(project_id)
     return design.visualise(
-        project_id, wish.room_id, wish.style, wish.wishes, wish.shape
+        project_id, wish.room_id, wish.style, wish.wishes, wish.shape,
+        reference_ids=wish.reference_ids,
     )
 
 
