@@ -44,6 +44,24 @@
   </div>
 
   <div id="docs" style="margin-top:26px"><div class="spinner"></div></div>
+
+  <h2 style="margin-top:34px">Выверенная модель</h2>
+  <p class="muted small">
+    Если у вас есть файл с точными координатами комнат — DXF, архив
+    с трёхмерной заготовкой или model_parameters.json, — загрузите его.
+    Тогда программа не будет ничего угадывать по картинке: комнаты
+    встанут ровно туда, где им положено, и платить за распознавание
+    не придётся.
+  </p>
+
+  <label class="dropzone" id="model-zone">
+    <div class="icon">📐</div>
+    <div class="title">Перетащите файл модели сюда или нажмите, чтобы выбрать</div>
+    <div class="muted small">DXF, ZIP или JSON</div>
+    <input type="file" id="model-picker" accept=".dxf,.zip,.json">
+  </label>
+
+  <div id="model-result" style="margin-top:14px"></div>
 </main>
 
 <div class="lightbox" id="lightbox" hidden>

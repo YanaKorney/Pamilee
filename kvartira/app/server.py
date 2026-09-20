@@ -19,7 +19,7 @@ import json
 
 from contextlib import asynccontextmanager
 
-from . import __version__, ai, db, design, geometry, plan_analysis, plan_files, plan_vector, storage
+from . import __version__, ai, db, design, geometry, model_import, plan_analysis, plan_files, plan_vector, storage
 from .config import ENV_PATH, WEB_DIR, clean_secret, settings
 from .errors import (
     UserError,
@@ -428,6 +428,73 @@ def api_export(project_id: int) -> Response:
                 'attachment; filename="planirovka.json"',
         },
     )
+
+
+# ── Выверенная модель квартиры ───────────────────────────────────────────
+
+@app.post("/api/projects/{project_id}/model", status_code=201)
+async def api_upload_model(
+    project_id: int,
+    files: list[UploadFile] = File(...),
+) -> dict[str, Any]:
+    """Заменяет распознанные комнаты выверенной моделью.
+
+    Распознавание угадывает геометрию по картинке и ошибается. Если есть
+    файл с точными координатами — угадывать незачем: комнаты встают
+    ровно туда, где им положено, и AI для этого не нужен.
+    """
+    project = _require_project(project_id)
+    if not files:
+        raise UserError("Вы не выбрали файл.", "Нажмите «Выбрать файл».")
+
+    upload = files[0]
+    model = model_import.read_any(upload.filename or "модель",
+                                  await upload.read())
+    if not model.rooms:
+        raise UserError(
+            "В файле не нашлось ни одной комнаты.",
+            "Проверьте, что отправлен файл выверенной модели.",
+        )
+
+    db.clear_recognised(project_id)
+    for order, room in enumerate(model.rooms):
+        db.add_room(
+            project_id=project_id, name=room.name, kind=room.kind,
+            polygon=json.dumps(room.polygon),
+            declared_area_m2=room.declared_area_m2 or room.area_m2,
+            sort_order=order,
+        )
+
+    thickness = model.wall_thickness_mm or geometry.INNER_THICKNESS_MM
+    walls = geometry.walls_from_rooms(db.list_rooms(project_id))
+    for wall in walls:
+        if wall.kind == "inner":
+            wall.thickness_mm = thickness
+        db.add_wall(project_id, wall.x1, wall.y1, wall.x2, wall.y2,
+                    wall.thickness_mm, wall.kind)
+
+    if model.ceiling_height_mm:
+        db.update_project(project_id, ceiling_height_mm=model.ceiling_height_mm)
+
+    # Модель выверена — пересчитывать её по чертежу не надо.
+    db.set_setting(plan_analysis.ALIGNED_MARK, "да")
+    db.touch_project(project_id)
+
+    was = project.get("ceiling_height_mm")
+    return {
+        "rooms": len(model.rooms),
+        "walls": len(walls),
+        "source": model.source,
+        "ceiling_height_mm": model.ceiling_height_mm,
+        "ceiling_changed": bool(
+            model.ceiling_height_mm and was and model.ceiling_height_mm != was
+        ),
+        "ceiling_was_mm": was,
+        "wall_thickness_mm": thickness,
+        "total_area_m2": model.total_area_m2,
+        "declared_area_m2": project.get("declared_area_m2"),
+        "notes": model.notes,
+    }
 
 
 # ── Референсы: картинки, которые нравятся ────────────────────────────────

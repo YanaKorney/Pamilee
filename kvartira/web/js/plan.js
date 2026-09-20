@@ -1,6 +1,6 @@
 // Страница «Планировка»: загрузка файлов дизайн-проекта и их просмотр.
 
-import { api, el, showError, technicalNote, toast, plural, formatDate, formatArea } from './api.js';
+import { api, el, showError, technicalNote, toast, plural, formatDate, formatArea, formatMm } from './api.js';
 
 const projectId = Number(window.location.pathname.split('/')[2]);
 const docsBox = document.getElementById('docs');
@@ -524,3 +524,105 @@ picker.addEventListener('change', () => upload(picker.files));
 dropzone.addEventListener('drop', (e) => upload(e.dataTransfer.files));
 
 load();
+
+// ── Выверенная модель квартиры ───────────────────────────────────────
+
+const modelZone = document.getElementById('model-zone');
+const modelPicker = document.getElementById('model-picker');
+const modelResult = document.getElementById('model-result');
+
+function modelReport(data) {
+    const blocks = [
+        el('strong', { text: 'Модель загружена' }),
+        el('div', { class: 'small', style: 'margin-top:4px',
+            text: `Комнат: ${data.rooms}, стен: ${data.walls}. `
+                + `Источник: ${data.source}. Всё встало по точным координатам — `
+                + 'без распознавания и без трат.' }),
+    ];
+
+    if (data.total_area_m2 && data.declared_area_m2) {
+        const gap = data.declared_area_m2 - data.total_area_m2;
+        const row = el('div', { class: 'small', style: 'margin-top:8px' }, [
+            document.createTextNode(
+                `Площадь по модели: ${formatArea(data.total_area_m2)} · `
+                + `по документам ${formatArea(data.declared_area_m2)}`),
+        ]);
+        blocks.push(row);
+        if (Math.abs(gap) > 0.5) {
+            blocks.push(el('div', { class: 'small', style: 'color:var(--warn)',
+                text: `⚠ Не хватает ${formatArea(Math.abs(gap))}. `
+                    + 'Скорее всего, в модели нет прихожей — её контур не был '
+                    + 'замкнут в исходнике. В 3D этого помещения не будет.' }));
+        }
+    }
+
+    if (data.ceiling_changed) {
+        blocks.push(el('div', { class: 'small', style: 'color:var(--warn);margin-top:8px',
+            text: `⚠ Высота потолка изменена: было ${formatMm(data.ceiling_was_mm)}, `
+                + `в модели ${formatMm(data.ceiling_height_mm)}. `
+                + 'Проверьте, какая верна — это влияет на пропорции комнат.' }));
+    }
+
+    if (data.notes && data.notes.length) {
+        blocks.push(el('details', { class: 'tech', style: 'margin-top:8px' }, [
+            el('summary', { text: 'Замечания автора модели' }),
+            el('pre', { text: data.notes.join('\n') }),
+        ]));
+    }
+
+    blocks.push(el('div', { class: 'small', style: 'margin-top:10px' }, [
+        el('a', { href: `/project/${projectId}/viewer`, text: 'Открыть 3D-модель' }),
+        document.createTextNode(' · '),
+        el('a', { href: `/project/${projectId}/design`, text: 'Как будет выглядеть' }),
+    ]));
+
+    return el('div', { class: 'notice' }, blocks);
+}
+
+async function sendModel(file) {
+    if (!file) return;
+    if (!confirm(
+        'Загрузка модели заменит всё, что программа распознала раньше: '
+        + 'комнаты, стены и мебель.\n\nПродолжить?'
+    )) return;
+
+    modelZone.classList.add('busy');
+    modelResult.replaceChildren(el('div', { class: 'spinner' }));
+    try {
+        const form = new FormData();
+        form.append('files', file);
+        const answer = await fetch(`/api/projects/${projectId}/model`, {
+            method: 'POST', body: form,
+        });
+        const data = await answer.json();
+        if (!answer.ok) throw data;
+        modelResult.replaceChildren(modelReport(data));
+        toast('Модель загружена', `Комнат: ${data.rooms}`, 'ok');
+        await load();
+    } catch (err) {
+        showError(err);
+        modelResult.replaceChildren(el('div', { class: 'notice notice-error' }, [
+            el('strong', { text: (err && err.error) || 'Не удалось прочитать модель.' }),
+            el('div', { class: 'small', text: (err && err.hint) || '' }),
+            technicalNote(err && err.technical),
+        ]));
+    } finally {
+        modelZone.classList.remove('busy');
+        modelPicker.value = '';
+    }
+}
+
+modelPicker.addEventListener('change', () => sendModel(modelPicker.files[0]));
+['dragenter', 'dragover'].forEach((name) => {
+    modelZone.addEventListener(name, (e) => {
+        e.preventDefault();
+        modelZone.classList.add('over');
+    });
+});
+['dragleave', 'drop'].forEach((name) => {
+    modelZone.addEventListener(name, (e) => {
+        e.preventDefault();
+        modelZone.classList.remove('over');
+    });
+});
+modelZone.addEventListener('drop', (e) => sendModel(e.dataTransfer.files[0]));

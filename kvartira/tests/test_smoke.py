@@ -2756,3 +2756,138 @@ class TestMoneyIsNotWasted(TestBase):
             visualise(project_id, room_id, "scandi", "",
                       text_provider=FakeProvider("текст"))
         self.assertEqual(ai.spent_today_rub(), before, "Деньги не тронуты")
+
+
+# ── Выверенная модель вместо угадывания ──────────────────────────────
+
+class TestModelImport(TestBase):
+    """Геометрию можно не угадывать, а взять готовую.
+
+    Всё, что программа делала с планировкой, было попыткой угадать её
+    по картинке. Когда есть файл с точными координатами, угадывать
+    незачем — и платить за распознавание тоже.
+    """
+
+    DXF = Path(__file__).parent / "fixtures" / "model-reference.dxf"
+    ZIP = Path(__file__).parent / "fixtures" / "model-reference.zip"
+
+    def test_dxf_даёт_все_семь_комнат(self) -> None:
+        from app.model_import import read_any
+        model = read_any("модель.dxf", self.DXF.read_bytes())
+        self.assertEqual(len(model.rooms), 7)
+
+    def test_пустые_строки_в_dxf_не_путают_комнаты(self) -> None:
+        """Из-за них комнаты слипались по две в одну."""
+        from app.model_import import read_any
+        model = read_any("модель.dxf", self.DXF.read_bytes())
+        first = model.rooms[0]
+        self.assertEqual(first.polygon[0], (0, 0))
+        self.assertEqual(first.polygon[2], (1700, 2640))
+        self.assertAlmostEqual(first.area_m2, 4.49, places=2)
+
+    def test_подписанные_площади_читаются(self) -> None:
+        from app.model_import import read_any
+        model = read_any("модель.dxf", self.DXF.read_bytes())
+        areas = sorted(r.declared_area_m2 for r in model.rooms)
+        self.assertEqual(areas, [3.66, 4.48, 4.49, 10.59, 12.23, 13.95, 19.09])
+
+    def test_архив_даёт_ещё_и_назначения(self) -> None:
+        from app.model_import import read_any
+        model = read_any("модель.zip", self.ZIP.read_bytes())
+        kinds = sorted({r.kind for r in model.rooms})
+        self.assertEqual(kinds, ["balcony", "bathroom", "bedroom", "kitchen", "living"])
+        self.assertEqual(model.ceiling_height_mm, 2700)
+        self.assertEqual(model.wall_thickness_mm, 120)
+
+    def test_замечания_автора_не_теряются(self) -> None:
+        from app.model_import import read_any
+        model = read_any("модель.zip", self.ZIP.read_bytes())
+        self.assertTrue(any("Hall" in note for note in model.notes))
+
+    def test_непонятный_файл_объясняют_словами(self) -> None:
+        from app.model_import import read_any
+        with self.assertRaises(UserError) as caught:
+            read_any("фото.jpg", "не модель".encode("utf-8"))
+        self.assertIn("непонятен", caught.exception.message)
+        self.assertIn("DXF", caught.exception.hint)
+
+    def test_чужой_dxf_не_принимают_молча(self) -> None:
+        from app.model_import import read_any
+        with self.assertRaises(UserError) as caught:
+            read_any("пустой.dxf", b"0\nSECTION\n0\nENDSEC\n0\nEOF\n")
+        self.assertIn("опорных габаритов", caught.exception.message)
+
+    def _project(self) -> int:
+        project_id = db.create_project("Моя квартира", ceiling_height_mm=2900)
+        db.update_project(project_id, declared_area_m2=74.37)
+        return project_id
+
+    def test_комнаты_встают_по_координатам(self) -> None:
+        project_id = self._project()
+        answer = self.client.post(
+            f"/api/projects/{project_id}/model",
+            files={"files": ("модель.zip", self.ZIP.read_bytes(), "application/zip")},
+        )
+        self.assertEqual(answer.status_code, 201)
+        data = answer.json()
+        self.assertEqual(data["rooms"], 7)
+        self.assertGreater(data["walls"], 0)
+
+    def test_перегородки_нужной_толщины(self) -> None:
+        project_id = self._project()
+        self.client.post(
+            f"/api/projects/{project_id}/model",
+            files={"files": ("модель.zip", self.ZIP.read_bytes(), "application/zip")},
+        )
+        inner = [w for w in db.list_walls(project_id) if w["kind"] == "inner"]
+        self.assertTrue(inner)
+        self.assertEqual({w["thickness_mm"] for w in inner}, {120})
+
+    def test_про_смену_высоты_потолка_говорят_вслух(self) -> None:
+        """Было 2,9 м, в модели 2,7 — молчать об этом нельзя."""
+        project_id = self._project()
+        data = self.client.post(
+            f"/api/projects/{project_id}/model",
+            files={"files": ("модель.zip", self.ZIP.read_bytes(), "application/zip")},
+        ).json()
+        self.assertTrue(data["ceiling_changed"])
+        self.assertEqual(data["ceiling_was_mm"], 2900)
+        self.assertEqual(data["ceiling_height_mm"], 2700)
+
+    def test_3d_строится_из_загруженной_модели(self) -> None:
+        project_id = self._project()
+        self.client.post(
+            f"/api/projects/{project_id}/model",
+            files={"files": ("модель.zip", self.ZIP.read_bytes(), "application/zip")},
+        )
+        scene = self.client.get(f"/api/projects/{project_id}/scene").json()
+        self.assertEqual(len(scene["rooms"]), 7)
+        self.assertTrue(scene["walls"])
+        self.assertEqual(scene["ceiling_height_mm"], 2700)
+
+    def test_загрузка_заменяет_прошлый_разбор(self) -> None:
+        project_id = self._project()
+        db.add_room(project_id=project_id, name="Старая", kind="other",
+                    polygon=json.dumps([[0, 0], [1000, 0], [1000, 1000], [0, 1000]]),
+                    declared_area_m2=1.0, sort_order=0)
+        self.client.post(
+            f"/api/projects/{project_id}/model",
+            files={"files": ("модель.dxf", self.DXF.read_bytes(), "application/dxf")},
+        )
+        names = [r["name"] for r in db.list_rooms(project_id)]
+        self.assertNotIn("Старая", names)
+        self.assertEqual(len(names), 7)
+
+    def test_комнаты_готовы_для_картинок(self) -> None:
+        """Ради них всё и затевалось: размеры должны дойти до художника."""
+        from app.design import room_facts
+        project_id = self._project()
+        self.client.post(
+            f"/api/projects/{project_id}/model",
+            files={"files": ("модель.zip", self.ZIP.read_bytes(), "application/zip")},
+        )
+        kitchen = [r for r in db.list_rooms(project_id) if "Кухня" in r["name"]][0]
+        facts = room_facts(project_id, int(kitchen["id"]))
+        self.assertEqual(facts.height_mm, 2700)
+        self.assertEqual(facts.width_mm, 4200)
+        self.assertEqual(facts.depth_mm, 3140)
