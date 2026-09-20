@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -2229,3 +2230,181 @@ class TestWallsCheckedAgainstDrawing(unittest.TestCase):
         prompt = build_prompt(plan, 1540, 1100, 15.24, 1.0)
         self.assertIn("Помещений 8", prompt)
         self.assertIn("хотя бы одна дверь", prompt)
+
+
+# ── Как комната будет выглядеть ──────────────────────────────────────
+
+class FakePainter:
+    """Подставной художник: отдаёт готовую картинку, в интернет не ходит."""
+
+    # Настоящий PNG размером в один пиксель — большего тут не нужно.
+    PNG = (b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+           b"\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
+           b"\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01"
+           b"\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82")
+
+    def __init__(self) -> None:
+        self.asked = ""
+
+    def draw(self, model, prompt, size="1536x1024"):
+        self.asked = prompt
+        return self.PNG
+
+
+class TestRoomFacts(TestBase):
+    """Картинка должна быть про ЭТУ комнату, а не про похожую.
+
+    Значит, и размеры, и окна надо брать из чертежа, а не выдумывать.
+    """
+
+    def _room(self) -> tuple[int, int]:
+        from app import geometry
+        project_id = db.create_project("Дизайн", ceiling_height_mm=2900)
+        room_id = db.add_room(
+            project_id=project_id, name="Гостиная", kind="living",
+            polygon=json.dumps([[0, 0], [4900, 0], [4900, 3900], [0, 3900]]),
+            declared_area_m2=19.11, sort_order=0,
+        )
+        wall_id = db.add_wall(project_id, 0, -60, 4900, -60, 250, "outer")
+        db.add_opening(wall_id, "window", 1500, 1800, 1500, sill_mm=800)
+        inner = db.add_wall(project_id, 0, 3960, 4900, 3960, 120, "inner")
+        db.add_opening(inner, "door", 2000, 900, 2100)
+        db.add_item(project_id=project_id, category="plumbing", subtype="sink",
+                    label="Мойка", x=600, y=600, width_mm=600, depth_mm=500,
+                    height_mm=850, rotation_deg=0, confidence=0.9)
+        return project_id, room_id
+
+    def test_размеры_берутся_из_чертежа(self) -> None:
+        from app.design import room_facts
+        project_id, room_id = self._room()
+        facts = room_facts(project_id, room_id)
+        self.assertEqual(facts.width_mm, 4900)
+        self.assertEqual(facts.depth_mm, 3900)
+        self.assertEqual(facts.height_mm, 2900)
+        self.assertAlmostEqual(facts.area_m2, 19.11, places=2)
+
+    def test_окна_и_двери_попадают_в_описание(self) -> None:
+        from app.design import room_facts
+        project_id, room_id = self._room()
+        facts = room_facts(project_id, room_id)
+        self.assertEqual(facts.windows, [1800])
+        self.assertEqual(facts.doors, [900])
+
+    def test_несъёмное_названо_отдельно(self) -> None:
+        """Сантехнику и кухню двигать нельзя — об этом надо сказать."""
+        from app.design import room_facts
+        project_id, room_id = self._room()
+        self.assertIn("Мойка", room_facts(project_id, room_id).fixed)
+
+    def test_описание_по_русски_и_с_запятыми(self) -> None:
+        from app.design import room_facts
+        project_id, room_id = self._room()
+        text = room_facts(project_id, room_id).как_текст()
+        self.assertIn("19,11 м²", text)
+        self.assertIn("4,9 × 3,9 м", text)
+        self.assertIn("потолок 2,9 м", text)
+        # Дробная часть отделяется запятой, как принято по-русски.
+        self.assertIsNone(re.search(r"\d\.\d", text))
+
+    def test_задание_художнику_содержит_размеры(self) -> None:
+        from app.design import room_facts, brief
+        project_id, room_id = self._room()
+        text = brief(room_facts(project_id, room_id), "scandi", "много растений")
+        self.assertIn("4,9 × 3,9 м", text)
+        self.assertIn("Скандинавский", text)
+        self.assertIn("много растений", text)
+        self.assertIn("менять их нельзя", text)
+
+
+class TestVisualisation(TestBase):
+    """Весь путь: комната плюс направление — и картинка на диске."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Дневной лимит трат — настоящий и работает. Чтобы он не мешал
+        # соседним проверкам, каждая начинает с чистого счёта.
+        with db.connect() as conn:
+            conn.execute("DELETE FROM spend")
+
+    def _room(self) -> tuple[int, int]:
+        project_id = db.create_project("Дизайн", ceiling_height_mm=2900)
+        room_id = db.add_room(
+            project_id=project_id, name="Спальня", kind="bedroom",
+            polygon=json.dumps([[0, 0], [3400, 0], [3400, 4100], [0, 4100]]),
+            declared_area_m2=13.94, sort_order=0,
+        )
+        return project_id, room_id
+
+    def test_картинка_рисуется_и_сохраняется(self) -> None:
+        from app.design import visualise
+        project_id, room_id = self._room()
+        painter = FakePainter()
+        made = visualise(project_id, room_id, "japandi", "светлое дерево",
+                         text_provider=FakeProvider("A photorealistic bedroom"),
+                         image_provider=painter)
+        self.assertEqual(made["room"], "Спальня")
+        self.assertIn("Джапанди", made["style"])
+        self.assertTrue(made["image"].startswith("/api/renders/"))
+        self.assertGreater(made["cost_rub"], 0)
+
+    def test_картинку_можно_открыть(self) -> None:
+        from app.design import visualise
+        project_id, room_id = self._room()
+        made = visualise(project_id, room_id, "loft", "",
+                         text_provider=FakeProvider("A loft bedroom"),
+                         image_provider=FakePainter())
+        answer = self.client.get(made["image"])
+        self.assertEqual(answer.status_code, 200)
+        self.assertEqual(answer.headers["content-type"], "image/png")
+
+    def test_картинки_копятся_в_галерее(self) -> None:
+        from app.design import visualise
+        project_id, room_id = self._room()
+        for style in ("scandi", "loft", "minimal"):
+            visualise(project_id, room_id, style, "",
+                      text_provider=FakeProvider("A room"),
+                      image_provider=FakePainter())
+        data = self.client.get(f"/api/projects/{project_id}/design").json()
+        self.assertEqual(len(data["pictures"]), 3)
+        self.assertEqual(len(data["rooms"]), 1)
+        self.assertTrue(data["styles"])
+
+    def test_картинку_можно_удалить(self) -> None:
+        from app.design import visualise
+        project_id, room_id = self._room()
+        made = visualise(project_id, room_id, "cosy", "",
+                         text_provider=FakeProvider("A room"),
+                         image_provider=FakePainter())
+        self.assertTrue(self.client.delete(f"/api/renders/{made['id']}").json()["deleted"])
+        data = self.client.get(f"/api/projects/{project_id}/design").json()
+        self.assertEqual(data["pictures"], [])
+
+    def test_расход_записан_в_рублях(self) -> None:
+        from app.design import visualise
+        from app import ai
+        project_id, room_id = self._room()
+        before = ai.spent_today_rub()
+        made = visualise(project_id, room_id, "classic", "",
+                         text_provider=FakeProvider("A room"),
+                         image_provider=FakePainter())
+        self.assertGreater(ai.spent_today_rub(), before)
+        self.assertAlmostEqual(made["spent_today_rub"], ai.spent_today_rub(), places=2)
+
+    def test_нет_такой_комнаты_человеческая_ошибка(self) -> None:
+        from app.design import visualise
+        project_id, _ = self._room()
+        with self.assertRaises(UserError) as caught:
+            visualise(project_id, 999999, "scandi", "",
+                      text_provider=FakeProvider("x"),
+                      image_provider=FakePainter())
+        self.assertIn("комнаты", caught.exception.message.lower())
+        self.assertNotIn("None", caught.exception.message)
+
+    def test_художнику_уходит_то_что_сочинила_модель(self) -> None:
+        from app.design import visualise
+        project_id, room_id = self._room()
+        painter = FakePainter()
+        visualise(project_id, room_id, "modern", "",
+                  text_provider=FakeProvider("  A bright modern bedroom  "),
+                  image_provider=painter)
+        self.assertEqual(painter.asked, "A bright modern bedroom")

@@ -553,6 +553,61 @@ def add_opening(
         return int(cur.lastrowid)
 
 
+# ── Визуализации ─────────────────────────────────────────────────────────
+
+def add_render(
+    room_id: int, style: str, prompt: str, model: str,
+    result_image: str, cost_rub: float,
+) -> int:
+    with connect() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO renders
+                (room_id, version, status, strictness, prompt, model,
+                 result_image, cost_usd, created_at)
+            VALUES (?, ?, 'done', ?, ?, ?, ?, ?, ?)
+            """,
+            (room_id, 1, style, prompt, model, result_image, cost_rub, now()),
+        )
+        return int(cur.lastrowid)
+
+
+def count_renders(room_id: int) -> int:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM renders WHERE room_id = ?", (room_id,)
+        ).fetchone()
+    return int(row["n"])
+
+
+def get_render(render_id: int) -> dict[str, Any] | None:
+    with connect() as conn:
+        return row_to_dict(conn.execute(
+            "SELECT * FROM renders WHERE id = ?", (render_id,)
+        ).fetchone())
+
+
+def list_renders(project_id: int) -> list[dict[str, Any]]:
+    """Все картинки проекта, свежие сверху."""
+    with connect() as conn:
+        return [dict(r) for r in conn.execute(
+            """
+            SELECT renders.*, rooms.name AS room_name, rooms.project_id
+            FROM renders JOIN rooms ON rooms.id = renders.room_id
+            WHERE rooms.project_id = ?
+            ORDER BY renders.id DESC
+            """,
+            (project_id,),
+        ).fetchall()]
+
+
+def delete_render(render_id: int) -> bool:
+    with connect() as conn:
+        return conn.execute(
+            "DELETE FROM renders WHERE id = ?", (render_id,)
+        ).rowcount > 0
+
+
 def list_walls(project_id: int) -> list[dict[str, Any]]:
     with connect() as conn:
         walls = [dict(r) for r in conn.execute(

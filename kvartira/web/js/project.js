@@ -14,9 +14,10 @@ const SECTIONS = [
         href: (id) => `/project/${id}/plan`, ready: true,
     },
     {
-        key: 'rooms', icon: '🚪', title: 'Комнаты',
-        text: 'Проверьте и поправьте то, что распознала программа. Здесь же — размеры и отделка.',
-        href: (id) => `/project/${id}/rooms`, ready: false,
+        key: 'design', icon: '✨', title: 'Как будет выглядеть',
+        text: 'Выберите комнату и направление — программа нарисует, как она '
+            + 'может выглядеть. Размеры и окна берутся из вашего чертежа.',
+        href: (id) => `/project/${id}/design`, ready: true,
     },
     {
         key: 'refs', icon: '🖼️', title: 'Референсы',
@@ -24,19 +25,15 @@ const SECTIONS = [
         href: (id) => `/project/${id}/references`, ready: false,
     },
     {
+        key: 'rooms', icon: '🚪', title: 'Комнаты',
+        text: 'Проверьте и поправьте то, что распознала программа. Здесь же — размеры и отделка.',
+        href: (id) => `/project/${id}/rooms`, ready: false,
+    },
+    {
         key: 'model', icon: '🧱', title: '3D-модель',
-        text: 'Объёмная модель квартиры, построенная по вашему плану. Можно крутить и рассматривать.',
+        text: 'Объёмная модель по вашему плану — чтобы посмотреть на квартиру '
+            + 'сверху и прикинуть расстановку. Для красивых картинок она не нужна.',
         href: (id) => `/project/${id}/viewer`, ready: true,
-    },
-    {
-        key: 'renders', icon: '✨', title: 'Визуализации',
-        text: 'Фотореалистичные картинки комнат с нескольких ракурсов. С версиями и сравнением.',
-        href: (id) => `/project/${id}/renders`, ready: false,
-    },
-    {
-        key: 'tour', icon: '🚶', title: '3D-тур',
-        text: 'Прогулка по квартире от первого лица: WASD и мышь на компьютере, касания на телефоне.',
-        href: (id) => `/project/${id}/tour`, ready: false,
     },
 ];
 
@@ -113,7 +110,7 @@ function settingsCard(project) {
         el('div', { class: 'field-pair' }, [
             el('div', { class: 'field' }, [
                 el('label', { text: 'Высота потолка, мм' }), height,
-                el('div', { class: 'hint', text: 'Влияет на 3D-модель и ощущение объёма.' }),
+                el('div', { class: 'hint', text: 'Влияет на пропорции комнаты на картинках.' }),
             ]),
             el('div', { class: 'field' }, [
                 el('label', { text: 'Общая площадь, м²' }), area,

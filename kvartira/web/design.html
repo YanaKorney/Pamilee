@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Дизайн · Моя квартира</title>
+<link rel="stylesheet" href="/static/css/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>&#127968;</text></svg>">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="/">
+      <span class="brand-mark">&#127968;</span>
+      Моя квартира
+    </a>
+    <span class="spacer"></span>
+    <a class="btn btn-quiet" href="/settings">Настройки</a>
+  </div>
+</header>
+
+<main>
+  <div class="crumbs">
+    <a href="/">Мои проекты</a> → <a id="crumb-project" href="#">…</a> → Дизайн
+  </div>
+
+  <h1>Как будет выглядеть</h1>
+  <p class="lead">
+    Выберите комнату и направление — программа нарисует, как она может
+    выглядеть. Размеры, окна и двери берутся из вашего чертежа, поэтому
+    картинка получается про вашу комнату, а не про похожую.
+  </p>
+
+  <div id="work"><div class="spinner"></div></div>
+  <div id="gallery" style="margin-top:30px"></div>
+</main>
+
+<div class="lightbox" id="lightbox" hidden>
+  <button class="close" id="lightbox-close" aria-label="Закрыть">×</button>
+  <img id="lightbox-img" alt="">
+</div>
+
+<script type="module" src="/static/js/design.js"></script>
+</body>
+</html>

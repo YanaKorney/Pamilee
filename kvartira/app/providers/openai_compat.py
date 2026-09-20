@@ -368,3 +368,68 @@ class OpenAiCompatProvider:
             model=served_model,
             finish_reason=finish,
         )
+
+    # ── Рисование ─────────────────────────────────────────────────────
+
+    def draw(
+        self,
+        model: str,
+        prompt: str,
+        size: str = "1536x1024",
+    ) -> bytes:
+        """Просит модель нарисовать картинку и возвращает её байты.
+
+        Сервисы отдают результат по-разному: одни ссылкой, другие сразу
+        картинкой в теле ответа. Понимаем оба способа.
+        """
+        body: dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            "n": 1,
+            "size": size,
+        }
+        try:
+            with self._client() as client:
+                response = client.post(
+                    f"{self.base_url}/images/generations",
+                    headers=self._headers(),
+                    json=body,
+                )
+        except httpx.HTTPError as exc:
+            raise self._network_error(exc) from exc
+
+        if response.status_code != 200:
+            raise self._explain(response)
+
+        try:
+            rows = response.json().get("data") or []
+            row = rows[0]
+        except Exception as exc:
+            raise UserError(
+                "Сервис прислал ответ, который не удалось прочитать.",
+                "Попробуйте ещё раз или выберите другую модель в «Настройках».",
+                technical=response.text[:200],
+            ) from exc
+
+        if row.get("b64_json"):
+            return base64.b64decode(row["b64_json"])
+
+        link = row.get("url")
+        if not link:
+            raise UserError(
+                "Сервис не прислал картинку.",
+                "Попробуйте ещё раз или выберите другую модель в «Настройках».",
+                technical=str(row)[:200],
+            )
+        try:
+            with self._client() as client:
+                picture = client.get(link)
+        except httpx.HTTPError as exc:
+            raise self._network_error(exc) from exc
+        if picture.status_code != 200:
+            raise UserError(
+                "Картинка нарисована, но скачать её не удалось.",
+                "Попробуйте ещё раз.",
+                technical=f"{picture.status_code} при загрузке результата",
+            )
+        return picture.content

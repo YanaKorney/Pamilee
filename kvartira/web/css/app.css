@@ -476,3 +476,58 @@ input:focus, textarea:focus, select:focus {
     border-radius: 999px;
     pointer-events: none;
 }
+
+/* ── Дизайн комнаты: выбор и картинки ──────────────────────────────── */
+
+.chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 10px 0 4px;
+}
+
+.chip {
+    font: inherit;
+    font-size: 15px;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 8px 16px;
+    cursor: pointer;
+    transition: background .12s, border-color .12s;
+}
+.chip:hover { background: var(--surface-2); border-color: var(--muted); }
+
+.chip-on {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+    color: var(--accent-dark);
+    font-weight: 550;
+}
+
+.btn-small { padding: 6px 12px; font-size: 14px; }
+
+.card-picture {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 12px;
+}
+
+.render {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: var(--radius-sm);
+    cursor: zoom-in;
+    background: var(--surface-2);
+}
+
+.pictures {
+    display: grid;
+    gap: 18px;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    margin-top: 12px;
+}

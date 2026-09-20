@@ -19,7 +19,7 @@ import json
 
 from contextlib import asynccontextmanager
 
-from . import __version__, ai, db, geometry, plan_analysis, plan_files, plan_vector, storage
+from . import __version__, ai, db, design, geometry, plan_analysis, plan_files, plan_vector, storage
 from .config import ENV_PATH, WEB_DIR, clean_secret, settings
 from .errors import (
     UserError,
@@ -430,6 +430,95 @@ def api_export(project_id: int) -> Response:
     )
 
 
+# ── Дизайн: как комната будет выглядеть ──────────────────────────────────
+
+class DesignWish(BaseModel):
+    room_id: int
+    style: str = Field(default="scandi", max_length=40)
+    wishes: str = Field(default="", max_length=600)
+    shape: str = Field(default="wide", max_length=20)
+
+
+@app.get("/api/projects/{project_id}/design")
+def api_design_room_list(project_id: int) -> dict[str, Any]:
+    """Комнаты, стили и уже нарисованное."""
+    _require_project(project_id)
+    rooms = []
+    for room in db.list_rooms(project_id):
+        facts = design.room_facts(project_id, int(room["id"]))
+        if facts is None:
+            continue
+        rooms.append({
+            "id": int(room["id"]),
+            "name": facts.name,
+            "kind": facts.kind,
+            "area_m2": facts.area_m2,
+            "facts": facts.как_текст(),
+        })
+
+    pictures = []
+    for row in db.list_renders(project_id):
+        pictures.append({
+            "id": int(row["id"]),
+            "room": row["room_name"],
+            "style": design.STYLES.get(row["strictness"], row["strictness"]),
+            "image": f"/api/renders/{row['id']}/image",
+            "cost_rub": row["cost_usd"],
+        })
+
+    return {
+        "rooms": rooms,
+        "styles": [{"id": key, "title": title}
+                   for key, title in design.STYLES.items()],
+        "pictures": pictures,
+        "price_rub": ai.image_price_rub(),
+        "spent_today_rub": ai.spent_today_rub(),
+        "ready": settings.image_ready,
+    }
+
+
+@app.post("/api/projects/{project_id}/design")
+def api_design_make(project_id: int, wish: DesignWish) -> dict[str, Any]:
+    """«Показать, как будет выглядеть»."""
+    _require_project(project_id)
+    return design.visualise(
+        project_id, wish.room_id, wish.style, wish.wishes, wish.shape
+    )
+
+
+@app.get("/api/renders/{render_id}/image")
+def api_render_image(render_id: int) -> FileResponse:
+    row = db.get_render(render_id)
+    if row is None:
+        raise UserError("Картинка не найдена.", "Обновите страницу.", status=404)
+    path = (storage.project_dir(_render_project(render_id))
+            / "renders" / row["result_image"])
+    if not path.exists():
+        raise UserError(
+            "Файл картинки пропал с диска.",
+            "Нарисуйте заново.", status=404,
+        )
+    return FileResponse(path, media_type="image/png")
+
+
+@app.delete("/api/renders/{render_id}")
+def api_render_delete(render_id: int) -> dict[str, bool]:
+    return {"deleted": db.delete_render(render_id)}
+
+
+def _render_project(render_id: int) -> int:
+    row = db.get_render(render_id)
+    if row is None:
+        raise UserError("Картинка не найдена.", "Обновите страницу.", status=404)
+    with db.connect() as conn:
+        found = conn.execute(
+            "SELECT project_id FROM rooms WHERE id = ?", (row["room_id"],)
+        ).fetchone()
+    if found is None:
+        raise UserError("Картинка не найдена.", "Обновите страницу.", status=404)
+    return int(found["project_id"])
+
+
 @app.get("/api/projects/{project_id}/scene")
 def api_scene(project_id: int) -> dict[str, Any]:
     """Всё, что нужно для построения 3D-модели, в миллиметрах."""
@@ -557,6 +646,11 @@ def page_project(project_id: int) -> FileResponse:
 @app.get("/project/{project_id}/plan")
 def page_plan(project_id: int) -> FileResponse:
     return _page("plan.html")
+
+
+@app.get("/project/{project_id}/design")
+def page_design(project_id: int) -> FileResponse:
+    return _page("design.html")
 
 
 @app.get("/project/{project_id}/viewer")

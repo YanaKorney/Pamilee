@@ -175,6 +175,11 @@ def check_access() -> dict[str, Any]:
 
 # ── Расходы ───────────────────────────────────────────────────────────────
 
+def image_price_rub() -> float:
+    """Во сколько обходится одна картинка."""
+    return round(settings.price_image_rub, 2)
+
+
 def text_cost_rub(input_tokens: int, output_tokens: int) -> float:
     """Во сколько обошёлся запрос к текстовой модели, в рублях."""
     return round(
