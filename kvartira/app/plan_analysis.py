@@ -831,7 +831,10 @@ def analyse_page(
     service = provider or ai.plan_provider()
     # Запас по длине ответа: список комнат с мебелью бывает объёмным,
     # а оборванный ответ теряется целиком.
-    answer = service.ask(ai.plan_model(), prompt, images=[image], max_tokens=32000)
+    # Сервис держит на счету сумму, посчитанную по этому числу, а не по
+    # факту. Разбор большого плана в него укладывается, а резерв выходит
+    # вдвое меньше прежнего.
+    answer = service.ask(ai.plan_model(), prompt, images=[image], max_tokens=16000)
 
     result = interpret(parse_answer(answer.text, answer.finish_reason), plan, factor)
     result.input_tokens = answer.input_tokens

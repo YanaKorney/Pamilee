@@ -193,9 +193,34 @@ function modelsCard(aiSettings) {
     );
     const image = modelField(
         'Модель, которая рисует визуализации',
-        'Нужна такая, что принимает картинку на вход, — например FLUX.2.',
+        'Только рисующая: с flux, imagen или dall-e в названии. Текстовая '
+        + 'картинку не нарисует, а деньги за попытку сервис удержит.',
         'list-image', aiSettings.image.model,
     );
+    const design = modelField(
+        'Модель, которая составляет задание художнику',
+        'Работа простая — один абзац текста. Дорогая модель тут не нужна, '
+        + 'берите подешевле: на цену картинки это почти не влияет, а на '
+        + 'резерв по счёту — очень.',
+        'list-text', (aiSettings.design && aiSettings.design.model) || '',
+    );
+
+    // Если для рисования выбрана текстовая модель — сказать об этом сразу,
+    // а не когда сервис удержит деньги за невозможную попытку.
+    const wrongPick = el('div', { class: 'notice notice-error', hidden: true });
+    function checkPick() {
+        const bad = aiSettings.image.draws === false;
+        wrongPick.hidden = !bad;
+        if (bad) {
+            wrongPick.replaceChildren(
+                el('strong', { text: `«${aiSettings.image.model}» не рисует картинки.` }),
+                el('div', { class: 'small', text:
+                    'Выберите модель для изображений — иначе попытка нарисовать '
+                    + 'закончится списанием без результата.' }),
+            );
+        }
+    }
+    checkPick();
 
     const save = el('button', { class: 'btn btn-primary', text: 'Сохранить' });
     const reload = el('button', { class: 'btn', text: 'Обновить список моделей' });
@@ -204,10 +229,13 @@ function modelsCard(aiSettings) {
     save.addEventListener('click', async () => {
         save.disabled = true;
         try {
-            await api.patch('/api/ai/settings', {
+            const saved = await api.patch('/api/ai/settings', {
                 plan_model: plan.input.value.trim(),
                 image_model: image.input.value.trim(),
+                design_model: design.input.value.trim(),
             });
+            aiSettings.image = saved.image;
+            checkPick();
             toast('Модели сохранены', '', 'ok');
         } catch (err) {
             showError(err);
@@ -243,8 +271,10 @@ function modelsCard(aiSettings) {
             text: 'Названия берутся прямо из каталога вашего сервиса — '
                 + 'переписывать их вручную не нужно.',
         }),
+        wrongPick,
         plan.node,
         image.node,
+        design.node,
         el('div', { class: 'row' }, [save, reload]),
         note,
     ]);

@@ -335,8 +335,10 @@ class TestProviderErrors(unittest.TestCase):
 
     def test_no_money(self) -> None:
         error = self._explain(402)
-        self.assertIn("деньги", error.message.lower())
+        self.assertIn("не хватает денег", error.message.lower())
         self.assertIn("Пополните", error.hint)
+        # Человек должен понять, почему списалось больше, чем он ждал.
+        self.assertIn("потолку", error.hint)
 
     def test_unknown_model(self) -> None:
         error = self._explain(404)
@@ -2678,3 +2680,79 @@ class TestReferenceLeadsTheLook(TestBase):
                   text_provider=SeeingProvider(), image_provider=FakePainter())
         later = self.client.get(f"/api/projects/{project_id}/design").json()
         self.assertEqual(later["pictures"][0]["references"], [])
+
+
+# ── Деньги: за что и почему столько ──────────────────────────────────
+
+class TestMoneyIsNotWasted(TestBase):
+    """«Почему так дорого?»
+
+    Сервис резервирует деньги не по факту, а по потолку модели. Значит,
+    просить надо ровно столько, сколько нужно, а рисовать — только
+    у той модели, которая умеет рисовать. Иначе резерв считается по
+    текстовой модели и съедает весь остаток за одну попытку.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        with db.connect() as conn:
+            conn.execute("DELETE FROM spend")
+
+    def test_текстовой_моделью_рисовать_не_дают(self) -> None:
+        from app.ai import check_draws
+        with self.assertRaises(UserError) as caught:
+            check_draws("claude-opus-5")
+        self.assertIn("не умеет рисовать", caught.exception.message)
+        self.assertIn("Настройки", caught.exception.hint)
+
+    def test_рисующую_модель_пропускают(self) -> None:
+        from app.ai import check_draws, can_draw
+        for name in ("flux.2-pro", "dall-e-3", "imagen-4"):
+            with self.subTest(model=name):
+                self.assertTrue(can_draw(name))
+                check_draws(name)
+
+    def test_задание_художнику_просит_один_абзац(self) -> None:
+        """Резерв считается по этому числу — держим его маленьким."""
+        from app.design import MAX_BRIEF_TOKENS
+        self.assertLessEqual(MAX_BRIEF_TOKENS, 800)
+
+    def test_потолок_уходит_в_запрос(self) -> None:
+        from app.providers.openai_compat import OpenAiCompatProvider
+        provider = OpenAiCompatProvider("https://x/v1", "key", "Тест")
+        body = provider._build_body("m", "вопрос", None, None, 600, False)
+        self.assertEqual(body["max_tokens"], 600,
+                         "Без этого сервис считает резерв по максимуму модели")
+
+    def test_описание_можно_поручить_дешёвой_модели(self) -> None:
+        from app import ai
+        self.assertEqual(ai.design_model(), ai.plan_model())
+        self.client.patch("/api/ai/settings", json={"design_model": "дешёвая"})
+        self.assertEqual(ai.design_model(), "дешёвая")
+        self.assertEqual(ai.plan_model(), ai.plan_model())
+
+    def test_страница_дизайна_предупреждает_заранее(self) -> None:
+        project_id = db.create_project("Проверка", ceiling_height_mm=2900)
+        self.client.patch("/api/ai/settings", json={"image_model": "claude-opus-5"})
+        data = self.client.get(f"/api/projects/{project_id}/design").json()
+        self.assertFalse(data["draws"])
+        self.client.patch("/api/ai/settings", json={"image_model": "flux.2-pro"})
+        data = self.client.get(f"/api/projects/{project_id}/design").json()
+        self.assertTrue(data["draws"])
+
+    def test_за_описание_не_платим_если_рисовать_нечем(self) -> None:
+        """Сначала проверяем, есть ли чем рисовать, и только потом платим."""
+        from app import ai
+        from app.design import visualise
+        project_id = db.create_project("Проверка", ceiling_height_mm=2900)
+        room_id = db.add_room(
+            project_id=project_id, name="Кухня", kind="kitchen",
+            polygon=json.dumps([[0, 0], [3000, 0], [3000, 3000], [0, 3000]]),
+            declared_area_m2=9.0, sort_order=0,
+        )
+        self.client.patch("/api/ai/settings", json={"image_model": "claude-opus-5"})
+        before = ai.spent_today_rub()
+        with self.assertRaises(UserError):
+            visualise(project_id, room_id, "scandi", "",
+                      text_provider=FakeProvider("текст"))
+        self.assertEqual(ai.spent_today_rub(), before, "Деньги не тронуты")

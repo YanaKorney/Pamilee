@@ -148,6 +148,10 @@ def room_facts(project_id: int, room_id: int) -> RoomFacts | None:
 
 # ── Задание художнику ────────────────────────────────────────────────
 
+# Задание художнику — один абзац. Больше просить незачем, а сервис
+# держит на счету сумму, посчитанную именно по этому числу.
+MAX_BRIEF_TOKENS = 600
+
 SIZES = {
     "wide": "1536x1024",
     "square": "1024x1024",
@@ -262,10 +266,13 @@ def compose(facts: RoomFacts, style: str, wishes: str, provider=None,
     service = provider or ai.plan_provider()
     colours = main_colours(references or [])
     answer = service.ask(
-        ai.plan_model(),
+        ai.design_model(),
         brief(facts, style, wishes, len(references or []), colours),
         images=references or None,
-        max_tokens=900,
+        # Просим ровно столько, сколько нужно на один абзац. Сервис
+        # резервирует деньги по этому числу, а не по факту: оставишь
+        # его большим — и на счету «зависнет» лишнее.
+        max_tokens=MAX_BRIEF_TOKENS,
     )
     text = " ".join(answer.text.split()).strip().strip('"')
     if not text:
@@ -350,6 +357,10 @@ def visualise(
         )
 
     ai.check_daily_limit()
+    # Проверяем ДО того, как платить за описание: если рисовать нечем,
+    # незачем тратиться на задание художнику.
+    if image_provider is None:
+        ai.check_draws(ai.image_model())
 
     references, reference_names = reference_images(project_id, reference_ids or [])
     prompt, answer = compose(facts, style, wishes, text_provider, references)

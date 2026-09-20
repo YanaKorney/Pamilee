@@ -12,12 +12,14 @@ from . import db
 from .config import settings
 from .errors import UserError, ai_not_configured, get_logger
 from .providers import ModelInfo, OpenAiCompatProvider
+from .providers.base import guess_kind
 
 log = get_logger()
 
 # Ключи в таблице настроек
 PLAN_MODEL_KEY = "plan_model"
 IMAGE_MODEL_KEY = "image_model"
+DESIGN_MODEL_KEY = "design_model"
 
 
 def plan_model() -> str:
@@ -28,6 +30,39 @@ def plan_model() -> str:
 def image_model() -> str:
     """Модель, которая рисует визуализации."""
     return db.get_setting(IMAGE_MODEL_KEY) or settings.image_model
+
+
+def design_model() -> str:
+    """Модель, которая составляет задание художнику.
+
+    Работа простая — один абзац текста, — и самая дорогая модель тут
+    не нужна. Если отдельная не выбрана, берётся та же, что читает
+    чертёж.
+    """
+    return db.get_setting(DESIGN_MODEL_KEY) or plan_model()
+
+
+def can_draw(model: str) -> bool:
+    """Умеет ли выбранная модель рисовать картинки."""
+    return guess_kind(model) == "image"
+
+
+def check_draws(model: str) -> None:
+    """Не даёт просить картинку у модели, которая рисовать не умеет.
+
+    Сервис резервирует деньги по потолку модели, а у текстовых он
+    огромный. Одна такая ошибка съедает весь остаток на счету, и
+    человеку непонятно, за что.
+    """
+    if can_draw(model):
+        return
+    raise UserError(
+        f"Модель «{model}» не умеет рисовать картинки.",
+        "Откройте «Настройки» и выберите в строке «Создание визуализаций» "
+        "модель для картинок — например, из тех, в названии которых есть "
+        "flux, imagen или dall-e. Текстовая модель картинку не нарисует, "
+        "а деньги за попытку сервис удержит.",
+    )
 
 
 def plan_provider() -> OpenAiCompatProvider:

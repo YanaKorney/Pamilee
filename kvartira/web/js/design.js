@@ -76,6 +76,21 @@ function draw() {
         ]));
     }
 
+    if (state.ready && !state.draws) {
+        blocks.push(el('div', { class: 'notice notice-error' }, [
+            el('strong', { text: `Модель «${state.image_model}» не умеет рисовать картинки.` }),
+            el('div', { class: 'small', style: 'margin-top:4px' }, [
+                document.createTextNode('Откройте '),
+                el('a', { href: '/settings', text: '«Настройки»' }),
+                document.createTextNode(' и выберите в строке «Создание визуализаций» '
+                    + 'модель для картинок — с flux, imagen или dall-e в названии. '
+                    + 'Текстовая модель картинку не нарисует, а деньги за попытку '
+                    + 'сервис удержит: он резервирует их по потолку модели, а у '
+                    + 'текстовых потолок огромный.'),
+            ]),
+        ]));
+    }
+
     if (!state.rooms.length) {
         blocks.push(el('div', { class: 'notice notice-warn' }, [
             el('strong', { text: 'Комнаты ещё не распознаны.' }),
@@ -121,7 +136,7 @@ function draw() {
         class: 'btn btn-primary', style: 'margin-top:16px',
         text: 'Показать, как будет выглядеть',
     });
-    button.disabled = !room || !state.ready;
+    button.disabled = !room || !state.ready || !state.draws;
     button.addEventListener('click', () => make(button, wishes));
 
     blocks.push(el('div', { style: 'margin-top:16px' }, [
@@ -129,6 +144,19 @@ function draw() {
         el('span', { class: 'muted small', style: 'margin-left:12px',
             text: `Одна картинка — около ${String(state.price_rub).replace('.', ',')} ₽. `
                 + `Сегодня потрачено ${String(state.spent_today_rub).replace('.', ',')} ₽.` }),
+    ]));
+
+    blocks.push(el('details', { class: 'tech', style: 'margin-top:8px' }, [
+        el('summary', { text: 'Чем рисуем и за что платим' }),
+        el('div', { class: 'small' }, [
+            el('div', { text: `Задание художнику составляет: ${state.design_model}` }),
+            el('div', { text: `Рисует: ${state.image_model}` }),
+            el('div', { class: 'muted', style: 'margin-top:6px',
+                text: 'Сервис резервирует деньги не по факту, а по потолку модели. '
+                    + 'Поэтому программа просит у неё ровно один абзац: так резерв '
+                    + 'выходит в копейки. Модель подешевле можно выбрать в '
+                    + '«Настройках» — для одного абзаца дорогая не нужна.' }),
+        ]),
     ]));
 
     if (chosenRefs.size) {

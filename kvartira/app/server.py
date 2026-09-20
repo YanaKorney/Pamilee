@@ -541,6 +541,9 @@ def api_design_room_list(project_id: int) -> dict[str, Any]:
         "price_rub": ai.image_price_rub(),
         "spent_today_rub": ai.spent_today_rub(),
         "ready": settings.image_ready,
+        "image_model": ai.image_model(),
+        "design_model": ai.design_model(),
+        "draws": ai.can_draw(ai.image_model()),
     }
 
 
@@ -626,6 +629,7 @@ class AiKeys(BaseModel):
 class AiSettingsPatch(BaseModel):
     plan_model: str | None = Field(default=None, max_length=200)
     image_model: str | None = Field(default=None, max_length=200)
+    design_model: str | None = Field(default=None, max_length=200)
 
 
 @app.get("/api/ai/settings")
@@ -642,6 +646,13 @@ def api_ai_settings() -> dict[str, Any]:
             "ready": settings.image_ready,
             "base_url": settings.image_base_url,
             "key_hint": settings.mask(settings.image_api_key),
+            "draws": ai.can_draw(ai.image_model()),
+        },
+        "design": {
+            "model": ai.design_model(),
+            "ready": settings.plan_ready,
+            "base_url": settings.plan_base_url,
+            "key_hint": settings.mask(settings.plan_api_key),
         },
         "settings_file": str(ENV_PATH),
     }
@@ -653,6 +664,8 @@ def api_set_ai_settings(data: AiSettingsPatch) -> dict[str, Any]:
         db.set_setting(ai.PLAN_MODEL_KEY, data.plan_model.strip())
     if data.image_model is not None:
         db.set_setting(ai.IMAGE_MODEL_KEY, data.image_model.strip())
+    if data.design_model is not None:
+        db.set_setting(ai.DESIGN_MODEL_KEY, data.design_model.strip())
     return api_ai_settings()
 
 
