@@ -557,17 +557,18 @@ def add_opening(
 
 def add_render(
     room_id: int, style: str, prompt: str, model: str,
-    result_image: str, cost_rub: float,
+    result_image: str, cost_rub: float, references: str = "",
 ) -> int:
     with connect() as conn:
         cur = conn.execute(
             """
             INSERT INTO renders
                 (room_id, version, status, strictness, prompt, model,
-                 result_image, cost_usd, created_at)
-            VALUES (?, ?, 'done', ?, ?, ?, ?, ?, ?)
+                 base_image, result_image, cost_usd, created_at)
+            VALUES (?, ?, 'done', ?, ?, ?, ?, ?, ?, ?)
             """,
-            (room_id, 1, style, prompt, model, result_image, cost_rub, now()),
+            (room_id, 1, style, prompt, model, references, result_image,
+             cost_rub, now()),
         )
         return int(cur.lastrowid)
 

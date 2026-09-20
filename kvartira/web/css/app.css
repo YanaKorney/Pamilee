@@ -537,3 +537,6 @@ input:focus, textarea:focus, select:focus {
     box-shadow: 0 0 0 2px var(--accent-soft), var(--shadow);
 }
 .dropzone.busy { opacity: .6; pointer-events: none; }
+
+.render.faded { opacity: .45; filter: grayscale(.35); }
+.render.faded:hover { opacity: .8; filter: none; }

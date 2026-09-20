@@ -2564,3 +2564,117 @@ class TestReferences(TestBase):
         visualise(first, room_id, "scandi", "", reference_ids=alien,
                   text_provider=looker, image_provider=FakePainter())
         self.assertEqual(looker.seen, 0)
+
+
+# ── Референс должен быть главнее названия стиля ──────────────────────
+
+def _flat_picture(red: float, green: float, blue: float,
+                  width: int = 120, height: int = 90) -> bytes:
+    import pymupdf
+    document = pymupdf.open()
+    page = document.new_page(width=width, height=height)
+    page.draw_rect(page.rect, color=None, fill=(red, green, blue))
+    data = page.get_pixmap().tobytes("png")
+    document.close()
+    return data
+
+
+class TestReferenceLeadsTheLook(TestBase):
+    """Результаты вышли далеки от референсов — и вот почему.
+
+    Название стиля стояло в задании первым, а картинки — припиской.
+    Плюс между картинкой и результатом лежал пересказ словами, а он
+    теряет как раз цвет: «тёплый и уютный» рисуется и светлым дубом,
+    и тёмным орехом.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        with db.connect() as conn:
+            conn.execute("DELETE FROM spend")
+
+    def _room(self) -> tuple[int, int]:
+        project_id = db.create_project("Кухня", ceiling_height_mm=2900)
+        room_id = db.add_room(
+            project_id=project_id, name="Кухня", kind="kitchen",
+            polygon=json.dumps([[0, 0], [3400, 0], [3400, 3600], [0, 3600]]),
+            declared_area_m2=12.23, sort_order=0,
+        )
+        return project_id, room_id
+
+    def test_тёмный_референс_даёт_тёмную_палитру(self) -> None:
+        from app.design import palette
+        dark = palette(_flat_picture(0.17, 0.13, 0.10))
+        self.assertTrue(dark)
+        self.assertIn("near-black", dark[0]["english"])
+
+    def test_светлый_референс_даёт_светлую_палитру(self) -> None:
+        from app.design import palette
+        light = palette(_flat_picture(0.96, 0.95, 0.92))
+        self.assertIn("white", light[0]["english"])
+
+    def test_цвета_нескольких_референсов_складываются(self) -> None:
+        from app.design import main_colours
+        together = main_colours([_flat_picture(0.17, 0.13, 0.10),
+                                 _flat_picture(0.96, 0.95, 0.92)])
+        words = " ".join(c["english"] for c in together)
+        self.assertIn("near-black", words)
+        self.assertIn("white", words)
+        self.assertEqual(sum(c["доля"] for c in together), 100)
+
+    def test_с_референсами_главные_они_а_не_стиль(self) -> None:
+        from app.design import brief, RoomFacts, main_colours
+        facts = RoomFacts("Кухня", "kitchen", 12.23, 3400, 3600, 2900)
+        text = brief(facts, "cosy", "", references=1,
+                     colours=main_colours([_flat_picture(0.17, 0.13, 0.10)]))
+        self.assertIn("ГЛАВНОЕ — КАРТИНКИ", text)
+        self.assertIn("лишь подсказка", text)
+        self.assertIn("слушай картинки", text)
+        self.assertLess(text.index("ГЛАВНОЕ"), text.index("лишь подсказка"))
+
+    def test_точные_цвета_уходят_числами(self) -> None:
+        """Пересказ словами теряет цвет — поэтому шлём коды."""
+        from app.design import brief, RoomFacts, main_colours
+        facts = RoomFacts("Кухня", "kitchen", 12.23, 3400, 3600, 2900)
+        text = brief(facts, "cosy", "", references=1,
+                     colours=main_colours([_flat_picture(0.17, 0.13, 0.10)]))
+        self.assertRegex(text, r"#[0-9a-f]{6}")
+        self.assertIn("Держись этих цветов", text)
+
+    def test_без_референсов_стиль_снова_главный(self) -> None:
+        from app.design import brief, RoomFacts
+        facts = RoomFacts("Кухня", "kitchen", 12.23, 3400, 3600, 2900)
+        text = brief(facts, "cosy", "")
+        self.assertIn("ЖЕЛАЕМЫЙ ДИЗАЙН", text)
+        self.assertNotIn("ГЛАВНОЕ — КАРТИНКИ", text)
+
+    def test_пожелания_хозяйки_важнее_всего(self) -> None:
+        from app.design import brief, RoomFacts
+        facts = RoomFacts("Кухня", "kitchen", 12.23, 3400, 3600, 2900)
+        text = brief(facts, "cosy", "без верхних шкафов", references=1)
+        self.assertIn("важнее всего", text)
+        self.assertIn("без верхних шкафов", text)
+
+    def test_видно_по_каким_картинкам_нарисовано(self) -> None:
+        from app.design import visualise
+        project_id, room_id = self._room()
+        files = [("files", ("тёмная-кухня.png", _flat_picture(0.17, 0.13, 0.10),
+                            "image/png"))]
+        self.client.post(f"/api/projects/{project_id}/references", files=files)
+        ids = [r["id"] for r in
+               self.client.get(f"/api/projects/{project_id}/references").json()["references"]]
+
+        made = visualise(project_id, room_id, "cosy", "", reference_ids=ids,
+                         text_provider=SeeingProvider(), image_provider=FakePainter())
+        self.assertEqual(made["references"], ["тёмная-кухня.png"])
+
+        later = self.client.get(f"/api/projects/{project_id}/design").json()
+        self.assertEqual(later["pictures"][0]["references"], ["тёмная-кухня.png"])
+
+    def test_без_референсов_это_тоже_видно(self) -> None:
+        from app.design import visualise
+        project_id, room_id = self._room()
+        visualise(project_id, room_id, "cosy", "",
+                  text_provider=SeeingProvider(), image_provider=FakePainter())
+        later = self.client.get(f"/api/projects/{project_id}/design").json()
+        self.assertEqual(later["pictures"][0]["references"], [])

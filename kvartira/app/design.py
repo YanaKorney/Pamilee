@@ -155,8 +155,14 @@ SIZES = {
 
 
 def brief(facts: RoomFacts, style: str, wishes: str,
-          references: int = 0) -> str:
-    """Что мы просим сочинить — по-русски, чтобы было видно человеку."""
+          references: int = 0, colours: list[dict[str, Any]] | None = None) -> str:
+    """Что мы просим сочинить — по-русски, чтобы было видно человеку.
+
+    Когда приложены референсы, главный тут они, а не название стиля.
+    Иначе выходит наоборот: «уютный современный» рисуется по своему
+    разумению, а картинки, ради которых всё затевалось, остаются
+    припиской.
+    """
     style_words = STYLES.get(style, style or "на ваш вкус")
     room_word = ROOM_WORDS.get(facts.kind, facts.kind)
 
@@ -181,21 +187,52 @@ def brief(facts: RoomFacts, style: str, wishes: str,
     if facts.fixed:
         lines.append("— переносить нельзя: " + ", ".join(facts.fixed))
 
-    lines += [
-        "",
-        f"ЖЕЛАЕМЫЙ ДИЗАЙН: {style_words}",
-    ]
-    if wishes.strip():
-        lines.append(f"ПОЖЕЛАНИЯ ХОЗЯЙКИ: {wishes.strip()}")
-
     if references:
         lines += [
             "",
-            f"К письму приложено картинок «вот так мне нравится»: {references}.",
-            "Посмотри на них и возьми оттуда настроение: цвета, материалы,"
-            " фактуры, характер мебели, каким должен быть свет.",
-            "Брать оттуда планировку НЕ надо — комната своя, её размеры выше.",
+            "ГЛАВНОЕ — КАРТИНКИ «ВОТ ТАК МНЕ НРАВИТСЯ».",
+            f"Их приложено: {references}. Они показывают желаемый вид точнее",
+            "любых слов, поэтому именно по ним и надо рисовать.",
+            "",
+            "Разгляди их и перенеси в задание:",
+            "— какого цвета фасады, стены, пол, столешница;",
+            "— из чего всё сделано: дерево и какое, камень, крашеный МДФ,",
+            "  стекло, металл и какой — латунь, чёрный, сталь;",
+            "— матовое или глянцевое, гладкое или с фактурой;",
+            "— каким должен быть свет: тёплый или холодный, откуда идёт,",
+            "  есть ли подсветка под шкафами, какие светильники;",
+            "— общее настроение: светлое и воздушное или тёмное и плотное.",
         ]
+        if colours:
+            lines += [
+                "",
+                "Главные цвета с этих картинок посчитаны точно:",
+            ]
+            for colour in colours:
+                lines.append(
+                    f"— {colour['hex']} ({colour['english']}, "
+                    f"{colour['по-русски']}) — {colour['доля']} % картинки"
+                )
+            lines.append(
+                "Держись этих цветов. Если на картинках темно — рисуй тёмное,"
+            )
+            lines.append(
+                "если светло — светлое. Не подменяй их «уютными» по умолчанию."
+            )
+        lines += [
+            "",
+            f"Название направления — «{style_words}» — тут лишь подсказка.",
+            "Если оно расходится с картинками, слушай картинки.",
+            "Планировку с картинок НЕ бери: комната своя, её размеры выше.",
+        ]
+    else:
+        lines += [
+            "",
+            f"ЖЕЛАЕМЫЙ ДИЗАЙН: {style_words}",
+        ]
+
+    if wishes.strip():
+        lines += ["", f"ПОЖЕЛАНИЯ ХОЗЯЙКИ (важнее всего): {wishes.strip()}"]
 
     lines += [
         "",
@@ -204,8 +241,9 @@ def brief(facts: RoomFacts, style: str, wishes: str,
         "   художнику. Никаких пояснений, заголовков и кавычек.",
         "2. Обязательно назови пропорции комнаты, высоту потолка и окна:",
         "   картинка должна быть про ЭТУ комнату, а не про похожую.",
-        "3. Проси фотореалистичный вид интерьера с уровня глаз, дневной свет.",
-        "4. Цвет, материалы, мебель и свет — по желаемому дизайну.",
+        "3. Называй цвета и материалы конкретно, словами и оттенками,",
+        "   а не общими словами вроде «уютный» и «стильный».",
+        "4. Проси фотореалистичный вид интерьера с уровня глаз, дневной свет.",
         "5. Не добавляй текст, надписи, подписи и людей на картинку.",
     ]
     return "\n".join(lines)
@@ -222,11 +260,12 @@ def compose(facts: RoomFacts, style: str, wishes: str, provider=None,
     from . import ai
 
     service = provider or ai.plan_provider()
+    colours = main_colours(references or [])
     answer = service.ask(
         ai.plan_model(),
-        brief(facts, style, wishes, len(references or [])),
+        brief(facts, style, wishes, len(references or []), colours),
         images=references or None,
-        max_tokens=700,
+        max_tokens=900,
     )
     text = " ".join(answer.text.split()).strip().strip('"')
     if not text:
@@ -335,6 +374,7 @@ def visualise(
         room_id=room_id, style=style, prompt=prompt,
         model=ai.image_model(), result_image=path.name,
         cost_rub=round(text_cost + image_cost, 2),
+        references=", ".join(reference_names),
     )
     log.info("Нарисована визуализация %s для комнаты %s", render_id, room_id)
 
@@ -350,3 +390,112 @@ def visualise(
         "cost_rub": round(text_cost + image_cost, 2),
         "spent_today_rub": ai.spent_today_rub(),
     }
+
+
+# ── Палитра референса ────────────────────────────────────────────────
+
+# Цвета, которые человек различает и называет словами. Модели, которая
+# рисует, понятнее «warm walnut brown», чем шестнадцатеричный код.
+COLOUR_WORDS = (
+    ((255, 255, 255), "белый", "white"),
+    ((245, 240, 230), "тёплый белый", "warm white"),
+    ((235, 228, 214), "кремовый", "cream"),
+    ((214, 199, 176), "песочный", "sand beige"),
+    ((190, 165, 130), "светлое дерево", "light oak"),
+    ((150, 115, 75), "медовое дерево", "honey wood"),
+    ((110, 78, 48), "орех", "walnut brown"),
+    ((70, 48, 30), "тёмное дерево", "dark wood"),
+    ((45, 35, 28), "почти чёрный тёплый", "near-black brown"),
+    ((25, 25, 25), "чёрный", "black"),
+    ((200, 200, 198), "светло-серый", "light grey"),
+    ((140, 140, 138), "серый", "mid grey"),
+    ((85, 85, 85), "тёмно-серый", "charcoal grey"),
+    ((180, 190, 175), "шалфейный", "sage green"),
+    ((110, 130, 110), "приглушённый зелёный", "muted green"),
+    ((55, 75, 60), "тёмно-зелёный", "deep green"),
+    ((165, 185, 200), "голубовато-серый", "dusty blue"),
+    ((70, 95, 120), "синий", "slate blue"),
+    ((195, 150, 140), "терракотовый светлый", "blush terracotta"),
+    ((160, 95, 70), "терракотовый", "terracotta"),
+    ((120, 60, 55), "бордовый", "deep rust"),
+    ((205, 175, 120), "латунь", "brass"),
+)
+
+
+def _closest_word(colour: tuple[int, int, int]) -> tuple[str, str]:
+    red, green, blue = colour
+    best = min(
+        COLOUR_WORDS,
+        key=lambda row: (row[0][0] - red) ** 2
+        + (row[0][1] - green) ** 2
+        + (row[0][2] - blue) ** 2,
+    )
+    return best[1], best[2]
+
+
+def palette(picture: bytes, count: int = 5) -> list[dict[str, Any]]:
+    """Достаёт из картинки главные цвета.
+
+    Пересказ словами теряет именно цвет: «тёплый и уютный» можно
+    нарисовать и светлым дубом, и тёмным орехом. Поэтому цвета
+    считаем сами и передаём числами.
+    """
+    import pymupdf
+
+    document = pymupdf.open(stream=picture, filetype="png")
+    try:
+        page = document[0]
+        side = max(page.rect.width, page.rect.height) or 1
+        zoom = min(1.0, 96 / side)
+        small = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+        pixels = small.samples
+    finally:
+        document.close()
+
+    # Складываем близкие оттенки в корзины, иначе каждый пиксель свой.
+    buckets: dict[tuple[int, int, int], list[int]] = {}
+    for start in range(0, len(pixels) - 2, 3):
+        red, green, blue = pixels[start], pixels[start + 1], pixels[start + 2]
+        key = (red // 32, green // 32, blue // 32)
+        row = buckets.setdefault(key, [0, 0, 0, 0])
+        row[0] += red
+        row[1] += green
+        row[2] += blue
+        row[3] += 1
+
+    total = sum(row[3] for row in buckets.values()) or 1
+    order = sorted(buckets.values(), key=lambda row: -row[3])[:count]
+
+    found: list[dict[str, Any]] = []
+    for row in order:
+        colour = (row[0] // row[3], row[1] // row[3], row[2] // row[3])
+        russian, english = _closest_word(colour)
+        found.append({
+            "hex": "#%02x%02x%02x" % colour,
+            "по-русски": russian,
+            "english": english,
+            "доля": round(row[3] / total * 100),
+        })
+    return found
+
+
+def main_colours(pictures: list[bytes], count: int = 5) -> list[dict[str, Any]]:
+    """Главные цвета всех референсов вместе."""
+    if not pictures:
+        return []
+    together: dict[str, dict[str, Any]] = {}
+    for picture in pictures:
+        try:
+            found = palette(picture, count)
+        except Exception as trouble:
+            log.warning("Палитру референса прочитать не удалось: %s", trouble)
+            continue
+        for colour in found:
+            row = together.setdefault(colour["hex"], dict(colour, доля=0))
+            row["доля"] += colour["доля"]
+
+    rows = sorted(together.values(), key=lambda row: -row["доля"])[:count]
+    total = sum(row["доля"] for row in rows) or 1
+    for row in rows:
+        row["доля"] = round(row["доля"] / total * 100)
+    return rows

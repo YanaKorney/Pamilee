@@ -132,9 +132,15 @@ function draw() {
     ]));
 
     if (chosenRefs.size) {
-        blocks.push(el('div', { class: 'muted small', style: 'margin-top:8px',
-            text: `Взять настроение с выбранных картинок: ${chosenRefs.size}. `
-                + 'Они отмечены ниже, в разделе «Референсы».' }));
+        blocks.push(el('div', { class: 'small', style: 'margin-top:8px',
+            text: `Рисуем по вашим картинкам: ${chosenRefs.size}. `
+                + 'Они отмечены галочкой ниже. Цвета и материалы возьмутся '
+                + 'с них, а не из названия направления.' }));
+    } else if (references.length) {
+        blocks.push(el('div', { class: 'small', style: 'color:var(--warn);margin-top:8px',
+            text: '⚠ Ни одна из загруженных картинок не отмечена — рисовать '
+                + 'будем только по названию направления. Чтобы рисовать по '
+                + 'картинке, нажмите под ней «не участвует».' }));
     }
 
     blocks.push(el('div', { id: 'result', style: 'margin-top:18px' }));
@@ -193,6 +199,12 @@ function picture(made, fresh) {
     const parts = [image, el('div', { class: 'small', style: 'margin-top:6px',
         text: `${made.room} · ${made.style}` })];
 
+    const used = made.references || [];
+    parts.push(el('div', { class: 'muted small',
+        text: used.length
+            ? `Нарисовано по вашим картинкам: ${used.join(', ')}`
+            : 'Нарисовано только по названию направления, без ваших картинок' }));
+
     if (fresh) {
         parts.push(el('div', { class: 'muted small',
             text: `Потрачено: ${String(made.cost_rub).replace('.', ',')} ₽ · `
@@ -242,7 +254,10 @@ function referenceCard(picture) {
     const pick = el('button', {
         class: chosen ? 'chip chip-on' : 'chip',
         style: 'margin-top:8px',
-        text: chosen ? '✓ взять за основу' : 'взять за основу',
+        text: chosen ? '✓ рисуем по этой' : '☐ не участвует',
+        title: chosen
+            ? 'Эта картинка уйдёт художнику. Нажмите, чтобы убрать.'
+            : 'Нажмите, чтобы рисовать по этой картинке.',
     });
     pick.addEventListener('click', () => {
         if (chosenRefs.has(picture.id)) {
@@ -272,6 +287,7 @@ function referenceCard(picture) {
         } catch (err) { showError(err); }
     });
 
+    if (!chosen) image.classList.add('faded');
     const card = el('div', { class: chosen ? 'card-picture card-chosen' : 'card-picture' },
         [image]);
     if (picture.room) {
@@ -329,7 +345,15 @@ async function upload(files) {
             toast('Часть картинок не загрузилась',
                   data.problems.map((p) => p.name).join(', '));
         } else {
-            toast('Загружено', `Картинок: ${data.added.length}`, 'ok');
+            toast('Загружено', `Картинок: ${data.added.length}. `
+                + 'Рисовать будем по ним.', 'ok');
+        }
+        // Раз картинку загрузили — значит, хотят по ней и рисовать.
+        // Заставлять искать кнопку «взять за основу» незачем.
+        for (const added of data.added) {
+            for (const id of added.ids || []) {
+                if (chosenRefs.size < 4) chosenRefs.add(id);
+            }
         }
         await loadReferences();
         draw();

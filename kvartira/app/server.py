@@ -529,6 +529,8 @@ def api_design_room_list(project_id: int) -> dict[str, Any]:
             "style": design.STYLES.get(row["strictness"], row["strictness"]),
             "image": f"/api/renders/{row['id']}/image",
             "cost_rub": row["cost_usd"],
+            "references": [name for name in
+                           (row["base_image"] or "").split(", ") if name],
         })
 
     return {
