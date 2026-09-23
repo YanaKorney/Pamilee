@@ -46,6 +46,10 @@ MAX_IDS_PER_DETAIL_CALL = 50
 MIN_IDS_PER_STATS_CALL = 12
 # Потолок запросов статистики за один сбор, он же потолок минут ожидания.
 MAX_STATS_REQUESTS = 40
+# Названия необязательны, поэтому на них тратим немного и быстро сдаёмся,
+# если кабинет их не отдаёт.
+MAX_DETAIL_REQUESTS = 60
+DETAIL_GIVE_UP = 8
 
 # Сколько страниц заказов готовы забрать за один сбор. Каждая — минута ожидания,
 # поэтому ограничиваем: остальное доберётся следующим запуском.
@@ -499,7 +503,9 @@ class WBAdvertClient(_MinuteLimited):
         return [row["advertId"] for row in self.campaign_index()]
 
     def campaign_details(self, advert_ids: Sequence[int],
-                         on_progress: Progress | None = None) -> list[dict[str, Any]]:
+                         on_progress: Progress | None = None,
+                         max_requests: int = MAX_DETAIL_REQUESTS,
+                         give_up_after: int = DETAIL_GIVE_UP) -> list[dict[str, Any]]:
         """Карточки кампаний: название, тип, статус, дневной бюджет.
 
         WB отвечает 404 на всю пачку, если отдавать нечего хотя бы по части
@@ -510,10 +516,26 @@ class WBAdvertClient(_MinuteLimited):
         """
         result: list[dict[str, Any]] = []
         skipped = 0
+        spent = 0
         queue: list[list[int]] = list(_chunks(list(advert_ids), MAX_IDS_PER_DETAIL_CALL))
 
         while queue:
+            # У части кабинетов метод не отдаёт названий вообще. Дробить
+            # тогда до каждой кампании — это сотни бессмысленных запросов.
+            # Раз названия необязательны, после нескольких пустых попыток
+            # подряд честнее сдаться, чем долбить API.
+            if not result and spent >= give_up_after:
+                if on_progress:
+                    on_progress("Метод названий не отдал ничего за "
+                                f"{spent} попыток — дальше не пробую.")
+                return result
+            if spent >= max_requests:
+                if on_progress:
+                    on_progress(f"Названия: остановился на {spent} запросах.")
+                break
+
             chunk = queue.pop(0)
+            spent += 1
             try:
                 data = self._request("POST", "/adv/v1/promotion/adverts",
                                      payload=list(chunk))
@@ -521,9 +543,11 @@ class WBAdvertClient(_MinuteLimited):
                 if exc.status != 404:
                     raise
                 if len(chunk) > 1:
+                    # Половины — в конец очереди, чтобы одна пустая пачка
+                    # не увела весь перебор вглубь себя.
                     middle = len(chunk) // 2
-                    queue.insert(0, chunk[middle:])
-                    queue.insert(0, chunk[:middle])
+                    queue.append(chunk[:middle])
+                    queue.append(chunk[middle:])
                 else:
                     skipped += 1
                 continue

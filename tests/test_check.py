@@ -209,6 +209,28 @@ class TestBatchSplitting(unittest.TestCase):
         result = client.campaign_details(list(range(80)))
         self.assertGreater(len(result), 0)
 
+    def test_gives_up_early_when_names_are_never_returned(self):
+        """У части кабинетов метод названий молчит по всем кампаниям.
+        Дробить до каждой из 511 — это около тысячи пустых запросов:
+        долго для человека и грубо по отношению к API. Названия
+        необязательны, поэтому после нескольких попыток сдаёмся."""
+        from wbads.wb_client import DETAIL_GIVE_UP
+        client = self.client(set())
+        client.campaign_details(list(range(511)))
+        self.assertLessEqual(client.requests["requests"], DETAIL_GIVE_UP + 1)
+
+    def test_working_cabinet_still_gets_all_names(self):
+        """Ранняя сдача не должна мешать кабинету, где названия есть."""
+        client = self.client(set(range(511)))
+        result = client.campaign_details(list(range(511)))
+        self.assertEqual(len(result), 511)
+
+    def test_detail_requests_are_capped(self):
+        from wbads.wb_client import MAX_DETAIL_REQUESTS
+        client = self.client(set(range(100)))
+        client.campaign_details(list(range(400)))
+        self.assertLessEqual(client.requests["requests"], MAX_DETAIL_REQUESTS)
+
     def test_real_denial_still_propagates(self):
         """403 глотать нельзя — это настоящая проблема."""
         from wbads.wb_client import WBError
