@@ -13,7 +13,13 @@ from typing import Any, Callable, Sequence
 
 from . import db
 from .rules import STATUS_NAMES, TYPE_NAMES
-from .wb_client import WBAdvertClient, WBError, WBStatisticsClient, _order_key
+from .wb_client import (
+    STATS_GIVE_UP,
+    WBAdvertClient,
+    WBError,
+    WBStatisticsClient,
+    _order_key,
+)
 
 Progress = Callable[[str], None]
 
@@ -275,7 +281,22 @@ def collect(conn: sqlite3.Connection, token: str, days: int = 30,
         _log(on_progress, f"Забираем статистику по {len(ask_ids)} кампаниям "
                           f"за {date_from} — {date_to}.")
         _log(on_progress, "Метод медленный: WB отдаёт его раз в минуту.")
-        stats = client.fullstats(ask_ids, date_from, date_to, on_progress=on_progress)
+
+        # Карточки и статистика запрашиваются одним и тем же способом (POST).
+        # Если карточки не отдались ни по одной кампании, дело почти наверняка
+        # не в данных, а в самом способе запроса — и тогда перебирать пачки
+        # статистики по минуте каждая значит впустую забрать полчаса у
+        # человека. Делаем пару проб и останавливаемся с внятным ответом.
+        stats_budget = STATS_GIVE_UP
+        if getattr(client, "details_all_404", False):
+            stats_budget = 2
+            _log(on_progress, "Карточки кампаний не отдались ни по одной. "
+                              "Проверю статистику парой запросов, а не перебором "
+                              "по минуте на пачку.")
+
+        stats = client.fullstats(ask_ids, date_from, date_to,
+                                 on_progress=on_progress,
+                                 give_up_after=stats_budget)
 
         daily_all: list[dict[str, Any]] = []
         nm_all: list[dict[str, Any]] = []

@@ -575,6 +575,12 @@ def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
         if expect_data and isinstance(result, list) and not result:
             print(f"  ⚠ {label:<26} {method}")
             print("    Метод отвечает, но данных не отдаёт.")
+            # Сбор проглатывает 404 внутри себя, а WB обычно пишет причину
+            # в ответе. Показываем её здесь — иначе она теряется совсем.
+            reason = getattr(client, "last_404_message", "")
+            if reason:
+                for line in reason.splitlines():
+                    print(f"    {line}")
             empty.append(label)
             return result
 

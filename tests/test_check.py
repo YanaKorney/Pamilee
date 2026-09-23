@@ -285,7 +285,7 @@ class TestCardsAreOptional(unittest.TestCase):
             "balance": lambda self: {"balance": 0.0, "bonus": 0.0, "net": 100.0},
             "campaign_index": lambda self: index,
             "campaign_details": lambda self, ids, on_progress=None: [],
-            "fullstats": lambda self, ids, a, b, on_progress=None, max_requests=40: [
+            "fullstats": lambda self, ids, a, b, on_progress=None, max_requests=40, give_up_after=15: [
                 {"advertId": 1, "days": [{"date": "2026-09-20", "views": 100,
                                           "clicks": 5, "sum": 50.0, "sum_price": 900.0}]}],
         }
@@ -316,7 +316,7 @@ class TestCheckDoesNotFakeSuccess(unittest.TestCase):
 
     def test_empty_stats_are_flagged_too(self):
         code, out = run_check(
-            {"fullstats": lambda self, i, a, b, on_progress=None, max_requests=40: []})
+            {"fullstats": lambda self, i, a, b, on_progress=None, max_requests=40, give_up_after=15: []})
         self.assertEqual(code, 0)
         self.assertIn("⚠ Статистика по дням", out)
 
@@ -743,3 +743,136 @@ class TestTokenInTemplate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBrokenMethodIsNotWaitedOut(unittest.TestCase):
+    """Кабинет, где POST-методы отвечают 404 на всё подряд. Перебирать в
+    таком кабинете пачки статистики по минуте каждая — значит забрать у
+    человека полчаса и ничего не собрать."""
+
+    def test_error_body_from_wb_is_shown(self):
+        """WB объясняет отказ в теле ответа. Выбрасывать это объяснение —
+        значит гадать там, где ответ уже написан."""
+        import io
+        import urllib.error
+        from wbads.wb_client import _read_error_body
+
+        def http_error(body: bytes):
+            return urllib.error.HTTPError(
+                "https://x", 404, "Not Found", {}, io.BytesIO(body))
+
+        self.assertEqual(
+            _read_error_body(http_error(b'{"error":"campaign not found"}')),
+            "campaign not found")
+        self.assertEqual(_read_error_body(http_error(b"plain text")), "plain text")
+        self.assertEqual(_read_error_body(http_error(b"")), "")
+
+    def test_details_report_that_the_method_is_silent(self):
+        """Карточки, не отдавшиеся ни по одной кампании, — сигнал для сбора."""
+        client = TestBatchSplitting().client(set())
+        client.campaign_details(list(range(60)))
+        self.assertTrue(client.details_all_404,
+                        "молчащий метод карточек обязан быть помечен")
+
+    def test_details_that_worked_are_not_flagged(self):
+        client = TestBatchSplitting().client(set(range(60)))
+        client.campaign_details(list(range(60)))
+        self.assertFalse(client.details_all_404)
+
+    def test_collect_probes_stats_instead_of_grinding(self):
+        """Если карточки молчат, статистику пробуем парой запросов."""
+        import tempfile
+        from unittest.mock import patch as p2
+        from wbads import collector, db
+
+        seen: dict[str, int] = {}
+
+        def fullstats(self, ids, a, b, on_progress=None, max_requests=40,
+                      give_up_after=15):
+            seen["budget"] = give_up_after
+            return []
+
+        index = [{"advertId": i, "type": 8, "status": 9} for i in range(1, 6)]
+
+        def details(self, ids, on_progress=None):
+            self.details_all_404 = True
+            return []
+
+        methods = {
+            "balance": lambda self: {"balance": 0.0, "bonus": 0.0, "net": 100.0},
+            "campaign_index": lambda self: index,
+            "campaign_details": details,
+            "fullstats": fullstats,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = db.init_db(Path(tmp) / "c.db")
+            with p2.multiple("wbads.wb_client.WBAdvertClient", **methods), \
+                    p2.multiple("wbads.wb_client.WBStatisticsClient",
+                                orders=lambda self, d, on_progress=None, max_pages=12: []):
+                collector.collect(conn, "token", days=30)
+            conn.close()
+        self.assertLessEqual(seen["budget"], 2,
+                             "в сломанном кабинете нельзя ждать по минуте на пачку")
+
+    def test_healthy_cabinet_keeps_the_full_budget(self):
+        import tempfile
+        from unittest.mock import patch as p2
+        from wbads import collector, db
+        from wbads.wb_client import STATS_GIVE_UP
+
+        seen: dict[str, int] = {}
+
+        def fullstats(self, ids, a, b, on_progress=None, max_requests=40,
+                      give_up_after=15):
+            seen["budget"] = give_up_after
+            return []
+
+        index = [{"advertId": i, "type": 8, "status": 9} for i in range(1, 6)]
+        methods = {
+            "balance": lambda self: {"balance": 0.0, "bonus": 0.0, "net": 100.0},
+            "campaign_index": lambda self: index,
+            "campaign_details": lambda self, ids, on_progress=None: [
+                {"advertId": 1, "name": "Кампания"}],
+            "fullstats": fullstats,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = db.init_db(Path(tmp) / "c.db")
+            with p2.multiple("wbads.wb_client.WBAdvertClient", **methods), \
+                    p2.multiple("wbads.wb_client.WBStatisticsClient",
+                                orders=lambda self, d, on_progress=None, max_pages=12: []):
+                collector.collect(conn, "token", days=30)
+            conn.close()
+        self.assertEqual(seen["budget"], STATS_GIVE_UP)
+
+    def test_redirect_keeps_the_method(self):
+        """Перенаправление, превращающее POST в GET, — классическая причина
+        404 только на POST-методах."""
+        import urllib.request
+        from wbads.wb_client import _KeepMethodRedirect
+
+        handler = _KeepMethodRedirect()
+        original = urllib.request.Request(
+            "https://advert-api.wildberries.ru/adv/v2/fullstats",
+            data=b"[]", headers={"Authorization": "t"}, method="POST")
+        moved = handler.redirect_request(
+            original, None, 301, "Moved",
+            {}, "https://advert-api.wildberries.ru/adv/v2/fullstats/")
+        self.assertEqual(moved.get_method(), "POST", "метод обязан сохраниться")
+        self.assertEqual(moved.data, b"[]")
+        self.assertTrue(handler.redirected, "факт перенаправления обязан быть виден")
+
+
+class TestCheckShowsWhatWBSaid(unittest.TestCase):
+    """Пустой ответ без объяснения оставляет человека ни с чем.
+    Причину, которую написал сам WB, надо показать."""
+
+    def test_reason_is_printed_next_to_the_warning(self):
+        from wbads.wb_client import WBError
+
+        def silent(self, ids, on_progress=None):
+            self.last_404_message = "Ответ WB: campaign not found"
+            return []
+
+        code, out = run_check({"campaign_details": silent})
+        self.assertEqual(code, 0)
+        self.assertIn("campaign not found", out)

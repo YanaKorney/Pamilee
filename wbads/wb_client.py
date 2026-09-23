@@ -50,6 +50,8 @@ MAX_STATS_REQUESTS = 40
 # если кабинет их не отдаёт.
 MAX_DETAIL_REQUESTS = 60
 DETAIL_GIVE_UP = 8
+# То же для статистики, но порог ниже: каждая попытка — минута ожидания.
+STATS_GIVE_UP = 15
 
 # Сколько страниц заказов готовы забрать за один сбор. Каждая — минута ожидания,
 # поэтому ограничиваем: остальное доберётся следующим запуском.
@@ -349,6 +351,47 @@ def build_ssl_context(ca_bundle: str | None = None) -> ssl.SSLContext:
     return ssl.create_default_context()
 
 
+def _read_error_body(exc: urllib.error.HTTPError, limit: int = 400) -> str:
+    """Достаёт объяснение отказа из тела ответа."""
+    try:
+        raw = exc.read().decode("utf-8", "replace").strip()
+    except Exception:
+        return ""
+    if not raw:
+        return ""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw[:limit]
+    for key in ("error", "errorText", "message", "detail", "description"):
+        value = data.get(key) if isinstance(data, dict) else None
+        if value:
+            return str(value)[:limit]
+    return raw[:limit]
+
+
+class _KeepMethodRedirect(urllib.request.HTTPRedirectHandler):
+    """Сохраняет метод запроса при перенаправлении и запоминает сам факт.
+
+    Обычный обработчик превращает POST в GET на кодах 301/302/303. Если
+    сервер перенаправляет — скажем, из-за косой черты в конце пути — то
+    POST-метод приходит туда уже как GET и получает 404, хотя доступ есть.
+    Такой отказ выглядит как «метода не существует», и понять причину
+    без подсказки невозможно.
+    """
+
+    def __init__(self) -> None:
+        self.redirected: str | None = None
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        self.redirected = newurl
+        new = urllib.request.Request(
+            newurl, data=req.data, headers=dict(req.header_items()),
+            method=req.get_method(),
+        )
+        return new
+
+
 class _BaseClient:
     """Общий транспорт: заголовки, повторы, разбор ответа.
 
@@ -396,19 +439,34 @@ class _BaseClient:
         tried_fallback = bool(self.ca_bundle)
 
         for _ in range(self.max_retries):
+            redirect_handler = _KeepMethodRedirect()
+            opener = urllib.request.build_opener(
+                redirect_handler,
+                urllib.request.HTTPSHandler(context=context),
+            )
+            opener.redirected = redirect_handler.redirected
             req = urllib.request.Request(url, data=body, headers=headers, method=method)
             try:
-                with urllib.request.urlopen(req, timeout=self.timeout,
-                                            context=context) as resp:
+                with opener.open(req, timeout=self.timeout) as resp:
                     raw = resp.read().decode("utf-8").strip()
                     return json.loads(raw) if raw else None
             except urllib.error.HTTPError as exc:
+                opener.redirected = redirect_handler.redirected
+                # WB почти всегда объясняет отказ в теле ответа. Выбрасывать
+                # это объяснение — значит гадать там, где написан ответ.
+                detail = _read_error_body(exc)
+                message = explain_status(exc.code, self.scope)
+                if detail:
+                    message = f"{message}\nОтвет WB: {detail}"
+                if opener.redirected:
+                    message += (f"\nЗапрос был перенаправлен на {opener.redirected}"
+                                " — это и могло сломать метод.")
                 if exc.code == 429 or exc.code >= 500:
-                    last_error = WBError(explain_status(exc.code, self.scope), exc.code)
+                    last_error = WBError(message, exc.code)
                     time.sleep(delay)
                     delay *= 2
                     continue
-                raise WBError(explain_status(exc.code, self.scope), exc.code) from exc
+                raise WBError(message, exc.code) from exc
             except urllib.error.URLError as exc:
                 reason = getattr(exc, "reason", None)
                 is_cert = (isinstance(reason, ssl.SSLCertVerificationError)
@@ -417,6 +475,7 @@ class _BaseClient:
                 # Проверка сорвалась на корне из хранилища системы — пробуем
                 # тот же запрос с набором корней certifi. Проверка при этом
                 # остаётся полной, меняется только список доверенных корней.
+                opener.redirected = redirect_handler.redirected
                 if is_cert and not tried_fallback:
                     bundle = certifi_bundle()
                     if bundle:
@@ -517,6 +576,10 @@ class WBAdvertClient(_MinuteLimited):
         result: list[dict[str, Any]] = []
         skipped = 0
         spent = 0
+        # Почему метод молчал — пригодится дальше: если карточки не отдаются
+        # вообще, то и статистику спрашивать по полчаса смысла мало.
+        self.last_404_message = ""
+        self.details_all_404 = False
         queue: list[list[int]] = list(_chunks(list(advert_ids), MAX_IDS_PER_DETAIL_CALL))
 
         while queue:
@@ -528,6 +591,7 @@ class WBAdvertClient(_MinuteLimited):
                 if on_progress:
                     on_progress("Метод названий не отдал ничего за "
                                 f"{spent} попыток — дальше не пробую.")
+                self.details_all_404 = bool(self.last_404_message)
                 return result
             if spent >= max_requests:
                 if on_progress:
@@ -542,6 +606,8 @@ class WBAdvertClient(_MinuteLimited):
             except WBError as exc:
                 if exc.status != 404:
                     raise
+                if not self.last_404_message:
+                    self.last_404_message = str(exc)
                 if len(chunk) > 1:
                     # Половины — в конец очереди, чтобы одна пустая пачка
                     # не увела весь перебор вглубь себя.
@@ -561,11 +627,13 @@ class WBAdvertClient(_MinuteLimited):
             else:
                 on_progress(f"Карточек не нашлось у {skipped} кампаний — "
                             "вероятно, удалены.")
+        self.details_all_404 = bool(self.last_404_message) and not result
         return result
 
     def fullstats(self, advert_ids: Sequence[int], date_from: str, date_to: str,
                   on_progress: Progress | None = None,
-                  max_requests: int = MAX_STATS_REQUESTS) -> list[dict[str, Any]]:
+                  max_requests: int = MAX_STATS_REQUESTS,
+                  give_up_after: int = STATS_GIVE_UP) -> list[dict[str, Any]]:
         """Статистика по дням.
 
         WB отвечает 404 на всю пачку, если статистики нет хотя бы по части
@@ -582,8 +650,22 @@ class WBAdvertClient(_MinuteLimited):
         done = 0
         spent = 0
         without_stats = 0
+        # Причина отказа нужна снаружи: проверка показывает её человеку.
+        self.last_404_message = ""
+
 
         while queue:
+            # Если метод не отдал ничего за первые попытки, дробить дальше
+            # бессмысленно: каждая попытка стоит минуты ожидания, а дело,
+            # скорее всего, не в данных, а в самом методе.
+            if not result and spent >= give_up_after:
+                if on_progress:
+                    on_progress(f"Статистика не пришла ни по одной из {spent} пачек. "
+                                "Похоже, дело не в данных — прекращаю, "
+                                "чтобы не ждать впустую.")
+                    if self.last_404_message:
+                        on_progress(f"Что ответил WB: {self.last_404_message}")
+                break
             if spent >= max_requests:
                 if on_progress:
                     left = sum(len(c) for c in queue)
@@ -604,6 +686,8 @@ class WBAdvertClient(_MinuteLimited):
                 spent += 1
                 if exc.status != 404:
                     raise
+                if not self.last_404_message:
+                    self.last_404_message = str(exc)
                 if len(chunk) > MIN_IDS_PER_STATS_CALL:
                     # Половины отправляем в КОНЕЦ очереди, а не в начало:
                     # иначе одна пустая пачка, дробясь вглубь, съедает весь
