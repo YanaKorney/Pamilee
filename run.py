@@ -51,6 +51,7 @@ from wbads.wb_client import (
     WBAdvertClient,
     WBError,
     WBStatisticsClient,
+    certifi_bundle,
     describe_token,
     inspect_certificate,
     name_interceptor,
@@ -397,6 +398,86 @@ def _explain_total_denial(token: str) -> None:
     _print("Потом запустите программу ещё раз, она спросит новый токен.")
 
 
+def _install_certifi() -> bool:
+    """Ставит набор корневых сертификатов ТЕМ ЖЕ Python, что запущен сейчас.
+
+    На Windows «python» и «py» нередко указывают на разные установки,
+    и набор, поставленный вручную, оказывается не в той. sys.executable
+    снимает этот вопрос: ставим ровно туда, откуда работаем.
+    """
+    import subprocess
+
+    print()
+    _print("Ставлю набор корневых сертификатов…")
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--upgrade", "certifi"],
+            capture_output=True, text=True, timeout=180,
+        )
+    except Exception as exc:
+        _print(f"Не вышло запустить установку: {exc}")
+        return False
+
+    if result.returncode != 0:
+        _print("Установка не удалась.")
+        tail = (result.stderr or result.stdout or "").strip().splitlines()
+        for line in tail[-4:]:
+            _print(f"  {line}")
+        return False
+
+    # Модуль мог появиться уже после старта программы
+    import importlib
+    import sys as _sys
+    _sys.modules.pop("certifi", None)
+    importlib.invalidate_caches()
+
+    if certifi_bundle():
+        _print("Готово — набор корней установлен.")
+        return True
+    _print("Установка прошла, но набор всё равно не виден. Странно.")
+    return False
+
+
+def _offer_certificate_bundle() -> None:
+    """Предлагает поставить свежий набор корней и делает это сама."""
+    bundle = certifi_bundle()
+
+    if bundle:
+        _print("Свежий набор корней (certifi) уже установлен:")
+        _print(f"  {bundle}")
+        _print("Но проверка всё равно не прошла — значит, дело глубже.")
+        print()
+        _print("Остаётся вылечить хранилище Windows:")
+    else:
+        _print("Самый быстрый способ — поставить свежий набор корней.")
+        _print("Проверка при этом остаётся полной: меняется только")
+        _print("список доверенных корней, ничего не отключается.")
+        print()
+        if _ask("Поставить его прямо сейчас?"):
+            if _install_certifi():
+                print()
+                _print("Теперь запустите проверку ещё раз:")
+                _print("  дважды щёлкните CHECK-Windows.bat")
+                return
+        else:
+            print()
+            _print("Если решите поставить вручную, команда такая")
+            _print("(именно с этим путём — у вас может быть несколько Python):")
+            print()
+            _print(f"  {sys.executable} -m pip install certifi")
+        print()
+        _print("Основательный способ — вылечить хранилище Windows:")
+
+    _print("  • установите все обновления Windows;")
+    _print("  • либо поставьте корневой сертификат ISRG Root X1:")
+    _print("    letsencrypt.org/certificates → раздел Root CAs →")
+    _print("    ISRG Root X1 → строка «Certificate details (self-signed)»")
+    _print("    → ссылка der. Затем двойной клик по файлу →")
+    _print("    Установить → Локальный компьютер → «Доверенные")
+    _print("    корневые центры сертификации».")
+    _print("    Строку с DST Root CA X3 не берите — она помечена retired.")
+
+
 def _who_breaks_the_connection() -> None:
     """Смотрит, чей сертификат показывает WB, и называет виновника по имени.
 
@@ -434,21 +515,7 @@ def _who_breaks_the_connection() -> None:
         _print("сертификату в хранилище вашей системы: оно отстало,")
         _print("и проверка цепочки срывается на устаревшем корне.")
         print()
-        _print("Самый быстрый способ — поставить свежий набор корней")
-        _print("для Python. Выполните в этом окне одну команду:")
-        print()
-        _print("    python -m pip install certifi")
-        print()
-        _print("После этого запустите проверку снова — программа")
-        _print("подхватит его сама. Защита при этом не отключается:")
-        _print("проверка остаётся полной, меняется только список корней.")
-        print()
-        _print("Основательный способ — вылечить само хранилище Windows:")
-        _print("  • установите все обновления Windows;")
-        _print("  • либо поставьте корневой сертификат ISRG Root X1")
-        _print("    с сайта letsencrypt.org/certificates: скачать .der,")
-        _print("    двойной клик → Установить → «Доверенные корневые")
-        _print("    центры сертификации».")
+        _offer_certificate_bundle()
     else:
         _print("Имя выдавшего не похоже на антивирус или корпоративный шлюз.")
         _print("Похоже, в системе не хватает корневого сертификата.")

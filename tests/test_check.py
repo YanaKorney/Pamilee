@@ -285,7 +285,10 @@ class TestTrustStoreFallback(unittest.TestCase):
                 "not_after": "Oct 31 04:51:24 2026 GMT",
                 "expired": False, "error": None}
         buffer = io.StringIO()
+        # Ветку задаём явно: без набора корней — предложение его поставить
         with p2("run.inspect_certificate", lambda *a, **k: fake), \
+                p2("run.certifi_bundle", lambda: None), \
+                p2("run._ask", lambda q, default="д": False), \
                 redirect_stdout(buffer):
             cli._who_breaks_the_connection()
         out = buffer.getvalue()
@@ -309,6 +312,88 @@ class TestTrustStoreFallback(unittest.TestCase):
         from wbads.config import load_config
         with p2.dict(os.environ, {"WBADS_CA_BUNDLE": "", "SSL_CERT_FILE": "/tmp/roots.pem"}):
             self.assertEqual(load_config().ca_bundle, "/tmp/roots.pem")
+
+
+class TestCertifiOffer(unittest.TestCase):
+    """Набор корней ставится тем же Python, которым запущена программа.
+    На Windows «python» и «py» часто указывают на разные установки,
+    и поставленный вручную набор оказывается не в той."""
+
+    def test_manual_command_names_this_interpreter(self):
+        from unittest.mock import patch as p2
+        buffer = io.StringIO()
+        with p2("run.certifi_bundle", lambda: None), \
+                p2("run._ask", lambda q, default="д": False), \
+                redirect_stdout(buffer):
+            cli._offer_certificate_bundle()
+        out = buffer.getvalue()
+        self.assertIn(sys.executable, out)
+        self.assertIn("несколько Python", out)
+
+    def test_installs_when_user_agrees(self):
+        from unittest.mock import patch as p2
+        called = []
+        buffer = io.StringIO()
+        with p2("run.certifi_bundle", lambda: None), \
+                p2("run._ask", lambda q, default="д": True), \
+                p2("run._install_certifi", lambda: called.append(1) or True), \
+                redirect_stdout(buffer):
+            cli._offer_certificate_bundle()
+        self.assertEqual(len(called), 1)
+        self.assertIn("запустите проверку ещё раз", buffer.getvalue())
+
+    def test_already_installed_moves_on_to_windows_store(self):
+        """Набор есть, а не помогло — предлагать ставить его снова бессмысленно."""
+        from unittest.mock import patch as p2
+        buffer = io.StringIO()
+        with p2("run.certifi_bundle", lambda: "/some/cacert.pem"), redirect_stdout(buffer):
+            cli._offer_certificate_bundle()
+        out = buffer.getvalue()
+        self.assertIn("уже установлен", out)
+        self.assertIn("ISRG Root X1", out)
+        self.assertNotIn("Поставить его прямо сейчас", out)
+
+    def test_warns_against_the_retired_root(self):
+        """DST Root CA X3 — это и есть просроченный корень, его брать нельзя."""
+        from unittest.mock import patch as p2
+        buffer = io.StringIO()
+        with p2("run.certifi_bundle", lambda: "/some/cacert.pem"), redirect_stdout(buffer):
+            cli._offer_certificate_bundle()
+        self.assertIn("DST Root CA X3", buffer.getvalue())
+        self.assertIn("retired", buffer.getvalue())
+
+    def test_install_uses_sys_executable(self):
+        """Ставим ровно тем интерпретатором, который работает сейчас."""
+        from unittest.mock import patch as p2
+        seen = {}
+
+        class Result:
+            returncode = 0
+            stdout = stderr = ""
+
+        def fake_run(cmd, **kwargs):
+            seen["cmd"] = cmd
+            return Result()
+
+        with p2("subprocess.run", fake_run), \
+                p2("run.certifi_bundle", lambda: "/some/cacert.pem"), \
+                redirect_stdout(io.StringIO()):
+            cli._install_certifi()
+        self.assertEqual(seen["cmd"][0], sys.executable)
+        self.assertIn("certifi", seen["cmd"])
+
+    def test_failed_install_reports_without_raising(self):
+        from unittest.mock import patch as p2
+
+        class Result:
+            returncode = 1
+            stdout = ""
+            stderr = "ERROR: не вышло"
+
+        buffer = io.StringIO()
+        with p2("subprocess.run", lambda cmd, **kw: Result()), redirect_stdout(buffer):
+            self.assertFalse(cli._install_certifi())
+        self.assertIn("не удалась", buffer.getvalue())
 
 
 class TestClockPlausibility(unittest.TestCase):
