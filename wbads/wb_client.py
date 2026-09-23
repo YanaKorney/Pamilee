@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import socket
 import ssl
 import sys
 import time
@@ -62,6 +64,109 @@ class WBError(RuntimeError):
         super().__init__(message)
         self.status = status
         self.kind = kind
+
+
+def inspect_certificate(host: str, port: int = 443,
+                        timeout: int = 15) -> dict[str, Any]:
+    """Смотрит, каким сертификатом отвечает узел, и кто его выдал.
+
+    Нужна, чтобы не гадать при отказе проверки: подменяет ли соединение
+    антивирус, корпоративный прокси, или дело в самом сертификате сайта.
+
+    Подлинность здесь намеренно не проверяется — иначе узнать причину
+    отказа было бы нельзя. Поэтому по такому соединению НИЧЕГО не
+    передаётся: ни токена, ни запросов. Только рукопожатие и чтение
+    сертификата, который узел показал сам.
+    """
+    result: dict[str, Any] = {
+        "host": host, "issuer": None, "subject": None,
+        "not_after": None, "expired": None, "error": None,
+    }
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as raw:
+            with context.wrap_socket(raw, server_hostname=host) as tls:
+                der = tls.getpeercert(binary_form=True)
+    except Exception as exc:
+        result["error"] = f"не удалось соединиться: {exc}"
+        return result
+
+    if not der:
+        result["error"] = "узел не показал сертификат"
+        return result
+
+    # Разобрать DER средствами стандартной библиотеки можно только через
+    # временный файл; если не выйдет — молча обходимся без подробностей.
+    try:
+        import tempfile
+
+        pem = ssl.DER_cert_to_PEM_cert(der)
+        with tempfile.NamedTemporaryFile("w", suffix=".pem", delete=False,
+                                         encoding="ascii") as handle:
+            handle.write(pem)
+            path = handle.name
+        try:
+            parsed = ssl._ssl._test_decode_cert(path)  # noqa: SLF001
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    except Exception as exc:
+        result["error"] = f"сертификат получен, но разобрать не вышло: {exc}"
+        return result
+
+    def flatten(field: object) -> str:
+        parts = []
+        for item in field or ():
+            for key, value in item:
+                if key in ("organizationName", "commonName"):
+                    parts.append(str(value))
+        return " · ".join(dict.fromkeys(parts))
+
+    result["issuer"] = flatten(parsed.get("issuer"))
+    result["subject"] = flatten(parsed.get("subject"))
+    not_after = parsed.get("notAfter")
+    if not_after:
+        result["not_after"] = not_after
+        try:
+            moment = datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z")
+            result["expired"] = moment < datetime.now()
+        except ValueError:
+            pass
+    return result
+
+
+# Кого мы узнаём по имени выдавшего сертификат — чтобы сразу назвать виновника
+KNOWN_INTERCEPTORS = {
+    "dr.web": "антивирус Dr.Web",
+    "drweb": "антивирус Dr.Web",
+    "kaspersky": "антивирус Kaspersky",
+    "avast": "антивирус Avast",
+    "eset": "антивирус ESET",
+    "avg": "антивирус AVG",
+    "bitdefender": "антивирус Bitdefender",
+    "nod32": "антивирус ESET NOD32",
+    "fortinet": "корпоративный шлюз Fortinet",
+    "zscaler": "корпоративный шлюз Zscaler",
+    "sophos": "антивирус Sophos",
+    "mcafee": "антивирус McAfee",
+}
+
+
+def name_interceptor(issuer: str | None) -> str | None:
+    """Узнаёт по выдавшему сертификат, кто вклинился в соединение."""
+    if not issuer:
+        return None
+    low = issuer.lower()
+    for mark, name in KNOWN_INTERCEPTORS.items():
+        if mark in low:
+            return name
+    return None
 
 
 def clock_looks_plausible(token: str) -> bool | None:

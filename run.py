@@ -52,6 +52,8 @@ from wbads.wb_client import (
     WBError,
     WBStatisticsClient,
     describe_token,
+    inspect_certificate,
+    name_interceptor,
 )
 
 
@@ -394,6 +396,42 @@ def _explain_total_denial(token: str) -> None:
     _print("Потом запустите программу ещё раз, она спросит новый токен.")
 
 
+def _who_breaks_the_connection() -> None:
+    """Смотрит, чей сертификат показывает WB, и называет виновника по имени.
+
+    Без этого приходится гадать между антивирусом, прокси и самим сайтом.
+    По такому соединению ничего не передаётся — только чтение сертификата.
+    """
+    print()
+    _print("Смотрю, чей сертификат отвечает вместо Wildberries…")
+    _print("(ничего не передаю — только читаю, кем он выдан)")
+    print()
+
+    info = inspect_certificate("advert-api.wildberries.ru")
+    if info["error"]:
+        _print(f"Разглядеть не вышло: {info['error']}")
+        return
+
+    _print(f"Сертификат выдан: {info['issuer'] or 'не разобрать'}")
+    if info["not_after"]:
+        mark = " — СРОК ВЫШЕЛ" if info["expired"] else ""
+        _print(f"Годен до: {info['not_after']}{mark}")
+
+    culprit = name_interceptor(info["issuer"])
+    print()
+    if culprit:
+        _print(f"Это {culprit} — он вклинивается в защищённые соединения")
+        _print("и подставляет свой сертификат. Именно поэтому проверка не проходит.")
+        print()
+        _print("Что сделать: отключите у него проверку защищённых соединений")
+        _print("(HTTPS/SSL-сканирование) — или добавьте в исключения python.exe.")
+    else:
+        _print("Имя выдавшего не похоже на антивирус или корпоративный шлюз.")
+        _print("Похоже, сертификат настоящий, а не хватает корневого")
+        _print("сертификата в системе. Установите обновления Windows")
+        _print("и обновите Python до последней версии с python.org.")
+
+
 def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
     """Проверяет токен по всем методам, которые нужны сервису.
 
@@ -461,6 +499,8 @@ def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
             print()
             for line in str(blocked).splitlines():
                 print(f"  {line}" if line else "")
+            if blocked.kind == "tls":
+                _who_breaks_the_connection()
             print()
             _print("Пока это не решится, можно посмотреть демо-кабинет:")
             _print("  python run.py demo   затем   python run.py serve")

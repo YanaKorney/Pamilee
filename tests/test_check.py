@@ -171,6 +171,78 @@ class TestTlsExplanation(unittest.TestCase):
         self.assertIn("Антивирус", text)
 
 
+class TestInterceptorRecognition(unittest.TestCase):
+    """По имени выдавшего сертификат видно, кто вклинился в соединение.
+    Это превращает гадание «антивирус? прокси? сайт?» в прямой ответ."""
+
+    def test_recognises_known_antiviruses(self):
+        from wbads.wb_client import name_interceptor
+        cases = {
+            "Doctor Web, Ltd. · Dr.Web Custom CA": "Dr.Web",
+            "Kaspersky Lab · Kaspersky Anti-Virus Personal Root": "Kaspersky",
+            "ESET, spol. s r.o. · ESET SSL Filter CA": "ESET",
+            "AVAST Software · avast! Web/Mail Shield Root": "Avast",
+        }
+        for issuer, expected in cases.items():
+            self.assertIn(expected, name_interceptor(issuer) or "", issuer)
+
+    def test_recognises_corporate_gateways(self):
+        from wbads.wb_client import name_interceptor
+        self.assertIn("Zscaler", name_interceptor("Zscaler Inc · Zscaler Root CA") or "")
+
+    def test_real_certificate_authority_is_not_flagged(self):
+        """Настоящий удостоверяющий центр не должен объявляться перехватчиком."""
+        from wbads.wb_client import name_interceptor
+        for issuer in ("DigiCert Inc · DigiCert Global Root G2",
+                       "Let's Encrypt · R3",
+                       "GlobalSign nv-sa · GlobalSign Root CA"):
+            self.assertIsNone(name_interceptor(issuer), issuer)
+
+    def test_empty_issuer_is_safe(self):
+        from wbads.wb_client import name_interceptor
+        self.assertIsNone(name_interceptor(None))
+        self.assertIsNone(name_interceptor(""))
+
+
+class TestCertificateInspection(unittest.TestCase):
+    def test_unreachable_host_reports_error_without_raising(self):
+        """Диагностика не должна сама падать, если узел недоступен."""
+        from wbads.wb_client import inspect_certificate
+        info = inspect_certificate("nonexistent.invalid", timeout=3)
+        self.assertIsNotNone(info["error"])
+        self.assertIsNone(info["issuer"])
+
+    def test_names_the_culprit_in_check_output(self):
+        from unittest.mock import patch as p2
+        fake = {"host": "advert-api.wildberries.ru",
+                "issuer": "Doctor Web, Ltd. · Dr.Web Custom CA",
+                "subject": "advert-api.wildberries.ru",
+                "not_after": "Dec 31 23:59:59 2027 GMT",
+                "expired": False, "error": None}
+        buffer = io.StringIO()
+        with p2("run.inspect_certificate", lambda *a, **k: fake), \
+                redirect_stdout(buffer):
+            cli._who_breaks_the_connection()
+        out = buffer.getvalue()
+        self.assertIn("Dr.Web", out)
+        self.assertIn("исключения python.exe", out)
+
+    def test_unknown_issuer_points_at_missing_root(self):
+        from unittest.mock import patch as p2
+        fake = {"host": "advert-api.wildberries.ru",
+                "issuer": "DigiCert Inc · DigiCert Global Root G2",
+                "subject": "advert-api.wildberries.ru",
+                "not_after": "Dec 31 23:59:59 2027 GMT",
+                "expired": False, "error": None}
+        buffer = io.StringIO()
+        with p2("run.inspect_certificate", lambda *a, **k: fake), \
+                redirect_stdout(buffer):
+            cli._who_breaks_the_connection()
+        out = buffer.getvalue()
+        self.assertIn("не похоже на антивирус", out)
+        self.assertIn("обновления Windows", out)
+
+
 class TestClockPlausibility(unittest.TestCase):
     """Порядок советов при сбое сертификата зависит от того, похожи ли часы
     на верные: гонять человека в настройки времени, когда дата в порядке,
