@@ -140,11 +140,15 @@ class TestNotFoundIsNotDenial(unittest.TestCase):
         self.assertLess(seen["from"], seen["to"])
 
 
-class TestCollectionSurvivesEmptyData(unittest.TestCase):
-    """Сбор не должен падать из-за кампании без открутки."""
+class TestBatchSplitting(unittest.TestCase):
+    """WB отвечает 404 на всю пачку, если статистики нет хотя бы по части
+    кампаний в ней. Пропускать пачку целиком — значит терять рабочие
+    кампании, которые в ней были: ровно так и вышло на кабинете из 511
+    кампаний, где не собралось вообще ничего. Пачка должна дробиться."""
 
-    def client(self, responses):
-        from wbads.wb_client import WBAdvertClient
+    def client(self, with_data: set, strict: bool = True):
+        """Поддельный WB. strict=True — 404, если данных нет хоть по одной."""
+        from wbads.wb_client import WBAdvertClient, WBError
         client = WBAdvertClient.__new__(WBAdvertClient)
         client.token = "t"
         client.base_url = "x"
@@ -154,36 +158,90 @@ class TestCollectionSurvivesEmptyData(unittest.TestCase):
         client.ca_bundle = ""
         client.used_fallback_bundle = False
         client._wait_turn = lambda on_progress=None: None
-        calls = {"n": 0}
+        counter = {"requests": 0}
 
         def request(method, path, payload=None, params=None):
-            calls["n"] += 1
-            answer = responses[min(calls["n"], len(responses)) - 1]
-            if isinstance(answer, Exception):
-                raise answer
-            return answer
+            counter["requests"] += 1
+            ids = ([item["id"] for item in payload] if path.endswith("fullstats")
+                   else list(payload))
+            hit = [i for i in ids if i in with_data]
+            missing = not all(i in with_data for i in ids) if strict else not hit
+            if missing:
+                raise WBError("404", 404)
+            return [{"advertId": i, "days": []} for i in hit]
 
         client._request = request
+        client.requests = counter
         return client
 
-    def test_fullstats_skips_empty_chunk_and_keeps_going(self):
-        from wbads.wb_client import WBError
-        client = self.client([WBError("404", 404), [{"advertId": 2, "days": []}]])
-        result = client.fullstats(list(range(150)), "2026-09-01", "2026-09-07")
-        self.assertEqual(len(result), 1)
+    def test_splitting_recovers_campaigns_that_have_data(self):
+        client = self.client(set(range(170, 200)))
+        result = client.fullstats(list(range(200)), "2026-08-25", "2026-09-23")
+        self.assertGreater(len(result), 0,
+                           "дробление обязано вытащить кампании со статистикой")
 
-    def test_details_skip_empty_chunk(self):
-        from wbads.wb_client import WBError
-        client = self.client([WBError("404", 404), [{"advertId": 5}]])
-        self.assertEqual(len(client.campaign_details(list(range(80)))), 1)
+    def test_lenient_api_collects_everything_it_has(self):
+        """Если WB мягче и 404 только на полностью пустую пачку —
+        собраться должно всё."""
+        client = self.client(set(range(120)), strict=False)
+        result = client.fullstats(list(range(511)), "2026-08-25", "2026-09-23")
+        self.assertEqual(len(result), 120)
+
+    def test_request_budget_is_respected(self):
+        """Каждый запрос — минута ожидания, поэтому их число ограничено."""
+        client = self.client(set())
+        client.fullstats(list(range(511)), "2026-08-25", "2026-09-23")
+        from wbads.wb_client import MAX_STATS_REQUESTS
+        self.assertLessEqual(client.requests["requests"], MAX_STATS_REQUESTS)
+
+    def test_empty_batch_does_not_starve_the_rest(self):
+        """Пустая пачка не должна съедать бюджет, дробясь вглубь:
+        половины уходят в конец очереди, а не в начало."""
+        client = self.client(set(range(400, 440)))
+        result = client.fullstats(list(range(440)), "2026-08-25", "2026-09-23")
+        self.assertGreater(len(result), 0,
+                           "данные в конце списка обязаны быть найдены")
+
+    def test_details_are_split_too(self):
+        client = self.client(set(range(60, 80)))
+        result = client.campaign_details(list(range(80)))
+        self.assertGreater(len(result), 0)
 
     def test_real_denial_still_propagates(self):
         """403 глотать нельзя — это настоящая проблема."""
         from wbads.wb_client import WBError
-        client = self.client([WBError("403", 403)])
+        client = self.client(set())
+        client._request = lambda *a, **kw: (_ for _ in ()).throw(WBError("403", 403))
         with self.assertRaises(WBError) as caught:
             client.campaign_details([1])
         self.assertEqual(caught.exception.status, 403)
+
+
+class TestCampaignFilter(unittest.TestCase):
+    """Статистику спрашиваем только у кампаний, которые могли откручиваться:
+    каждая лишняя пачка — минута ожидания."""
+
+    def test_keeps_campaigns_that_ran(self):
+        from wbads.collector import campaigns_worth_asking
+        rows = [
+            {"advert_id": 1, "status": 9, "end_time": None},
+            {"advert_id": 2, "status": 11, "end_time": None},
+            {"advert_id": 3, "status": 7, "end_time": "2026-09-10T00:00:00"},
+        ]
+        self.assertEqual(campaigns_worth_asking(rows, "2026-08-25"), [1, 2, 3])
+
+    def test_drops_never_started_and_deleted(self):
+        from wbads.collector import campaigns_worth_asking
+        rows = [
+            {"advert_id": 4, "status": 4, "end_time": None},    # готова, не шла
+            {"advert_id": 5, "status": -1, "end_time": None},   # удаляется
+        ]
+        self.assertEqual(campaigns_worth_asking(rows, "2026-08-25"), [])
+
+    def test_drops_campaigns_finished_before_the_period(self):
+        from wbads.collector import campaigns_worth_asking
+        rows = [{"advert_id": 6, "status": 7, "end_time": "2025-01-01T00:00:00"}]
+        self.assertEqual(campaigns_worth_asking(rows, "2026-08-25"), [])
 
 
 class TestNetworkVsAuth(unittest.TestCase):

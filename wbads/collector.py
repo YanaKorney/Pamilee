@@ -151,6 +151,28 @@ def normalize_order(raw: dict[str, Any], now: str) -> dict[str, Any] | None:
     }
 
 
+# Статистика есть только у кампаний, которые хотя бы раз откручивались.
+# Запрашивать её у остальных — это впустую потраченные минуты ожидания,
+# потому что метод отдаётся раз в минуту.
+STATUSES_WITH_STATS = {7, 9, 11}   # завершена, идут показы, на паузе
+
+
+def campaigns_worth_asking(rows: Sequence[dict[str, Any]],
+                           date_from: str) -> list[int]:
+    """Отбирает кампании, у которых может быть статистика за период."""
+    chosen: list[int] = []
+    for row in rows:
+        if row.get("status") not in STATUSES_WITH_STATS:
+            continue
+        # Кампания, законченная до начала периода, ничего не добавит
+        end = _day(row.get("end_time")) if row.get("end_time") else ""
+        if end and end < date_from:
+            continue
+        if row.get("advert_id"):
+            chosen.append(int(row["advert_id"]))
+    return chosen
+
+
 def collect_orders(conn: sqlite3.Connection, token: str, days: int = 30,
                    end: date | None = None, on_progress: Progress | None = None,
                    ca_bundle: str = "") -> dict[str, Any]:
@@ -212,15 +234,34 @@ def collect(conn: sqlite3.Connection, token: str, days: int = 30,
             return {"campaigns": 0, "rows": 0, "message": "В кабинете нет рекламных кампаний"}
 
         _log(on_progress, f"Кампаний найдено: {len(ids)}. Забираем карточки…")
-        details = client.campaign_details(ids)
+        details = client.campaign_details(ids, on_progress=on_progress)
         campaign_rows = [normalize_campaign(r, now) for r in details]
         campaign_rows = [r for r in campaign_rows if r["advert_id"]]
         db.upsert_campaigns(conn, campaign_rows)
         conn.commit()
+        _log(on_progress, f"Карточек получено: {len(campaign_rows)} из {len(ids)}.")
 
-        _log(on_progress, f"Забираем статистику за {date_from} — {date_to}. "
-                          "Метод медленный: WB отдаёт её раз в минуту.")
-        stats = client.fullstats(ids, date_from, date_to, on_progress=on_progress)
+        if not campaign_rows:
+            _log(on_progress, "Ни одной карточки кампании получить не удалось —"
+                              " статистику запрашивать не по чему.")
+            db.finish_collect(conn, log_id, datetime.now().isoformat(timespec="seconds"),
+                              0, 0, "error", "WB не вернул ни одной карточки кампании")
+            conn.commit()
+            return {"campaigns": 0, "rows": 0, "nm_rows": 0, "orders": 0,
+                    "date_from": date_from, "date_to": date_to}
+
+        # Спрашиваем статистику только у тех, у кого она может быть:
+        # каждая лишняя пачка — минута ожидания.
+        ask_ids = campaigns_worth_asking(campaign_rows, date_from)
+        skipped = len(campaign_rows) - len(ask_ids)
+        if skipped:
+            _log(on_progress, f"Пропускаю {skipped} кампаний: не запускались"
+                              " или закончились до начала периода.")
+
+        _log(on_progress, f"Забираем статистику по {len(ask_ids)} кампаниям "
+                          f"за {date_from} — {date_to}.")
+        _log(on_progress, "Метод медленный: WB отдаёт его раз в минуту.")
+        stats = client.fullstats(ask_ids, date_from, date_to, on_progress=on_progress)
 
         daily_all: list[dict[str, Any]] = []
         nm_all: list[dict[str, Any]] = []
@@ -249,7 +290,11 @@ def collect(conn: sqlite3.Connection, token: str, days: int = 30,
                           len(campaign_rows), len(daily_all))
         conn.commit()
 
-        _log(on_progress, f"Готово: {len(campaign_rows)} кампаний, {len(daily_all)} дней статистики.")
+        if not daily_all:
+            _log(on_progress, "Статистики за период WB не отдал ни по одной кампании.")
+            _log(on_progress, "Заказы при этом собраны — общий ДРР считаться будет.")
+        _log(on_progress, f"Готово: {len(campaign_rows)} кампаний, "
+                          f"{len(daily_all)} дней статистики.")
         return {
             "campaigns": len(campaign_rows),
             "rows": len(daily_all),

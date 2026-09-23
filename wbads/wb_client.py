@@ -41,6 +41,12 @@ MINUTE_COOLDOWN = 61
 MAX_IDS_PER_STATS_CALL = 100
 MAX_IDS_PER_DETAIL_CALL = 50
 
+# Дробить пачку статистики мельче этого невыгодно: каждый запрос — минута,
+# а выигрыш от всё более мелких пачек быстро сходит на нет.
+MIN_IDS_PER_STATS_CALL = 12
+# Потолок запросов статистики за один сбор, он же потолок минут ожидания.
+MAX_STATS_REQUESTS = 40
+
 # Сколько страниц заказов готовы забрать за один сбор. Каждая — минута ожидания,
 # поэтому ограничиваем: остальное доберётся следующим запуском.
 MAX_ORDER_PAGES = 12
@@ -475,32 +481,71 @@ class WBAdvertClient(_MinuteLimited):
                     ids.append(int(advert_id))
         return sorted(set(ids))
 
-    def campaign_details(self, advert_ids: Sequence[int]) -> list[dict[str, Any]]:
+    def campaign_details(self, advert_ids: Sequence[int],
+                         on_progress: Progress | None = None) -> list[dict[str, Any]]:
         """Карточки кампаний: название, тип, статус, дневной бюджет.
 
-        На 404 WB отвечает, когда по запрошенным кампаниям отдавать нечего —
-        например, они удалены. Это не отказ доступа, и ронять из-за него
-        весь сбор нельзя: остальные кампании должны собраться.
+        WB отвечает 404 на всю пачку, если отдавать нечего хотя бы по части
+        кампаний в ней. Молча пропускать пачку нельзя — так теряются все
+        нормальные кампании внутри неё. Поэтому пачка делится пополам,
+        пока не выделятся те, по которым данные есть. Лимит у метода
+        щедрый (300 запросов в минуту), так что дробить можно до одной.
         """
         result: list[dict[str, Any]] = []
-        for chunk in _chunks(list(advert_ids), MAX_IDS_PER_DETAIL_CALL):
+        skipped = 0
+        queue: list[list[int]] = list(_chunks(list(advert_ids), MAX_IDS_PER_DETAIL_CALL))
+
+        while queue:
+            chunk = queue.pop(0)
             try:
                 data = self._request("POST", "/adv/v1/promotion/adverts",
                                      payload=list(chunk))
             except WBError as exc:
-                if exc.status == 404:
-                    continue
-                raise
+                if exc.status != 404:
+                    raise
+                if len(chunk) > 1:
+                    middle = len(chunk) // 2
+                    queue.insert(0, chunk[middle:])
+                    queue.insert(0, chunk[:middle])
+                else:
+                    skipped += 1
+                continue
             if isinstance(data, list):
                 result.extend(data)
+
+        if skipped and on_progress:
+            on_progress(f"Карточек не нашлось у {skipped} кампаний — вероятно, удалены.")
         return result
 
     def fullstats(self, advert_ids: Sequence[int], date_from: str, date_to: str,
-                  on_progress: Progress | None = None) -> list[dict[str, Any]]:
-        """Статистика по дням. Метод медленный: один запрос в минуту."""
+                  on_progress: Progress | None = None,
+                  max_requests: int = MAX_STATS_REQUESTS) -> list[dict[str, Any]]:
+        """Статистика по дням.
+
+        WB отвечает 404 на всю пачку, если статистики нет хотя бы по части
+        кампаний в ней. Пропускать пачку целиком — значит терять работающие
+        кампании, которые в ней были. Поэтому пачка делится пополам.
+
+        Метод отдаётся раз в минуту, и дробить до бесконечности нельзя:
+        каждый запрос — это минута ожидания. Поэтому есть и нижняя граница
+        размера пачки, и общий потолок числа запросов за сбор. Недобранное
+        приедет следующим запуском.
+        """
         result: list[dict[str, Any]] = []
-        chunks = list(_chunks(list(advert_ids), MAX_IDS_PER_STATS_CALL))
-        for index, chunk in enumerate(chunks):
+        queue: list[list[int]] = list(_chunks(list(advert_ids), MAX_IDS_PER_STATS_CALL))
+        done = 0
+        spent = 0
+        without_stats = 0
+
+        while queue:
+            if spent >= max_requests:
+                if on_progress:
+                    left = sum(len(c) for c in queue)
+                    on_progress(f"Достигнут предел запросов за один сбор; "
+                                f"{left} кампаний доберём в следующий раз.")
+                break
+
+            chunk = queue.pop(0)
             self._wait_turn(on_progress)
             payload = [
                 {"id": advert_id, "interval": {"begin": date_from, "end": date_to}}
@@ -510,18 +555,36 @@ class WBAdvertClient(_MinuteLimited):
                 data = self._request("POST", "/adv/v2/fullstats", payload=payload)
             except WBError as exc:
                 self._last_call = time.monotonic()
-                # 404 здесь значит «за этот период у кампаний нет открутки».
-                # Обычное дело: пропускаем пачку и идём дальше.
-                if exc.status == 404:
+                spent += 1
+                if exc.status != 404:
+                    raise
+                if len(chunk) > MIN_IDS_PER_STATS_CALL:
+                    # Половины отправляем в КОНЕЦ очереди, а не в начало:
+                    # иначе одна пустая пачка, дробясь вглубь, съедает весь
+                    # бюджет запросов, и до остальных дело не доходит.
+                    middle = len(chunk) // 2
+                    queue.append(chunk[:middle])
+                    queue.append(chunk[middle:])
                     if on_progress:
-                        on_progress(f"Пачка {index + 1}: за период нет статистики, пропускаю")
-                    continue
-                raise
+                        on_progress(f"По {len(chunk)} кампаниям разом данных нет — "
+                                    f"делю пополам и пробую снова")
+                else:
+                    without_stats += len(chunk)
+                    if on_progress:
+                        on_progress(f"У {len(chunk)} кампаний нет открутки за период")
+                continue
+
             self._last_call = time.monotonic()
+            spent += 1
             if isinstance(data, list):
                 result.extend(data)
-            if on_progress and len(chunks) > 1:
-                on_progress(f"Статистика рекламы: пачка {index + 1} из {len(chunks)}")
+                done += len(chunk)
+            if on_progress:
+                on_progress(f"Статистика собрана по {done} кампаниям, "
+                            f"в очереди ещё {len(queue)} пачек")
+
+        if without_stats and on_progress:
+            on_progress(f"Без статистики за период: {without_stats} кампаний.")
         return result
 
 
