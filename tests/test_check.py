@@ -76,7 +76,7 @@ class TestCheck(unittest.TestCase):
         self.assertIn("Статистика", out)
 
     def test_closed_category_reports_failure(self):
-        code, out = run_check({"balance": denied, "campaign_ids": denied})
+        code, out = run_check({"balance": denied, "campaign_index": denied})
         self.assertEqual(code, 1)
         self.assertIn("Закрыто методов рекламы: 2", out)
         self.assertIn("Продвижение", out)
@@ -87,7 +87,10 @@ class TestCheck(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("Закрыто методов рекламы: 1", out)
         self.assertIn("✗ Статистика по дням", out)
-        self.assertIn("Только на чтение", out)
+        # Все методы теперь GET, поэтому совет «выпустите токен без галочки
+        # Только на чтение» стал неверным: читающий токен их не закрывает.
+        self.assertNotIn("Только на чтение", out)
+        self.assertIn("Категория «Продвижение» у токена есть", out)
 
     def test_missing_token_explains_where_to_get_it(self):
         buffer = io.StringIO()
@@ -124,12 +127,12 @@ class TestNotFoundIsNotDenial(unittest.TestCase):
         self.assertNotIn("Проверьте в кабинете", out)
         self.assertNotIn("Что записано в вашем токене", out)
 
-    def test_real_denial_after_partial_success_names_read_only(self):
+    def test_real_denial_after_partial_success_does_not_blame_the_category(self):
         """Часть методов прошла, часть отказала — категория ни при чём."""
         code, out = run_check({"campaign_details": denied, "fullstats": denied})
         self.assertEqual(code, 1)
         self.assertIn("Категория «Продвижение» у токена есть", out)
-        self.assertIn("Только на чтение", out)
+        self.assertIn("поддержку", out)
 
     def test_stats_window_is_in_the_past(self):
         """За сегодня статистики может не быть — просим прошедшие дни."""
@@ -165,7 +168,7 @@ class TestBatchSplitting(unittest.TestCase):
         client._wait_turn = lambda on_progress=None, cooldown=0: None
         counter = {"requests": 0}
 
-        def request(method, path, payload=None, params=None):
+        def request(method, path, payload=None, params=None, on_progress=None):
             counter["requests"] += 1
             # Новые методы WB принимают ID списком в адресе запроса.
             ids = [int(i) for i in (params or {}).get("ids", "").split(",") if i]
@@ -376,7 +379,7 @@ class TestNetworkVsAuth(unittest.TestCase):
 
     def test_tls_failure_does_not_blame_the_token(self):
         code, out = run_check({"balance": self.tls_error,
-                               "campaign_ids": self.tls_error},
+                               "campaign_index": self.tls_error},
                               orders={"orders": self.tls_error})
         self.assertEqual(code, 1)
         self.assertIn("НЕ про токен", out)
@@ -387,13 +390,13 @@ class TestNetworkVsAuth(unittest.TestCase):
     def test_tls_advice_printed_once_not_per_method(self):
         """Длинное объяснение не должно повторяться под каждым методом."""
         _, out = run_check({"balance": self.tls_error,
-                            "campaign_ids": self.tls_error},
+                            "campaign_index": self.tls_error},
                            orders={"orders": self.tls_error})
         self.assertEqual(out.count("Дата и время на этом компьютере"), 1)
 
     def test_network_failure_suggests_checking_internet(self):
         code, out = run_check({"balance": self.network_error,
-                               "campaign_ids": self.network_error},
+                               "campaign_index": self.network_error},
                               orders={"orders": self.network_error})
         self.assertEqual(code, 1)
         self.assertIn("связаться с Wildberries", out)
@@ -401,14 +404,14 @@ class TestNetworkVsAuth(unittest.TestCase):
 
     def test_real_403_still_diagnoses_the_token(self):
         """А вот настоящий отказ доступа по-прежнему разбирает токен."""
-        code, out = run_check({"balance": denied, "campaign_ids": denied},
+        code, out = run_check({"balance": denied, "campaign_index": denied},
                               orders={"orders": denied})
         self.assertEqual(code, 1)
         self.assertIn("Что записано в вашем токене", out)
 
     def test_offers_demo_while_connection_is_broken(self):
         _, out = run_check({"balance": self.tls_error,
-                            "campaign_ids": self.tls_error},
+                            "campaign_index": self.tls_error},
                            orders={"orders": self.tls_error})
         self.assertIn("demo", out)
 
@@ -909,7 +912,7 @@ class TestActualRequestsMatchWBToday(unittest.TestCase):
         client._wait_turn = lambda on_progress=None, cooldown=0: None
         calls: list[dict] = []
 
-        def request(method, path, payload=None, params=None):
+        def request(method, path, payload=None, params=None, on_progress=None):
             calls.append({"method": method, "path": path,
                           "payload": payload, "params": params})
             return [] if path.endswith("fullstats") else {"adverts": []}
@@ -997,3 +1000,187 @@ class TestActualRequestsMatchWBToday(unittest.TestCase):
         batches = -(-511 // MAX_IDS_PER_STATS_CALL)
         self.assertLessEqual(batches * STATS_COOLDOWN, 5 * 60,
                              "весь кабинет должен собираться за считаные минуты")
+
+
+class TestRateLimitDoesNotKillTheCollection(unittest.TestCase):
+    """429 — это «подожди», а не «нельзя». Сбор из-за него падал целиком,
+    хотя 511 кампаний уже лежали в базе, а заказы даже не начинались."""
+
+    def test_pause_comes_from_wb_not_from_a_guess(self):
+        import io
+        import urllib.error
+        from wbads.wb_client import MAX_RETRY_PAUSE, _retry_after
+
+        def error(headers):
+            return urllib.error.HTTPError(
+                "https://x", 429, "Too Many Requests", headers, io.BytesIO(b""))
+
+        self.assertEqual(_retry_after(error({"X-RateLimit-Retry": "20"}), 2.0), 21)
+        self.assertEqual(_retry_after(error({"Retry-After": "45"}), 2.0), 46)
+        # Без заголовка остаётся своя пауза, но не бесконечная.
+        self.assertEqual(_retry_after(error({}), 2.0), 2.0)
+        self.assertEqual(_retry_after(error({"Retry-After": "99999"}), 2.0),
+                         MAX_RETRY_PAUSE)
+        self.assertEqual(_retry_after(error({"Retry-After": "мусор"}), 4.0), 4.0)
+
+    def test_stats_retry_the_same_batch_instead_of_dropping_it(self):
+        from wbads.wb_client import WBAdvertClient, WBError
+
+        client = WBAdvertClient.__new__(WBAdvertClient)
+        client.token = "t"
+        client.base_url = "x"
+        client.timeout = 1
+        client.max_retries = 1
+        client.ca_bundle = ""
+        client.used_fallback_bundle = False
+        client._last_call = 0.0
+        client._wait_turn = lambda on_progress=None, cooldown=0: None
+        calls = {"n": 0}
+
+        def request(method, path, payload=None, params=None, on_progress=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise WBError("Слишком часто (429)", 429)
+            return [{"advertId": int(i), "days": []}
+                    for i in params["ids"].split(",")]
+
+        client._request = request
+        result = client.fullstats([1, 2], "2026-08-25", "2026-09-23")
+        self.assertEqual(calls["n"], 2, "пачку обязаны повторить, а не бросить")
+        self.assertEqual(len(result), 2, "данные обязаны дойти после паузы")
+
+    def test_stats_give_up_quietly_if_the_limit_holds(self):
+        """Если лимит не отпускает, сбор останавливается, а не падает."""
+        from wbads.wb_client import WBAdvertClient, WBError
+
+        client = WBAdvertClient.__new__(WBAdvertClient)
+        client.token = "t"
+        client.base_url = "x"
+        client.timeout = 1
+        client.max_retries = 1
+        client.ca_bundle = ""
+        client.used_fallback_bundle = False
+        client._last_call = 0.0
+        client._wait_turn = lambda on_progress=None, cooldown=0: None
+        client._request = lambda *a, **kw: (_ for _ in ()).throw(
+            WBError("Слишком часто (429)", 429))
+
+        said: list[str] = []
+        result = client.fullstats([1, 2], "2026-08-25", "2026-09-23",
+                                  on_progress=said.append)
+        self.assertEqual(result, [])
+        self.assertTrue(any("остальное доберём" in line for line in said),
+                        f"человеку нужно сказать, что делать дальше: {said}")
+
+    def test_collection_survives_a_failing_stats_method(self):
+        """Кампании сохранены, заказы собраны — падать незачем."""
+        import tempfile
+        from unittest.mock import patch as p2
+        from wbads import collector, db
+        from wbads.wb_client import WBError
+
+        orders_called = {"yes": False}
+
+        def orders(self, d, on_progress=None, max_pages=12):
+            orders_called["yes"] = True
+            return []
+
+        index = [{"advertId": i, "type": 8, "status": 9} for i in range(1, 6)]
+        methods = {
+            "balance": lambda self: {"balance": 0.0, "bonus": 0.0, "net": 100.0},
+            "campaign_index": lambda self: index,
+            "campaign_details": lambda self, ids, on_progress=None: [],
+            "fullstats": lambda self, *a, **kw: (_ for _ in ()).throw(
+                WBError("Слишком часто (429)", 429)),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = db.init_db(Path(tmp) / "c.db")
+            with p2.multiple("wbads.wb_client.WBAdvertClient", **methods), \
+                    p2.multiple("wbads.wb_client.WBStatisticsClient", orders=orders):
+                result = collector.collect(conn, "token", days=30)
+            conn.close()
+        self.assertEqual(result["campaigns"], 5, "кампании обязаны сохраниться")
+        self.assertTrue(orders_called["yes"], "заказы обязаны собраться")
+
+    def test_the_check_does_not_steal_the_collectors_turn(self):
+        """Проверка доступа и сбор — два клиента в одном запуске. Лимит же
+        у WB один на кабинет, поэтому паузу надо помнить между ними."""
+        import time
+        from wbads.wb_client import WBAdvertClient
+
+        from wbads.wb_client import _RATE_CLOCK
+        self.addCleanup(_RATE_CLOCK.clear)
+        first = WBAdvertClient("token")
+        first._last_call = time.monotonic()
+        second = WBAdvertClient("token")
+        self.assertGreater(second._last_call, 0.0,
+                           "второй клиент обязан знать, когда запрашивал первый")
+
+
+class TestExhaustedRetriesKeepTheRealReason(unittest.TestCase):
+    """После исчерпания повторов программа винила интернет, даже когда WB
+    внятно ответил «слишком часто». Из-за этого 429 не опознавался как
+    лимит частоты и ронял весь сбор."""
+
+    def test_rate_limit_stays_a_rate_limit(self):
+        import io
+        import urllib.error
+        from unittest.mock import patch as p2
+        from wbads.wb_client import WBAdvertClient, WBError
+
+        client = WBAdvertClient("token", max_retries=2)
+
+        def always_429(*args, **kwargs):
+            raise urllib.error.HTTPError(
+                "https://x", 429, "Too Many Requests",
+                {"X-RateLimit-Retry": "0"},
+                io.BytesIO(b'{"detail":"rate limit exceeded"}'))
+
+        with p2("urllib.request.OpenerDirector.open", always_429), \
+                p2("time.sleep", lambda *_: None):
+            with self.assertRaises(WBError) as caught:
+                client._request("GET", "/adv/v3/fullstats")
+
+        self.assertEqual(caught.exception.status, 429,
+                         "код ответа обязан дожить до вызывающего кода")
+        self.assertEqual(caught.exception.kind, "http")
+        self.assertNotIn("подключение к интернету", str(caught.exception),
+                         "лимит частоты не имеет отношения к интернету")
+        self.assertIn("rate limit exceeded", str(caught.exception))
+
+
+class TestProbeAsksLiveCampaigns(unittest.TestCase):
+    """Проверять статистику на первых пяти кампаниях по списку — значит
+    часто попадать на остановленные год назад и получать честное «данных
+    нет» как предупреждение. Спрашиваем у тех, у кого открутка правдоподобна."""
+
+    def test_active_and_recent_campaigns_go_first(self):
+        picked = cli._likely_to_have_stats([
+            {"advertId": 1, "status": 8, "changeTime": "2026-09-01"},   # отменена
+            {"advertId": 2, "status": 9, "changeTime": "2026-05-01"},   # активна
+            {"advertId": 3, "status": 4, "changeTime": "2026-09-20"},   # не запускалась
+            {"advertId": 4, "status": 11, "changeTime": "2026-09-22"},  # на паузе
+            {"advertId": 5, "status": 7, "changeTime": "2026-09-10"},   # завершена
+        ])
+        self.assertEqual(picked, [4, 5, 2],
+                         "нужны статусы 9/11/7, свежие — первыми")
+
+    def test_falls_back_to_whatever_there_is(self):
+        self.assertEqual(cli._likely_to_have_stats(
+            [{"advertId": 1, "status": 8}]), [])
+
+    def test_check_probes_the_live_ones(self):
+        asked: dict[str, object] = {}
+
+        def fullstats(self, ids, a, b, on_progress=None, max_requests=40,
+                      give_up_after=15):
+            asked["ids"] = list(ids)
+            return [{"advertId": ids[0], "days": []}]
+
+        index = [
+            {"advertId": 100, "type": 8, "status": 8, "changeTime": "2026-09-01"},
+            {"advertId": 200, "type": 9, "status": 9, "changeTime": "2026-09-22"},
+        ]
+        run_check({"campaign_index": lambda self: index, "fullstats": fullstats})
+        self.assertEqual(asked["ids"], [200],
+                         "отменённую кампанию спрашивать незачем")

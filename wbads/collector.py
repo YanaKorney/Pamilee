@@ -302,9 +302,18 @@ def collect(conn: sqlite3.Connection, token: str, days: int = 30,
                               "Проверю статистику парой запросов, а не полным "
                               "перебором.")
 
-        stats = client.fullstats(ask_ids, date_from, date_to,
-                                 on_progress=on_progress,
-                                 give_up_after=stats_budget)
+        # Отказ на статистике не должен обнулять весь сбор: кампании уже в
+        # базе, а заказы собираются отдельным методом и нужны для общего ДРР.
+        # Ронять из-за статистики и их — значит потерять полчаса работы.
+        try:
+            stats = client.fullstats(ask_ids, date_from, date_to,
+                                     on_progress=on_progress,
+                                     give_up_after=stats_budget)
+        except WBError as exc:
+            _log(on_progress, f"Статистику получить не вышло: {exc}")
+            _log(on_progress, "Кампании сохранены, заказы соберу — "
+                              "статистику доберём следующим запуском.")
+            stats = []
 
         daily_all: list[dict[str, Any]] = []
         nm_all: list[dict[str, Any]] = []

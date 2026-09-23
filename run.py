@@ -524,6 +524,19 @@ def _who_breaks_the_connection() -> None:
         _print("выполните в этом окне: python -m pip install certifi")
 
 
+def _likely_to_have_stats(index: list[dict]) -> list[int]:
+    """Кампании, у которых статистика за прошлую неделю правдоподобна.
+
+    Проверять на первых пяти по списку — значит часто попадать на давно
+    остановленные и получать честное «данных нет» как предупреждение.
+    Свежесть важнее номера: сначала те, что менялись недавно.
+    """
+    live = [row for row in index
+            if int(row.get("status") or 0) in (9, 11, 7) and row.get("advertId")]
+    live.sort(key=lambda row: str(row.get("changeTime") or ""), reverse=True)
+    return [row["advertId"] for row in live]
+
+
 def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
     """Проверяет токен по всем методам, которые нужны сервису.
 
@@ -589,17 +602,21 @@ def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
         return result
 
     balance = probe("Баланс кабинета", "GET  /adv/v1/balance", client.balance)
-    found = probe("Список кампаний", "GET  /adv/v1/promotion/count", client.campaign_ids)
+    found = probe("Список кампаний", "GET  /adv/v1/promotion/count",
+                  client.campaign_index)
     if found:
-        ids = found
+        ids = [row["advertId"] for row in found]
+        # Спрашиваем статистику у активных кампаний, а не у первых по списку:
+        # у остановленной год назад её честно нет, и проверка зря пугала бы
+        # предупреждением. Статистика бывает у статусов 9, 11 и 7.
+        probe_ids = _likely_to_have_stats(found) or ids
         probe("Названия кампаний", "GET  /api/advert/v2/adverts",
-              lambda: client.campaign_details(ids[:5]), expect_data=True)
-        # За сегодня статистики может ещё не быть, и WB ответит 404.
-        # Берём прошедшую неделю: если кампания работала, данные найдутся.
+              lambda: client.campaign_details(probe_ids[:5]), expect_data=True)
+        # За сегодня статистики может ещё не быть — берём прошедшую неделю.
         stats_to = date.today() - timedelta(days=1)
         stats_from = stats_to - timedelta(days=6)
         probe("Статистика по дням", "GET  /adv/v3/fullstats",
-              lambda: client.fullstats(ids[:5], stats_from.isoformat(),
+              lambda: client.fullstats(probe_ids[:5], stats_from.isoformat(),
                                        stats_to.isoformat()),
               expect_data=True)
 
@@ -642,13 +659,13 @@ def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
             # и советовать её проверить было бы просто неверно.
             _print("Категория «Продвижение» у токена есть: другие её методы")
             _print("отработали. Значит, дело в чём-то одном:")
-            _print("  • токен выпущен в режиме «Только на чтение», а эти методы")
-            _print("    запрашиваются через POST — выпустите токен без этой галочки;")
-            _print("  • либо WB временно закрыл именно эти методы.")
+            _print("  • WB закрыл доступ именно к этим методам для вашего")
+            _print("    кабинета — тогда остаётся написать в поддержку;")
+            _print("  • либо это временно: попробуйте через час.")
         else:
             _print("Проверьте в кабинете, что у токена отмечена категория «Продвижение».")
-            _print("Если она есть, а доступа нет — выпустите токен без галочки")
-            _print("«Только на чтение»: статистика запрашивается методом POST.")
+            _print("Если она есть, а доступа нет — выпустите токен заново")
+            _print("в разделе «Настройки → Доступ к API».")
             _describe_token_for_human(cfg.token)
         return 1
 

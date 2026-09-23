@@ -43,6 +43,15 @@ from typing import Any, Callable, Iterable, Sequence
 ADVERT_URL = "https://advert-api.wildberries.ru"
 STATISTICS_URL = "https://statistics-api.wildberries.ru"
 
+# Дольше этого не ждём, даже если WB просит: человек не должен сидеть
+# перед замершим окном.
+MAX_RETRY_PAUSE = 120
+
+# Сколько раз готовы переждать лимит частоты на одной и той же пачке.
+# Дальше честнее остановиться: собранное уже в базе, остальное доберётся
+# следующим запуском.
+MAX_RATE_LIMIT_WAITS = 3
+
 # Пауза между запросами к методам, которые WB отдаёт раз в минуту.
 MINUTE_COOLDOWN = 61
 # Статистика: 3 запроса в минуту с интервалом 20 секунд между ними.
@@ -430,7 +439,8 @@ class _BaseClient:
         self.max_retries = max_retries
 
     def _request(self, method: str, path: str, payload: Any | None = None,
-                 params: dict[str, str] | None = None) -> Any:
+                 params: dict[str, str] | None = None,
+                 on_progress: Progress | None = None) -> Any:
         url = f"{self.base_url}{path}"
         if params:
             url = f"{url}?{urllib.parse.urlencode(params)}"
@@ -472,7 +482,19 @@ class _BaseClient:
                 if opener.redirected:
                     message += (f"\nЗапрос был перенаправлен на {opener.redirected}"
                                 " — это и могло сломать метод.")
-                if exc.code == 429 or exc.code >= 500:
+                if exc.code == 429:
+                    # WB сам пишет, сколько ждать. Своя догадка тут только
+                    # мешает: слишком мало — снова отказ, слишком много —
+                    # человек ждёт напрасно.
+                    pause = _retry_after(exc, default=delay)
+                    last_error = WBError(message, exc.code)
+                    if on_progress:
+                        on_progress(f"WB просит подождать {int(pause)} с "
+                                    "— это лимит частоты запросов")
+                    time.sleep(pause)
+                    delay = min(delay * 2, MAX_RETRY_PAUSE)
+                    continue
+                if exc.code >= 500:
                     last_error = WBError(message, exc.code)
                     time.sleep(delay)
                     delay *= 2
@@ -505,6 +527,14 @@ class _BaseClient:
                 last_error = exc
                 time.sleep(delay)
                 delay *= 2
+        # Если последним был внятный отказ WB, его и отдаём: у лимита частоты
+        # и просроченного токена нет ничего общего с подключением к интернету,
+        # а вызывающий код опознаёт причину по коду ответа.
+        if isinstance(last_error, WBError):
+            raise WBError(
+                f"{last_error}\nПовторы не помогли — WB отвечает так же.",
+                last_error.status, last_error.kind,
+            )
         raise WBError(
             "Не удалось связаться с Wildberries.\n"
             "Проверьте подключение к интернету и попробуйте снова.\n"
@@ -513,12 +543,23 @@ class _BaseClient:
         )
 
 
-class _MinuteLimited(_BaseClient):
-    """Клиент для методов, которые WB отдаёт не чаще раза в минуту."""
+# Лимиты WB считаются на кабинет, а не на объект внутри программы.
+# Проверка доступа и сбор — это два разных клиента в одном запуске, и если
+# не помнить время запроса между ними, второй тут же получает 429: именно
+# так проверка «съедала» первую пачку статистики у сбора.
+_RATE_CLOCK: dict[str, float] = {}
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self._last_call = 0.0
+
+class _MinuteLimited(_BaseClient):
+    """Клиент для методов, частоту которых WB ограничивает жёстко."""
+
+    @property
+    def _last_call(self) -> float:
+        return _RATE_CLOCK.get(type(self).__name__, 0.0)
+
+    @_last_call.setter
+    def _last_call(self, value: float) -> None:
+        _RATE_CLOCK[type(self).__name__] = value
 
     def _wait_turn(self, on_progress: Progress | None = None,
                    cooldown: float = MINUTE_COOLDOWN) -> None:
@@ -592,6 +633,7 @@ class WBAdvertClient(_MinuteLimited):
         result: list[dict[str, Any]] = []
         skipped = 0
         spent = 0
+        waits = 0
         # Почему метод молчал — пригодится дальше: если карточки не отдаются
         # вообще, то и статистику спрашивать по полчаса смысла мало.
         self.last_404_message = ""
@@ -619,8 +661,21 @@ class WBAdvertClient(_MinuteLimited):
             try:
                 data = self._request(
                     "GET", "/api/advert/v2/adverts",
-                    params={"ids": ",".join(str(i) for i in chunk)})
+                    params={"ids": ",".join(str(i) for i in chunk)},
+                    on_progress=on_progress)
             except WBError as exc:
+                if exc.status == 429:
+                    # Названия необязательны, но и терять их из-за лимита
+                    # частоты незачем: повторим ту же пачку чуть позже.
+                    waits += 1
+                    if waits > MAX_RATE_LIMIT_WAITS:
+                        if on_progress:
+                            on_progress("Лимит частоты на карточках кампаний — "
+                                        "дальше не пробую, названия необязательны.")
+                        break
+                    queue.insert(0, chunk)
+                    time.sleep(min(5.0 * waits, MAX_RETRY_PAUSE))
+                    continue
                 if exc.status != 404:
                     raise
                 if not self.last_404_message:
@@ -669,6 +724,7 @@ class WBAdvertClient(_MinuteLimited):
         done = 0
         spent = 0
         without_stats = 0
+        waits = 0
         # Причина отказа нужна снаружи: проверка показывает её человеку.
         self.last_404_message = ""
 
@@ -699,10 +755,28 @@ class WBAdvertClient(_MinuteLimited):
                     "ids": ",".join(str(advert_id) for advert_id in chunk),
                     "beginDate": date_from,
                     "endDate": date_to,
-                })
+                }, on_progress=on_progress)
             except WBError as exc:
                 self._last_call = time.monotonic()
                 spent += 1
+                if exc.status == 429:
+                    # Лимит частоты — это не отказ и не отсутствие данных.
+                    # Ронять из-за него весь сбор нельзя: пачку возвращаем
+                    # в начало очереди и ждём дольше обычного.
+                    waits += 1
+                    if waits > MAX_RATE_LIMIT_WAITS:
+                        if on_progress:
+                            on_progress("WB продолжает ограничивать частоту "
+                                        "запросов. Останавливаюсь: собранное "
+                                        "уже сохранено, остальное доберём "
+                                        "следующим запуском.")
+                        break
+                    queue.insert(0, chunk)
+                    if on_progress:
+                        on_progress("Лимит частоты запросов. Подожду минуту "
+                                    "и повторю эту же пачку.")
+                    self._wait_turn(on_progress, cooldown=MINUTE_COOLDOWN)
+                    continue
                 if exc.status != 404:
                     raise
                 if not self.last_404_message:
@@ -871,3 +945,25 @@ def _clamp_period(date_from: str, date_to: str) -> str:
     if (end - start).days < MAX_STATS_DAYS:
         return date_from
     return (end - timedelta(days=MAX_STATS_DAYS - 1)).strftime("%Y-%m-%d")
+
+
+def _retry_after(exc: urllib.error.HTTPError, default: float) -> float:
+    """Сколько ждать после 429 — по словам самого WB.
+
+    WB кладёт срок в заголовок (X-RateLimit-Retry, иногда Retry-After) и
+    пишет об этом прямо в тексте отказа. Своя догадка тут только мешает:
+    подождёшь меньше — получишь отказ снова, подождёшь больше — человек
+    сидит перед замершим окном.
+    """
+    headers = getattr(exc, "headers", None)
+    for name in ("X-RateLimit-Retry", "Retry-After", "X-Ratelimit-Retry-After"):
+        raw = headers.get(name) if headers else None
+        if not raw:
+            continue
+        try:
+            seconds = float(str(raw).strip())
+        except ValueError:
+            continue
+        if seconds > 0:
+            return min(seconds + 1, MAX_RETRY_PAUSE)
+    return min(max(default, 1.0), MAX_RETRY_PAUSE)
