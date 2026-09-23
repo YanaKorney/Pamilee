@@ -541,7 +541,8 @@ def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
     _print("Проверяем доступ к API продвижения (advert-api.wildberries.ru)…")
     print()
 
-    failures: list[str] = []
+    failures: list[str] = []      # отказано в доступе — вот это проблема
+    empty: list[str] = []         # доступ есть, но данных за период нет
     problems: list[WBError] = []
     ids: list[int] = []
 
@@ -549,6 +550,14 @@ def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
         try:
             result = call()
         except WBError as exc:
+            # 404 означает «запрос дошёл, прав хватило, но отдавать нечего».
+            # Считать это отказом доступа — значит путать человека:
+            # у кампании просто может не быть статистики за период.
+            if exc.status == 404:
+                print(f"  ⚠ {label:<26} {method}")
+                print("    Данных за проверяемый период нет — доступ при этом есть.")
+                empty.append(label)
+                return None
             print(f"  ✗ {label:<26} {method}")
             # Многострочные объяснения печатаем один раз в конце, а не
             # по три копии подряд — здесь только суть.
@@ -565,9 +574,13 @@ def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
         ids = found
         probe("Карточки кампаний", "POST /adv/v1/promotion/adverts",
               lambda: client.campaign_details(ids[:1]))
+        # За сегодня статистики может ещё не быть, и WB ответит 404.
+        # Берём прошедшую неделю: если кампания работала, данные найдутся.
+        stats_to = date.today() - timedelta(days=1)
+        stats_from = stats_to - timedelta(days=6)
         probe("Статистика по дням", "POST /adv/v2/fullstats",
-              lambda: client.fullstats(ids[:1], date.today().isoformat(),
-                                       date.today().isoformat()))
+              lambda: client.fullstats(ids[:1], stats_from.isoformat(),
+                                       stats_to.isoformat()))
 
     # Категория «Статистика» отдельная: без неё реклама считается,
     # а общий ДРР — нет. Поэтому её отказ не валит проверку целиком.
@@ -603,15 +616,30 @@ def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
             _explain_total_denial(cfg.token)
             return 1
         _print(f"Закрыто методов рекламы: {len(failures)}.")
-        _print("Проверьте в кабинете, что у токена отмечена категория «Продвижение».")
-        _print("Если она есть, а доступа нет — выпустите токен без галочки")
-        _print("«Только на чтение»: статистика запрашивается методом POST.")
-        _describe_token_for_human(cfg.token)
+        if balance is not None or found:
+            # Часть методов «Продвижения» прошла — значит, категория на месте,
+            # и советовать её проверить было бы просто неверно.
+            _print("Категория «Продвижение» у токена есть: другие её методы")
+            _print("отработали. Значит, дело в чём-то одном:")
+            _print("  • токен выпущен в режиме «Только на чтение», а эти методы")
+            _print("    запрашиваются через POST — выпустите токен без этой галочки;")
+            _print("  • либо WB временно закрыл именно эти методы.")
+        else:
+            _print("Проверьте в кабинете, что у токена отмечена категория «Продвижение».")
+            _print("Если она есть, а доступа нет — выпустите токен без галочки")
+            _print("«Только на чтение»: статистика запрашивается методом POST.")
+            _describe_token_for_human(cfg.token)
         return 1
 
     if getattr(client, "used_fallback_bundle", False):
         _print("Хранилище сертификатов системы устарело — использую набор certifi.")
         _print("Работает, но стоит установить обновления Windows.")
+        print()
+
+    if empty:
+        _print("Доступ есть везде. По части методов за проверенный период")
+        _print("не оказалось данных — это нормально: у кампании могло")
+        _print("не быть открутки. Сбор всё равно запускайте.")
         print()
 
     if orders_ok is None:

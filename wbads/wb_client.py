@@ -476,10 +476,21 @@ class WBAdvertClient(_MinuteLimited):
         return sorted(set(ids))
 
     def campaign_details(self, advert_ids: Sequence[int]) -> list[dict[str, Any]]:
-        """Карточки кампаний: название, тип, статус, дневной бюджет."""
+        """Карточки кампаний: название, тип, статус, дневной бюджет.
+
+        На 404 WB отвечает, когда по запрошенным кампаниям отдавать нечего —
+        например, они удалены. Это не отказ доступа, и ронять из-за него
+        весь сбор нельзя: остальные кампании должны собраться.
+        """
         result: list[dict[str, Any]] = []
         for chunk in _chunks(list(advert_ids), MAX_IDS_PER_DETAIL_CALL):
-            data = self._request("POST", "/adv/v1/promotion/adverts", payload=list(chunk))
+            try:
+                data = self._request("POST", "/adv/v1/promotion/adverts",
+                                     payload=list(chunk))
+            except WBError as exc:
+                if exc.status == 404:
+                    continue
+                raise
             if isinstance(data, list):
                 result.extend(data)
         return result
@@ -495,7 +506,17 @@ class WBAdvertClient(_MinuteLimited):
                 {"id": advert_id, "interval": {"begin": date_from, "end": date_to}}
                 for advert_id in chunk
             ]
-            data = self._request("POST", "/adv/v2/fullstats", payload=payload)
+            try:
+                data = self._request("POST", "/adv/v2/fullstats", payload=payload)
+            except WBError as exc:
+                self._last_call = time.monotonic()
+                # 404 здесь значит «за этот период у кампаний нет открутки».
+                # Обычное дело: пропускаем пачку и идём дальше.
+                if exc.status == 404:
+                    if on_progress:
+                        on_progress(f"Пачка {index + 1}: за период нет статистики, пропускаю")
+                    continue
+                raise
             self._last_call = time.monotonic()
             if isinstance(data, list):
                 result.extend(data)

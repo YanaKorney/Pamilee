@@ -94,6 +94,98 @@ class TestCheck(unittest.TestCase):
         self.assertIn("Продвижение", out)
 
 
+class TestNotFoundIsNotDenial(unittest.TestCase):
+    """404 означает «запрос дошёл, прав хватило, но отдавать нечего».
+    Считать это отказом доступа — значит гнать человека проверять
+    категорию токена, которая на самом деле на месте."""
+
+    @staticmethod
+    def not_found(*args, **kwargs):
+        from wbads.wb_client import WBError
+        raise WBError("Метод не найден (404).", 404)
+
+    def test_empty_data_does_not_fail_the_check(self):
+        code, out = run_check({"campaign_details": self.not_found,
+                               "fullstats": self.not_found})
+        self.assertEqual(code, 0)
+        self.assertIn("⚠", out)
+        self.assertIn("Данных за проверяемый период нет", out)
+        self.assertIn("Сбор всё равно запускайте", out)
+
+    def test_does_not_blame_the_token_category(self):
+        """Баланс и список кампаний прошли — значит, категория есть."""
+        _, out = run_check({"campaign_details": self.not_found,
+                            "fullstats": self.not_found})
+        self.assertNotIn("Проверьте в кабинете", out)
+        self.assertNotIn("Что записано в вашем токене", out)
+
+    def test_real_denial_after_partial_success_names_read_only(self):
+        """Часть методов прошла, часть отказала — категория ни при чём."""
+        code, out = run_check({"campaign_details": denied, "fullstats": denied})
+        self.assertEqual(code, 1)
+        self.assertIn("Категория «Продвижение» у токена есть", out)
+        self.assertIn("Только на чтение", out)
+
+    def test_stats_window_is_in_the_past(self):
+        """За сегодня статистики может не быть — просим прошедшие дни."""
+        seen = {}
+
+        def capture(self_, ids, date_from, date_to, on_progress=None):
+            seen["from"], seen["to"] = date_from, date_to
+            return []
+
+        run_check({"fullstats": capture})
+        from datetime import date, timedelta
+        self.assertEqual(seen["to"], (date.today() - timedelta(days=1)).isoformat())
+        self.assertLess(seen["from"], seen["to"])
+
+
+class TestCollectionSurvivesEmptyData(unittest.TestCase):
+    """Сбор не должен падать из-за кампании без открутки."""
+
+    def client(self, responses):
+        from wbads.wb_client import WBAdvertClient
+        client = WBAdvertClient.__new__(WBAdvertClient)
+        client.token = "t"
+        client.base_url = "x"
+        client.timeout = 1
+        client.max_retries = 1
+        client._last_call = 0.0
+        client.ca_bundle = ""
+        client.used_fallback_bundle = False
+        client._wait_turn = lambda on_progress=None: None
+        calls = {"n": 0}
+
+        def request(method, path, payload=None, params=None):
+            calls["n"] += 1
+            answer = responses[min(calls["n"], len(responses)) - 1]
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        client._request = request
+        return client
+
+    def test_fullstats_skips_empty_chunk_and_keeps_going(self):
+        from wbads.wb_client import WBError
+        client = self.client([WBError("404", 404), [{"advertId": 2, "days": []}]])
+        result = client.fullstats(list(range(150)), "2026-09-01", "2026-09-07")
+        self.assertEqual(len(result), 1)
+
+    def test_details_skip_empty_chunk(self):
+        from wbads.wb_client import WBError
+        client = self.client([WBError("404", 404), [{"advertId": 5}]])
+        self.assertEqual(len(client.campaign_details(list(range(80)))), 1)
+
+    def test_real_denial_still_propagates(self):
+        """403 глотать нельзя — это настоящая проблема."""
+        from wbads.wb_client import WBError
+        client = self.client([WBError("403", 403)])
+        with self.assertRaises(WBError) as caught:
+            client.campaign_details([1])
+        self.assertEqual(caught.exception.status, 403)
+
+
 class TestNetworkVsAuth(unittest.TestCase):
     """Сетевой сбой и просроченный сертификат не имеют отношения к токену.
     Раньше программа сваливала их в кучу с отказом доступа и советовала
