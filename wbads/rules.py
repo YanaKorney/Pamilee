@@ -74,6 +74,23 @@ def num(value: float) -> str:
     return f"{round(value):,.0f}".replace(",", " ")
 
 
+def plural(count: int, one: str, few: str, many: str) -> str:
+    """Русская форма слова по числу: 1 кампания, 2 кампании, 5 кампаний.
+
+    «Пропускаю 1 кампаний» читается как небрежность и подрывает доверие
+    ко всему остальному, что программа пишет.
+    """
+    tail = abs(count) % 100
+    if 11 <= tail <= 14:
+        return many
+    last = tail % 10
+    if last == 1:
+        return one
+    if 2 <= last <= 4:
+        return few
+    return many
+
+
 def pct(value: float | None, digits: int = 1) -> str:
     if value is None:
         return "—"

@@ -275,6 +275,10 @@ def cmd_start(args: argparse.Namespace) -> int:
         if cmd_collect(collect_args) != 0:
             print()
             _print("Сбор не удался. Открою дашборд на том, что уже есть.")
+            _print("Чтобы разобраться за один раз, запустите потом")
+            _print("DIAGNOSTIKA-Windows.bat (на Mac — DIAGNOSTIKA-Mac.command):")
+            _print("она проверит все методы сразу и напишет отчёт в файл")
+            _print("диагностика.txt — его можно отправить целиком.")
     print()
 
     # ── шаг 3: дашборд ───────────────────────────────────────────────────
@@ -828,6 +832,10 @@ def main(argv: list[str] | None = None) -> int:
     p_check = sub.add_parser("check", help="проверить токен WB")
     p_check.set_defaults(func=cmd_check)
 
+    p_diag = sub.add_parser(
+        "diagnose", help="полная диагностика связи с WB одним запуском")
+    p_diag.set_defaults(func=cmd_diagnose)
+
     args = parser.parse_args(argv)
     try:
         if not args.command:
@@ -840,6 +848,47 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except Exception as exc:  # noqa: BLE001 — последний рубеж перед пользователем
         return _report_crash(exc)
+
+
+def cmd_diagnose(args: argparse.Namespace) -> int:
+    """Проверяет всё сразу и пишет отчёт в файл.
+
+    Отличие от `check`: та останавливается, когда ответ «можно ли
+    собирать» уже ясен, а эта не останавливается никогда. Каждая проба
+    независима, и в отчёт попадает всё — код ответа, слова WB, форма
+    ответа с полями. Один такой файл заменяет цепочку «запустил → упало →
+    отправил → исправили → скачал заново».
+    """
+    from wbads import diagnose
+
+    cfg = load_config()
+    print()
+    print("  Диагностика связи с Wildberries")
+    print("  " + "─" * 52)
+    print()
+    if not cfg.has_token:
+        _print("Токена нет — диагностировать нечего.")
+        _print("Сначала запустите настройку: python3 run.py setup")
+        return 1
+
+    _print("Проверяю всё по очереди. Одна проба не отменяет остальные,")
+    _print("поэтому даже при отказах отчёт получится полным.")
+    print()
+    report = diagnose.run_diagnostics(cfg.token, cfg.ca_bundle,
+                                      on_progress=lambda text: _print(f"  {text}"))
+    print()
+    print(diagnose.render(report))
+    print()
+
+    try:
+        path = diagnose.save(report, ROOT)
+        _print(f"Отчёт сохранён: {path.name}")
+        _print("Отправьте этот файл целиком — в нём есть всё,")
+        _print("чтобы разобраться без новых запусков.")
+    except OSError as exc:
+        _print(f"Отчёт не удалось сохранить ({exc}), но он напечатан выше.")
+
+    return 1 if report["problems"] else 0
 
 
 def _report_crash(exc: BaseException) -> int:
@@ -866,7 +915,11 @@ def _report_crash(exc: BaseException) -> int:
     print()
     _print("Что можно попробовать:")
     _print("  1. Запустить программу ещё раз — часть сбоев разовые.")
-    _print("  2. Посмотреть демо-кабинет: python run.py demo, затем python run.py serve")
+    _print("  2. Запустить полную диагностику: DIAGNOSTIKA-Windows.bat")
+    _print("     (на Mac — DIAGNOSTIKA-Mac.command). Она проверит всё сразу")
+    _print("     и напишет отчёт в файл диагностика.txt — его можно отправить")
+    _print("     целиком, вместе с файлом ошибки.")
+    _print("  3. Посмотреть демо-кабинет: python run.py demo, затем python run.py serve")
     if saved:
         print()
         _print(saved)

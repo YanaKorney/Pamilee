@@ -696,7 +696,8 @@ class WBAdvertClient(_MinuteLimited):
                 on_progress("Названий кампаний WB не отдал ни по одной "
                             "(метод карточек отвечает 404). Обойдёмся без них.")
             else:
-                on_progress(f"Карточек не нашлось у {skipped} кампаний — "
+                on_progress(f"Карточек не нашлось у {skipped} "
+                            f"{_of_campaigns(skipped)} — "
                             "вероятно, удалены.")
         self.details_all_404 = bool(self.last_404_message) and not result
         return result
@@ -725,6 +726,7 @@ class WBAdvertClient(_MinuteLimited):
         spent = 0
         without_stats = 0
         waits = 0
+        asked = 0
         # Причина отказа нужна снаружи: проверка показывает её человеку.
         self.last_404_message = ""
 
@@ -735,7 +737,8 @@ class WBAdvertClient(_MinuteLimited):
             # скорее всего, не в данных, а в самом методе.
             if not result and spent >= give_up_after:
                 if on_progress:
-                    on_progress(f"Статистика не пришла ни по одной из {spent} пачек. "
+                    on_progress("Статистика не пришла ни по одной из "
+                                f"{spent} {_batches(spent)}. "
                                 "Похоже, дело не в данных — прекращаю, "
                                 "чтобы не ждать впустую.")
                     if self.last_404_message:
@@ -745,7 +748,8 @@ class WBAdvertClient(_MinuteLimited):
                 if on_progress:
                     left = sum(len(c) for c in queue)
                     on_progress(f"Достигнут предел запросов за один сбор; "
-                                f"{left} кампаний доберём в следующий раз.")
+                                f"{left} {_ask_campaigns(left)} доберём "
+                                "в следующий раз.")
                 break
 
             chunk = queue.pop(0)
@@ -789,25 +793,41 @@ class WBAdvertClient(_MinuteLimited):
                     queue.append(chunk[:middle])
                     queue.append(chunk[middle:])
                     if on_progress:
-                        on_progress(f"По {len(chunk)} кампаниям разом данных нет — "
+                        on_progress(f"По {len(chunk)} кампаниям разом "
+                                    "данных нет — "
                                     f"делю пополам и пробую снова")
                 else:
                     without_stats += len(chunk)
                     if on_progress:
-                        on_progress(f"У {len(chunk)} кампаний нет открутки за период")
+                        on_progress(f"У {len(chunk)} "
+                                    f"{_of_campaigns(len(chunk))} нет "
+                                    "открутки за период")
                 continue
 
             self._last_call = time.monotonic()
             spent += 1
-            if isinstance(data, list):
-                result.extend(data)
-                done += len(chunk)
+            # Раньше здесь считались опрошенные кампании, а не те, по которым
+            # пришли данные: строка «собрана по 50 кампаниям» появлялась даже
+            # когда WB не отдал ни одной. Считаем то, что действительно есть.
+            rows = data if isinstance(data, list) else []
+            result.extend(rows)
+            done += len(rows)
+            asked += len(chunk)
             if on_progress:
-                on_progress(f"Статистика собрана по {done} кампаниям, "
-                            f"в очереди ещё {len(queue)} пачек")
+                if rows:
+                    on_progress(f"Данные есть у {done} "
+                                f"{_of_campaigns(done)} из {asked} "
+                                f"опрошенных; в очереди ещё {len(queue)} "
+                                f"{_batches(len(queue))}")
+                else:
+                    on_progress(f"У этих {len(chunk)} "
+                                f"{_of_campaigns(len(chunk))} открутки за период "
+                                f"нет; в очереди ещё {len(queue)} "
+                                f"{_batches(len(queue))}")
 
         if without_stats and on_progress:
-            on_progress(f"Без статистики за период: {without_stats} кампаний.")
+            on_progress(f"Без статистики за период: {without_stats} "
+                        f"{_campaigns(without_stats)}.")
         return result
 
 
@@ -967,3 +987,26 @@ def _retry_after(exc: urllib.error.HTTPError, default: float) -> float:
         if seconds > 0:
             return min(seconds + 1, MAX_RETRY_PAUSE)
     return min(max(default, 1.0), MAX_RETRY_PAUSE)
+
+
+def _campaigns(count: int) -> str:
+    """«1 кампания», «2 кампании», «5 кампаний»."""
+    from .rules import plural
+    return plural(count, "кампания", "кампании", "кампаний")
+
+
+def _of_campaigns(count: int) -> str:
+    """Родительный падеж: «у 1 кампании», «у 2 кампаний»."""
+    from .rules import plural
+    return plural(count, "кампании", "кампаний", "кампаний")
+
+
+def _ask_campaigns(count: int) -> str:
+    """Винительный падеж: «1 кампанию доберём», «2 кампании доберём»."""
+    from .rules import plural
+    return plural(count, "кампанию", "кампании", "кампаний")
+
+
+def _batches(count: int) -> str:
+    from .rules import plural
+    return plural(count, "пачка", "пачки", "пачек")

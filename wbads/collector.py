@@ -12,7 +12,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Callable, Sequence
 
 from . import db
-from .rules import BID_TYPE_NAMES, STATUS_NAMES, TYPE_NAMES
+from .rules import BID_TYPE_NAMES, STATUS_NAMES, TYPE_NAMES, plural
 from .wb_client import (
     MAX_IDS_PER_STATS_CALL,
     STATS_GIVE_UP,
@@ -174,8 +174,15 @@ STATUSES_WITH_STATS = {7, 9, 11}   # завершена, идут показы, 
 
 def campaigns_worth_asking(rows: Sequence[dict[str, Any]],
                            date_from: str) -> list[int]:
-    """Отбирает кампании, у которых может быть статистика за период."""
-    chosen: list[int] = []
+    """Отбирает кампании, у которых может быть статистика за период.
+
+    Порядок здесь важен не меньше отбора. Статистика идёт пачками по
+    20 секунд, и если сбор прервётся — лимитом WB или закрытым окном —
+    в базе останется то, что успело прийти. Поэтому первыми спрашиваем
+    активные кампании и те, что менялись недавно: у завершённой полгода
+    назад данных за месяц всё равно нет, а ждать её очередь обидно.
+    """
+    chosen: list[tuple[int, str, int]] = []
     for row in rows:
         if row.get("status") not in STATUSES_WITH_STATS:
             continue
@@ -183,9 +190,19 @@ def campaigns_worth_asking(rows: Sequence[dict[str, Any]],
         end = _day(row.get("end_time")) if row.get("end_time") else ""
         if end and end < date_from:
             continue
-        if row.get("advert_id"):
-            chosen.append(int(row["advert_id"]))
-    return chosen
+        if not row.get("advert_id"):
+            continue
+        # Активные (9) и на паузе (11) вперёд завершённых (7).
+        rank = 0 if int(row["status"]) in (9, 11) else 1
+        fresh = str(row.get("change_time") or row.get("start_time") or "")
+        chosen.append((rank, fresh, int(row["advert_id"])))
+
+    # Сначала по свежести (от новых к старым), потом устойчивой сортировкой
+    # по рангу: так активные оказываются впереди, а внутри каждой группы
+    # сохраняется порядок «сначала недавние».
+    chosen.sort(key=lambda item: item[1], reverse=True)
+    chosen.sort(key=lambda item: item[0])
+    return [advert_id for _, _, advert_id in chosen]
 
 
 def collect_orders(conn: sqlite3.Connection, token: str, days: int = 30,
@@ -282,7 +299,8 @@ def collect(conn: sqlite3.Connection, token: str, days: int = 30,
         ask_ids = campaigns_worth_asking(campaign_rows, date_from)
         skipped = len(campaign_rows) - len(ask_ids)
         if skipped:
-            _log(on_progress, f"Пропускаю {skipped} кампаний: не запускались"
+            word = plural(skipped, "кампанию", "кампании", "кампаний")
+            _log(on_progress, f"Пропускаю {skipped} {word}: не запускались"
                               " или закончились до начала периода.")
 
         _log(on_progress, f"Забираем статистику по {len(ask_ids)} кампаниям "
