@@ -470,16 +470,33 @@ class WBAdvertClient(_MinuteLimited):
             "net": float(data.get("net") or 0),
         }
 
-    def campaign_ids(self) -> list[int]:
-        """Все id кампаний кабинета (метод отдаёт их сгруппированными по типам)."""
+    def campaign_index(self) -> list[dict[str, Any]]:
+        """Список кампаний с типом и статусом.
+
+        Метод отдаёт кампании сгруппированными по типу и статусу, то есть
+        самое нужное приходит уже здесь. Карточки (названия, бюджеты) —
+        отдельный метод, и он у части кабинетов отвечает 404. Поэтому
+        основой служит этот список: без названий работать можно,
+        без типа и статуса — нет.
+        """
         data = self._request("GET", "/adv/v1/promotion/count") or {}
-        ids: list[int] = []
+        found: dict[int, dict[str, Any]] = {}
         for group in data.get("adverts") or []:
             for item in group.get("advert_list") or []:
                 advert_id = item.get("advertId")
-                if advert_id:
-                    ids.append(int(advert_id))
-        return sorted(set(ids))
+                if not advert_id:
+                    continue
+                found[int(advert_id)] = {
+                    "advertId": int(advert_id),
+                    "type": group.get("type"),
+                    "status": group.get("status"),
+                    "changeTime": item.get("changeTime"),
+                }
+        return [found[key] for key in sorted(found)]
+
+    def campaign_ids(self) -> list[int]:
+        """Только идентификаторы кампаний кабинета."""
+        return [row["advertId"] for row in self.campaign_index()]
 
     def campaign_details(self, advert_ids: Sequence[int],
                          on_progress: Progress | None = None) -> list[dict[str, Any]]:
@@ -514,7 +531,12 @@ class WBAdvertClient(_MinuteLimited):
                 result.extend(data)
 
         if skipped and on_progress:
-            on_progress(f"Карточек не нашлось у {skipped} кампаний — вероятно, удалены.")
+            if not result:
+                on_progress("Названий кампаний WB не отдал ни по одной "
+                            "(метод карточек отвечает 404). Обойдёмся без них.")
+            else:
+                on_progress(f"Карточек не нашлось у {skipped} кампаний — "
+                            "вероятно, удалены.")
         return result
 
     def fullstats(self, advert_ids: Sequence[int], date_from: str, date_to: str,

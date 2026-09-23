@@ -43,9 +43,11 @@ def normalize_campaign(raw: dict[str, Any], now: str) -> dict[str, Any]:
     """Карточка кампании из API → строка нашей таблицы."""
     type_code = _int(raw.get("type"))
     status_code = _int(raw.get("status"))
+    advert_id = _int(raw.get("advertId"))
     return {
-        "advert_id": _int(raw.get("advertId")),
-        "name": (raw.get("name") or "").strip(),
+        "advert_id": advert_id,
+        # Без карточки названия нет — опознаём кампанию по номеру
+        "name": (raw.get("name") or "").strip() or f"Кампания {advert_id}",
         "type": type_code,
         "type_name": TYPE_NAMES.get(type_code, f"Тип {type_code}"),
         "status": status_code,
@@ -226,29 +228,41 @@ def collect(conn: sqlite3.Connection, token: str, days: int = 30,
             _log(on_progress, f"Баланс получить не вышло: {exc}")
 
         _log(on_progress, "Получаем список кампаний…")
-        ids = list(advert_ids) if advert_ids else client.campaign_ids()
+        index = client.campaign_index()
+        if advert_ids:
+            wanted = set(advert_ids)
+            index = [row for row in index if row["advertId"] in wanted]
+        ids = [row["advertId"] for row in index]
         if not ids:
             db.finish_collect(conn, log_id, datetime.now().isoformat(timespec="seconds"),
                               0, 0, "ok", "В кабинете нет рекламных кампаний")
             conn.commit()
             return {"campaigns": 0, "rows": 0, "message": "В кабинете нет рекламных кампаний"}
 
-        _log(on_progress, f"Кампаний найдено: {len(ids)}. Забираем карточки…")
-        details = client.campaign_details(ids, on_progress=on_progress)
-        campaign_rows = [normalize_campaign(r, now) for r in details]
+        _log(on_progress, f"Кампаний найдено: {len(ids)}. Забираем названия…")
+
+        # Названия и бюджеты приходят отдельным методом, и у части кабинетов
+        # он отвечает 404. Это не повод останавливать сбор: тип и статус
+        # уже есть в списке кампаний, а без названия кампания опознаётся
+        # по номеру. Поэтому карточки — только дополнение к основе.
+        details_by_id: dict[int, dict[str, Any]] = {}
+        try:
+            for raw in client.campaign_details(ids, on_progress=on_progress):
+                advert_id = _int(raw.get("advertId"))
+                if advert_id:
+                    details_by_id[advert_id] = raw
+        except WBError as exc:
+            _log(on_progress, f"Названия получить не вышло: {exc}")
+
+        campaign_rows = [
+            normalize_campaign({**row, **details_by_id.get(row["advertId"], {})}, now)
+            for row in index
+        ]
         campaign_rows = [r for r in campaign_rows if r["advert_id"]]
         db.upsert_campaigns(conn, campaign_rows)
         conn.commit()
-        _log(on_progress, f"Карточек получено: {len(campaign_rows)} из {len(ids)}.")
-
-        if not campaign_rows:
-            _log(on_progress, "Ни одной карточки кампании получить не удалось —"
-                              " статистику запрашивать не по чему.")
-            db.finish_collect(conn, log_id, datetime.now().isoformat(timespec="seconds"),
-                              0, 0, "error", "WB не вернул ни одной карточки кампании")
-            conn.commit()
-            return {"campaigns": 0, "rows": 0, "nm_rows": 0, "orders": 0,
-                    "date_from": date_from, "date_to": date_to}
+        _log(on_progress, f"Кампаний сохранено: {len(campaign_rows)}"
+                          f" (с названиями: {len(details_by_id)}).")
 
         # Спрашиваем статистику только у тех, у кого она может быть:
         # каждая лишняя пачка — минута ожидания.

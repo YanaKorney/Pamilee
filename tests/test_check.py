@@ -18,7 +18,9 @@ from wbads.wb_client import WBError  # noqa: E402
 FULL_ACCESS = {
     "balance": lambda self: {"balance": 100.0, "bonus": 0.0, "net": 100.0},
     "campaign_ids": lambda self: [1, 2],
-    "campaign_details": lambda self, ids: [{"advertId": ids[0]}],
+    "campaign_index": lambda self: [{"advertId": 1, "type": 8, "status": 9},
+                                    {"advertId": 2, "type": 9, "status": 9}],
+    "campaign_details": lambda self, ids, on_progress=None: [{"advertId": ids[0]}],
     "fullstats": lambda self, ids, a, b, on_progress=None: [{"advertId": ids[0], "days": []}],
 }
 
@@ -110,7 +112,7 @@ class TestNotFoundIsNotDenial(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("⚠", out)
         self.assertIn("Данных за проверяемый период нет", out)
-        self.assertIn("Сбор всё равно запускайте", out)
+        self.assertIn("Сбор запускайте", out)
 
     def test_does_not_blame_the_token_category(self):
         """Баланс и список кампаний прошли — значит, категория есть."""
@@ -215,6 +217,86 @@ class TestBatchSplitting(unittest.TestCase):
         with self.assertRaises(WBError) as caught:
             client.campaign_details([1])
         self.assertEqual(caught.exception.status, 403)
+
+
+class TestCardsAreOptional(unittest.TestCase):
+    """Названия кампаний приходят отдельным методом, и у части кабинетов
+    он отвечает 404 по каждой кампании. Останавливать из-за этого весь
+    сбор нельзя: тип и статус есть в списке кампаний, а без названия
+    кампания опознаётся по номеру."""
+
+    def test_type_and_status_come_from_the_campaign_list(self):
+        from wbads.wb_client import WBAdvertClient
+        client = WBAdvertClient.__new__(WBAdvertClient)
+        client._request = lambda *a, **kw: {"adverts": [
+            {"type": 8, "status": 9, "advert_list": [{"advertId": 101}]},
+            {"type": 9, "status": 11, "advert_list": [{"advertId": 102}]},
+        ]}
+        index = client.campaign_index()
+        self.assertEqual(len(index), 2)
+        self.assertEqual(index[0]["type"], 8)
+        self.assertEqual(index[1]["status"], 11)
+
+    def test_campaign_without_a_card_is_named_by_number(self):
+        from wbads.collector import normalize_campaign
+        row = normalize_campaign({"advertId": 21400101, "type": 8, "status": 9}, "now")
+        self.assertEqual(row["name"], "Кампания 21400101")
+        self.assertEqual(row["type_name"], "Автоматическая")
+        self.assertEqual(row["status_name"], "Идут показы")
+
+    def test_card_enriches_the_name_when_available(self):
+        from wbads.collector import normalize_campaign
+        row = normalize_campaign({"advertId": 1, "type": 8, "status": 9,
+                                  "name": "Авто · Худи", "dailyBudget": 2500}, "now")
+        self.assertEqual(row["name"], "Авто · Худи")
+        self.assertEqual(row["daily_budget"], 2500.0)
+
+    def test_collection_completes_without_any_cards(self):
+        """Сквозная проверка: кабинет, где метод названий молчит."""
+        import tempfile
+        from unittest.mock import patch as p2
+        from wbads import collector, db
+        from wbads.wb_client import WBAdvertClient, WBStatisticsClient
+
+        index = [{"advertId": i, "type": 8, "status": 9} for i in range(1, 6)]
+        methods = {
+            "balance": lambda self: {"balance": 0.0, "bonus": 0.0, "net": 100.0},
+            "campaign_index": lambda self: index,
+            "campaign_details": lambda self, ids, on_progress=None: [],
+            "fullstats": lambda self, ids, a, b, on_progress=None, max_requests=40: [
+                {"advertId": 1, "days": [{"date": "2026-09-20", "views": 100,
+                                          "clicks": 5, "sum": 50.0, "sum_price": 900.0}]}],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = db.init_db(Path(tmp) / "c.db")
+            with p2.multiple("wbads.wb_client.WBAdvertClient", **methods), \
+                    p2.multiple("wbads.wb_client.WBStatisticsClient",
+                                orders=lambda self, d, on_progress=None, max_pages=12: []):
+                result = collector.collect(conn, "token", days=30)
+            self.assertEqual(result["campaigns"], 5, "кампании обязаны сохраниться")
+            self.assertGreater(result["rows"], 0, "статистика обязана собраться")
+            saved = conn.execute("SELECT name FROM campaigns LIMIT 1").fetchone()[0]
+            self.assertTrue(saved.startswith("Кампания "))
+            conn.close()
+
+
+class TestCheckDoesNotFakeSuccess(unittest.TestCase):
+    """Сбор проглатывает 404 внутри себя, поэтому пустой ответ метода
+    нельзя показывать как успех — иначе проверка объявляет рабочим то,
+    что не отдаёт ничего."""
+
+    def test_empty_cards_are_flagged_not_ticked(self):
+        code, out = run_check({"campaign_details": lambda self, ids, on_progress=None: []})
+        self.assertEqual(code, 0)
+        self.assertIn("⚠ Названия кампаний", out)
+        self.assertIn("у вашего кабинета этот метод молчит", out)
+        self.assertIn("Сбор запускайте", out)
+
+    def test_empty_stats_are_flagged_too(self):
+        code, out = run_check(
+            {"fullstats": lambda self, i, a, b, on_progress=None, max_requests=40: []})
+        self.assertEqual(code, 0)
+        self.assertIn("⚠ Статистика по дням", out)
 
 
 class TestCampaignFilter(unittest.TestCase):

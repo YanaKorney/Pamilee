@@ -546,7 +546,13 @@ def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
     problems: list[WBError] = []
     ids: list[int] = []
 
-    def probe(label: str, method: str, call) -> object:
+    def probe(label: str, method: str, call, expect_data: bool = False) -> object:
+        """expect_data — метод обязан что-то вернуть; пустой ответ это ⚠.
+
+        Без этого пустой список выглядел бы как успех: сбор проглатывает
+        404 внутри себя, и проверка объявляла работающим метод, который
+        на деле не отдаёт ничего.
+        """
         try:
             result = call()
         except WBError as exc:
@@ -565,6 +571,13 @@ def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
             failures.append(label)
             problems.append(exc)
             return None
+
+        if expect_data and isinstance(result, list) and not result:
+            print(f"  ⚠ {label:<26} {method}")
+            print("    Метод отвечает, но данных не отдаёт.")
+            empty.append(label)
+            return result
+
         print(f"  ✓ {label:<26} {method}")
         return result
 
@@ -572,15 +585,16 @@ def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
     found = probe("Список кампаний", "GET  /adv/v1/promotion/count", client.campaign_ids)
     if found:
         ids = found
-        probe("Карточки кампаний", "POST /adv/v1/promotion/adverts",
-              lambda: client.campaign_details(ids[:1]))
+        probe("Названия кампаний", "POST /adv/v1/promotion/adverts",
+              lambda: client.campaign_details(ids[:5]), expect_data=True)
         # За сегодня статистики может ещё не быть, и WB ответит 404.
         # Берём прошедшую неделю: если кампания работала, данные найдутся.
         stats_to = date.today() - timedelta(days=1)
         stats_from = stats_to - timedelta(days=6)
         probe("Статистика по дням", "POST /adv/v2/fullstats",
-              lambda: client.fullstats(ids[:1], stats_from.isoformat(),
-                                       stats_to.isoformat()))
+              lambda: client.fullstats(ids[:5], stats_from.isoformat(),
+                                       stats_to.isoformat()),
+              expect_data=True)
 
     # Категория «Статистика» отдельная: без неё реклама считается,
     # а общий ДРР — нет. Поэтому её отказ не валит проверку целиком.
@@ -637,9 +651,17 @@ def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
         print()
 
     if empty:
-        _print("Доступ есть везде. По части методов за проверенный период")
-        _print("не оказалось данных — это нормально: у кампании могло")
-        _print("не быть открутки. Сбор всё равно запускайте.")
+        _print("Доступ есть везде. Часть методов данных не отдала:")
+        if "Названия кампаний" in empty:
+            _print("  • Названия кампаний — у вашего кабинета этот метод молчит.")
+            _print("    Не страшно: тип и статус берутся из списка кампаний,")
+            _print("    а сами кампании будут называться по номеру.")
+        if "Статистика по дням" in empty:
+            _print("  • Статистика — у проверенных кампаний могло не быть")
+            _print("    открутки за период. Сбор переберёт все и найдёт те,")
+            _print("    у которых данные есть.")
+        print()
+        _print("Сбор запускайте — это рабочая ситуация.")
         print()
 
     if orders_ok is None:
