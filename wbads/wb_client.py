@@ -10,12 +10,19 @@
     «Продвижение» → advert-api.wildberries.ru  — кампании, статистика рекламы, баланс
     «Статистика»  → statistics-api.wildberries.ru — заказы (нужны для общего ДРР)
 
-Лимиты, которые здесь учтены:
-    /adv/v1/promotion/count       — 300 запросов/мин
-    /adv/v1/promotion/adverts     — 300 запросов/мин, до 50 кампаний в теле
-    /adv/v2/fullstats             — 1 запрос/мин, до 100 кампаний в теле
-    /adv/v1/balance               — 60 запросов/мин
-    /api/v1/supplier/orders       — 1 запрос/мин
+Методы и лимиты, которые здесь учтены:
+    GET /adv/v1/promotion/count   — списки кампаний, 5 запросов/сек
+    GET /api/advert/v2/adverts    — карточки кампаний, 5 запросов/сек, до 50 ID
+    GET /adv/v3/fullstats         — статистика, 3 запроса/мин, до 50 ID,
+                                    период не больше 31 дня
+    GET /adv/v1/balance           — 60 запросов/мин
+    GET /api/v1/supplier/orders   — 1 запрос/мин
+
+Осенью 2025 WB заменил два метода продвижения, и старые адреса теперь
+отвечают 404 «Please consult the ...api-information»:
+    POST /adv/v1/promotion/adverts → GET /api/advert/v2/adverts
+    POST /adv/v2/fullstats         → GET /adv/v3/fullstats
+Оба новых — GET с параметрами в адресе, а не POST с телом.
 """
 
 from __future__ import annotations
@@ -30,7 +37,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Iterable, Sequence
 
 ADVERT_URL = "https://advert-api.wildberries.ru"
@@ -38,19 +45,23 @@ STATISTICS_URL = "https://statistics-api.wildberries.ru"
 
 # Пауза между запросами к методам, которые WB отдаёт раз в минуту.
 MINUTE_COOLDOWN = 61
-MAX_IDS_PER_STATS_CALL = 100
+# Статистика: 3 запроса в минуту с интервалом 20 секунд между ними.
+STATS_COOLDOWN = 21
+# Больше 50 ID за раз новый метод статистики не принимает.
+MAX_IDS_PER_STATS_CALL = 50
 MAX_IDS_PER_DETAIL_CALL = 50
+# Период запроса статистики ограничен 31 днём.
+MAX_STATS_DAYS = 31
 
-# Дробить пачку статистики мельче этого невыгодно: каждый запрос — минута,
-# а выигрыш от всё более мелких пачек быстро сходит на нет.
+# Дробить пачку статистики мельче этого невыгодно: выигрыш от всё более
+# мелких пачек быстро сходит на нет, а каждая стоит 20 секунд.
 MIN_IDS_PER_STATS_CALL = 12
-# Потолок запросов статистики за один сбор, он же потолок минут ожидания.
+# Потолок запросов статистики за один сбор.
 MAX_STATS_REQUESTS = 40
 # Названия необязательны, поэтому на них тратим немного и быстро сдаёмся,
 # если кабинет их не отдаёт.
 MAX_DETAIL_REQUESTS = 60
 DETAIL_GIVE_UP = 8
-# То же для статистики, но порог ниже: каждая попытка — минута ожидания.
 STATS_GIVE_UP = 15
 
 # Сколько страниц заказов готовы забрать за один сбор. Каждая — минута ожидания,
@@ -509,13 +520,15 @@ class _MinuteLimited(_BaseClient):
         super().__init__(*args, **kwargs)
         self._last_call = 0.0
 
-    def _wait_turn(self, on_progress: Progress | None = None) -> None:
+    def _wait_turn(self, on_progress: Progress | None = None,
+                   cooldown: float = MINUTE_COOLDOWN) -> None:
         if self._last_call == 0.0:
             return
-        remaining = MINUTE_COOLDOWN - (time.monotonic() - self._last_call)
+        remaining = cooldown - (time.monotonic() - self._last_call)
         if remaining > 0:
             if on_progress:
-                on_progress(f"Ждём {int(remaining)} с — WB отдаёт эти данные раз в минуту")
+                on_progress(f"Ждём {int(remaining)} с — WB ограничивает "
+                            "частоту этого метода")
             time.sleep(remaining)
 
 
@@ -565,13 +578,16 @@ class WBAdvertClient(_MinuteLimited):
                          on_progress: Progress | None = None,
                          max_requests: int = MAX_DETAIL_REQUESTS,
                          give_up_after: int = DETAIL_GIVE_UP) -> list[dict[str, Any]]:
-        """Карточки кампаний: название, тип, статус, дневной бюджет.
+        """Карточки кампаний: название, тип ставки, тип оплаты, статус.
 
-        WB отвечает 404 на всю пачку, если отдавать нечего хотя бы по части
-        кампаний в ней. Молча пропускать пачку нельзя — так теряются все
-        нормальные кампании внутри неё. Поэтому пачка делится пополам,
-        пока не выделятся те, по которым данные есть. Лимит у метода
-        щедрый (300 запросов в минуту), так что дробить можно до одной.
+        GET /api/advert/v2/adverts — метод, который осенью 2025 заменил
+        POST /adv/v1/promotion/adverts. ID передаются в адресе, до 50 за раз.
+        Дневного бюджета этот метод больше не отдаёт.
+
+        Если отдавать нечего, WB может ответить отказом на всю пачку. Молча
+        пропускать её нельзя — так теряются нормальные кампании внутри.
+        Поэтому пачка делится пополам, пока не выделятся те, по которым
+        данные есть: лимит у метода щедрый, 5 запросов в секунду.
         """
         result: list[dict[str, Any]] = []
         skipped = 0
@@ -601,8 +617,9 @@ class WBAdvertClient(_MinuteLimited):
             chunk = queue.pop(0)
             spent += 1
             try:
-                data = self._request("POST", "/adv/v1/promotion/adverts",
-                                     payload=list(chunk))
+                data = self._request(
+                    "GET", "/api/advert/v2/adverts",
+                    params={"ids": ",".join(str(i) for i in chunk)})
             except WBError as exc:
                 if exc.status != 404:
                     raise
@@ -617,8 +634,7 @@ class WBAdvertClient(_MinuteLimited):
                 else:
                     skipped += 1
                 continue
-            if isinstance(data, list):
-                result.extend(data)
+            result.extend(_advert_cards(data))
 
         if skipped and on_progress:
             if not result:
@@ -636,15 +652,18 @@ class WBAdvertClient(_MinuteLimited):
                   give_up_after: int = STATS_GIVE_UP) -> list[dict[str, Any]]:
         """Статистика по дням.
 
-        WB отвечает 404 на всю пачку, если статистики нет хотя бы по части
-        кампаний в ней. Пропускать пачку целиком — значит терять работающие
-        кампании, которые в ней были. Поэтому пачка делится пополам.
+        GET /adv/v3/fullstats — метод, который осенью 2025 заменил
+        POST /adv/v2/fullstats. ID и даты передаются в адресе, до 50 ID за
+        раз, период не больше 31 дня, 3 запроса в минуту.
 
-        Метод отдаётся раз в минуту, и дробить до бесконечности нельзя:
-        каждый запрос — это минута ожидания. Поэтому есть и нижняя граница
-        размера пачки, и общий потолок числа запросов за сбор. Недобранное
-        приедет следующим запуском.
+        Если статистики нет хотя бы по части кампаний в пачке, WB может
+        отказать на всю пачку. Пропускать её целиком — значит терять
+        работающие кампании, которые в ней были, поэтому пачка делится
+        пополам. Но не до бесконечности: есть и нижняя граница размера
+        пачки, и общий потолок числа запросов за сбор. Недобранное приедет
+        следующим запуском.
         """
+        date_from = _clamp_period(date_from, date_to)
         result: list[dict[str, Any]] = []
         queue: list[list[int]] = list(_chunks(list(advert_ids), MAX_IDS_PER_STATS_CALL))
         done = 0
@@ -674,13 +693,13 @@ class WBAdvertClient(_MinuteLimited):
                 break
 
             chunk = queue.pop(0)
-            self._wait_turn(on_progress)
-            payload = [
-                {"id": advert_id, "interval": {"begin": date_from, "end": date_to}}
-                for advert_id in chunk
-            ]
+            self._wait_turn(on_progress, cooldown=STATS_COOLDOWN)
             try:
-                data = self._request("POST", "/adv/v2/fullstats", payload=payload)
+                data = self._request("GET", "/adv/v3/fullstats", params={
+                    "ids": ",".join(str(advert_id) for advert_id in chunk),
+                    "beginDate": date_from,
+                    "endDate": date_to,
+                })
             except WBError as exc:
                 self._last_call = time.monotonic()
                 spent += 1
@@ -790,3 +809,65 @@ def _order_key(row: dict[str, Any]) -> str:
 def _chunks(items: list, size: int) -> Iterable[list]:
     for i in range(0, len(items), size):
         yield items[i:i + size]
+
+
+def _advert_cards(data: Any) -> list[dict[str, Any]]:
+    """Ответ GET /api/advert/v2/adverts → привычные поля карточки.
+
+    Новый метод отдаёт объект {"adverts": [...]} и другие имена полей:
+    id вместо advertId, название лежит внутри settings. Приводим к тому
+    виду, который ждёт остальная программа, — чтобы смена адреса метода
+    не растекалась по всему коду.
+    """
+    if isinstance(data, dict):
+        items = data.get("adverts") or []
+    elif isinstance(data, list):
+        items = data
+    else:
+        return []
+
+    cards: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        advert_id = item.get("advertId")
+        if advert_id is None:
+            advert_id = item.get("id")
+        if advert_id is None:
+            continue
+        settings = item.get("settings") or {}
+        card: dict[str, Any] = {"advertId": advert_id}
+        name = item.get("name") or settings.get("name")
+        if name:
+            card["name"] = str(name).strip()
+        if item.get("status") is not None:
+            card["status"] = item["status"]
+        # Тип ставки и тип оплаты пришли на место прежнего «типа кампании»:
+        # единая ставка теперь отличается от ручной полем bid_type.
+        for key in ("bid_type", "payment_type"):
+            value = item.get(key) or settings.get(key)
+            if value:
+                card[key] = value
+        timestamps = item.get("timestamps") or {}
+        change_time = item.get("changeTime") or timestamps.get("updated")
+        if change_time:
+            card["changeTime"] = change_time
+        cards.append(card)
+    return cards
+
+
+def _clamp_period(date_from: str, date_to: str) -> str:
+    """Новый метод статистики не принимает период больше 31 дня.
+
+    Лучше молча сдвинуть начало периода, чем получить отказ на весь запрос:
+    данных за последние 31 день достаточно для динамики, а недостающее
+    доберётся следующим запуском.
+    """
+    try:
+        start = datetime.strptime(date_from, "%Y-%m-%d")
+        end = datetime.strptime(date_to, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return date_from
+    if (end - start).days < MAX_STATS_DAYS:
+        return date_from
+    return (end - timedelta(days=MAX_STATS_DAYS - 1)).strftime("%Y-%m-%d")

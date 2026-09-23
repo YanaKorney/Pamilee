@@ -12,8 +12,9 @@ from datetime import date, datetime, timedelta
 from typing import Any, Callable, Sequence
 
 from . import db
-from .rules import STATUS_NAMES, TYPE_NAMES
+from .rules import BID_TYPE_NAMES, STATUS_NAMES, TYPE_NAMES
 from .wb_client import (
+    MAX_IDS_PER_STATS_CALL,
     STATS_GIVE_UP,
     WBAdvertClient,
     WBError,
@@ -50,12 +51,18 @@ def normalize_campaign(raw: dict[str, Any], now: str) -> dict[str, Any]:
     type_code = _int(raw.get("type"))
     status_code = _int(raw.get("status"))
     advert_id = _int(raw.get("advertId"))
+    # Тип ставки приходит отдельным полем и уточняет тип кампании:
+    # «Аукцион, ручная ставка» говорит менеджеру больше, чем «Аукцион».
+    type_name = TYPE_NAMES.get(type_code, f"Тип {type_code}")
+    bid_name = BID_TYPE_NAMES.get(str(raw.get("bid_type") or "").lower())
+    if bid_name:
+        type_name = f"{type_name}, {bid_name}"
     return {
         "advert_id": advert_id,
         # Без карточки названия нет — опознаём кампанию по номеру
         "name": (raw.get("name") or "").strip() or f"Кампания {advert_id}",
         "type": type_code,
-        "type_name": TYPE_NAMES.get(type_code, f"Тип {type_code}"),
+        "type_name": type_name,
         "status": status_code,
         "status_name": STATUS_NAMES.get(status_code, f"Статус {status_code}"),
         "daily_budget": _num(raw.get("dailyBudget")),
@@ -280,19 +287,20 @@ def collect(conn: sqlite3.Connection, token: str, days: int = 30,
 
         _log(on_progress, f"Забираем статистику по {len(ask_ids)} кампаниям "
                           f"за {date_from} — {date_to}.")
-        _log(on_progress, "Метод медленный: WB отдаёт его раз в минуту.")
+        batches = max(1, -(-len(ask_ids) // MAX_IDS_PER_STATS_CALL))
+        _log(on_progress, f"Это {batches} запросов по 20 секунд — "
+                          f"примерно {max(1, batches // 3)} мин.")
 
-        # Карточки и статистика запрашиваются одним и тем же способом (POST).
-        # Если карточки не отдались ни по одной кампании, дело почти наверняка
-        # не в данных, а в самом способе запроса — и тогда перебирать пачки
-        # статистики по минуте каждая значит впустую забрать полчаса у
-        # человека. Делаем пару проб и останавливаемся с внятным ответом.
+        # Карточки и статистика — соседние методы одного API. Если карточки
+        # не отдались ни по одной кампании, дело, скорее всего, не в данных,
+        # а в самом кабинете или методе, и перебирать пачки статистики
+        # незачем. Делаем пару проб и останавливаемся с внятным ответом.
         stats_budget = STATS_GIVE_UP
         if getattr(client, "details_all_404", False):
             stats_budget = 2
             _log(on_progress, "Карточки кампаний не отдались ни по одной. "
-                              "Проверю статистику парой запросов, а не перебором "
-                              "по минуте на пачку.")
+                              "Проверю статистику парой запросов, а не полным "
+                              "перебором.")
 
         stats = client.fullstats(ask_ids, date_from, date_to,
                                  on_progress=on_progress,

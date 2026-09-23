@@ -256,7 +256,8 @@ def cmd_start(args: argparse.Namespace) -> int:
 
     if not last:
         _print("Данных ещё нет — заберём их из кабинета.")
-        _print("Первый сбор идёт долго: WB отдаёт статистику раз в минуту.")
+        _print("Первый сбор идёт не быстро: WB отдаёт статистику "
+               "по три запроса в минуту.")
         print()
         if not _ask("Начать сбор?"):
             return _start_demo(cfg)
@@ -591,13 +592,13 @@ def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
     found = probe("Список кампаний", "GET  /adv/v1/promotion/count", client.campaign_ids)
     if found:
         ids = found
-        probe("Названия кампаний", "POST /adv/v1/promotion/adverts",
+        probe("Названия кампаний", "GET  /api/advert/v2/adverts",
               lambda: client.campaign_details(ids[:5]), expect_data=True)
         # За сегодня статистики может ещё не быть, и WB ответит 404.
         # Берём прошедшую неделю: если кампания работала, данные найдутся.
         stats_to = date.today() - timedelta(days=1)
         stats_from = stats_to - timedelta(days=6)
-        probe("Статистика по дням", "POST /adv/v2/fullstats",
+        probe("Статистика по дням", "GET  /adv/v3/fullstats",
               lambda: client.fullstats(ids[:5], stats_from.isoformat(),
                                        stats_to.isoformat()),
               expect_data=True)

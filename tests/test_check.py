@@ -56,9 +56,12 @@ class TestCheck(unittest.TestCase):
         """Пользователь должен видеть, куда именно сервис ходит."""
         _, out = run_check({})
         for endpoint in ("/adv/v1/balance", "/adv/v1/promotion/count",
-                         "/adv/v1/promotion/adverts", "/adv/v2/fullstats",
+                         "/api/advert/v2/adverts", "/adv/v3/fullstats",
                          "/api/v1/supplier/orders"):
             self.assertIn(endpoint, out)
+        # Старые адреса WB отключил осенью 2025 — они не должны вернуться.
+        for gone in ("/adv/v1/promotion/adverts", "/adv/v2/fullstats"):
+            self.assertNotIn(gone, out)
 
     def test_missing_statistics_does_not_fail_the_check(self):
         """Нет категории «Статистика» — реклама всё равно работает.
@@ -159,18 +162,22 @@ class TestBatchSplitting(unittest.TestCase):
         client._last_call = 0.0
         client.ca_bundle = ""
         client.used_fallback_bundle = False
-        client._wait_turn = lambda on_progress=None: None
+        client._wait_turn = lambda on_progress=None, cooldown=0: None
         counter = {"requests": 0}
 
         def request(method, path, payload=None, params=None):
             counter["requests"] += 1
-            ids = ([item["id"] for item in payload] if path.endswith("fullstats")
-                   else list(payload))
+            # Новые методы WB принимают ID списком в адресе запроса.
+            ids = [int(i) for i in (params or {}).get("ids", "").split(",") if i]
             hit = [i for i in ids if i in with_data]
             missing = not all(i in with_data for i in ids) if strict else not hit
             if missing:
                 raise WBError("404", 404)
-            return [{"advertId": i, "days": []} for i in hit]
+            rows = [{"advertId": i, "days": []} for i in hit]
+            if path.endswith("fullstats"):
+                return rows
+            return {"adverts": [{"id": i, "settings": {"name": f"Кампания {i}"}}
+                                for i in hit]}
 
         client._request = request
         client.requests = counter
@@ -852,11 +859,11 @@ class TestBrokenMethodIsNotWaitedOut(unittest.TestCase):
 
         handler = _KeepMethodRedirect()
         original = urllib.request.Request(
-            "https://advert-api.wildberries.ru/adv/v2/fullstats",
+            "https://advert-api.wildberries.ru/adv/v3/fullstats",
             data=b"[]", headers={"Authorization": "t"}, method="POST")
         moved = handler.redirect_request(
             original, None, 301, "Moved",
-            {}, "https://advert-api.wildberries.ru/adv/v2/fullstats/")
+            {}, "https://advert-api.wildberries.ru/adv/v3/fullstats/")
         self.assertEqual(moved.get_method(), "POST", "метод обязан сохраниться")
         self.assertEqual(moved.data, b"[]")
         self.assertTrue(handler.redirected, "факт перенаправления обязан быть виден")
@@ -876,3 +883,117 @@ class TestCheckShowsWhatWBSaid(unittest.TestCase):
         code, out = run_check({"campaign_details": silent})
         self.assertEqual(code, 0)
         self.assertIn("campaign not found", out)
+
+
+class TestActualRequestsMatchWBToday(unittest.TestCase):
+    """Осенью 2025 WB отключил два метода продвижения, и программа месяц
+    ходила на мёртвые адреса: 404 выглядел как «нет данных». Здесь
+    зафиксировано, куда и каким способом уходят запросы, — чтобы такая
+    подмена больше не проходила молча.
+
+    Старое → новое:
+        POST /adv/v1/promotion/adverts → GET /api/advert/v2/adverts
+        POST /adv/v2/fullstats         → GET /adv/v3/fullstats
+    """
+
+    def client(self):
+        from wbads.wb_client import WBAdvertClient
+        client = WBAdvertClient.__new__(WBAdvertClient)
+        client.token = "t"
+        client.base_url = "https://advert-api.wildberries.ru"
+        client.timeout = 1
+        client.max_retries = 1
+        client._last_call = 0.0
+        client.ca_bundle = ""
+        client.used_fallback_bundle = False
+        client._wait_turn = lambda on_progress=None, cooldown=0: None
+        calls: list[dict] = []
+
+        def request(method, path, payload=None, params=None):
+            calls.append({"method": method, "path": path,
+                          "payload": payload, "params": params})
+            return [] if path.endswith("fullstats") else {"adverts": []}
+
+        client._request = request
+        client.calls = calls
+        return client
+
+    def test_stats_go_to_v3_as_a_get_with_dates_in_the_query(self):
+        client = self.client()
+        client.fullstats([11, 22], "2026-08-25", "2026-09-23")
+        call = client.calls[0]
+        self.assertEqual(call["method"], "GET")
+        self.assertEqual(call["path"], "/adv/v3/fullstats")
+        self.assertIsNone(call["payload"], "у GET не должно быть тела")
+        self.assertEqual(call["params"], {"ids": "11,22",
+                                          "beginDate": "2026-08-25",
+                                          "endDate": "2026-09-23"})
+
+    def test_stats_ask_no_more_than_fifty_campaigns_at_once(self):
+        """Новый метод принимает максимум 50 ID в запросе."""
+        client = self.client()
+        client.fullstats(list(range(120)), "2026-08-25", "2026-09-23")
+        for call in client.calls:
+            self.assertLessEqual(len(call["params"]["ids"].split(",")), 50)
+
+    def test_period_longer_than_a_month_is_trimmed_not_rejected(self):
+        """Больше 31 дня метод не принимает — период надо обрезать самим."""
+        client = self.client()
+        client.fullstats([1], "2026-06-01", "2026-09-23")
+        params = client.calls[0]["params"]
+        from datetime import date
+        begin = date.fromisoformat(params["beginDate"])
+        end = date.fromisoformat(params["endDate"])
+        self.assertLess((end - begin).days, 31)
+        self.assertEqual(params["endDate"], "2026-09-23", "конец периода не сдвигаем")
+
+    def test_cards_go_to_the_new_address_as_a_get(self):
+        client = self.client()
+        client.campaign_details([11, 22])
+        call = client.calls[0]
+        self.assertEqual(call["method"], "GET")
+        self.assertEqual(call["path"], "/api/advert/v2/adverts")
+        self.assertIsNone(call["payload"], "у GET не должно быть тела")
+        self.assertEqual(call["params"], {"ids": "11,22"})
+
+    def test_new_card_shape_is_understood(self):
+        """Новый метод отдаёт другую форму ответа: id вместо advertId,
+        название внутри settings. Программа должна читать именно её."""
+        from wbads.wb_client import _advert_cards
+        cards = _advert_cards({"adverts": [{
+            "id": 28150154,
+            "status": 11,
+            "bid_type": "manual",
+            "settings": {"name": "Кампания от 28.08.2025 ",
+                         "payment_type": "cpc"},
+            "timestamps": {"updated": "2025-09-10T10:14:58.475499+03:00"},
+        }]})
+        self.assertEqual(cards, [{
+            "advertId": 28150154,
+            "name": "Кампания от 28.08.2025",
+            "status": 11,
+            "bid_type": "manual",
+            "payment_type": "cpc",
+            "changeTime": "2025-09-10T10:14:58.475499+03:00",
+        }])
+
+    def test_bid_type_reaches_the_campaign_name(self):
+        """«Аукцион, ручная ставка» говорит менеджеру больше, чем «Аукцион»."""
+        from wbads.collector import normalize_campaign
+        row = normalize_campaign({"advertId": 1, "type": 9, "status": 9,
+                                  "name": "Платья", "bid_type": "manual"}, "now")
+        self.assertEqual(row["type_name"], "Аукцион, ручная ставка")
+        unified = normalize_campaign({"advertId": 2, "type": 9, "status": 9,
+                                      "bid_type": "unified"}, "now")
+        self.assertEqual(unified["type_name"], "Аукцион, единая ставка")
+        plain = normalize_campaign({"advertId": 3, "type": 8, "status": 9}, "now")
+        self.assertEqual(plain["type_name"], "Автоматическая")
+
+    def test_stats_wait_twenty_seconds_not_a_minute(self):
+        """Новый метод отдаётся 3 раза в минуту, а не раз в минуту:
+        511 кампаний — это минуты ожидания, а не полчаса."""
+        from wbads.wb_client import STATS_COOLDOWN, MAX_IDS_PER_STATS_CALL
+        self.assertLessEqual(STATS_COOLDOWN, 25)
+        batches = -(-511 // MAX_IDS_PER_STATS_CALL)
+        self.assertLessEqual(batches * STATS_COOLDOWN, 5 * 60,
+                             "весь кабинет должен собираться за считаные минуты")
