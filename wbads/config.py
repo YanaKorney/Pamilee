@@ -209,6 +209,9 @@ class Config:
     db_path: Path = field(default_factory=lambda: ROOT / "data" / "wbads.db")
     token: str = ""
     port: int = 8000
+    # Путь к своему набору корневых сертификатов. Нужен, когда в хранилище
+    # системы устаревший корень и проверка цепочки срывается на нём.
+    ca_bundle: str = ""
     order_price_field: str = "price_with_disc"
     thresholds: Thresholds = field(default_factory=Thresholds)
 
@@ -230,6 +233,8 @@ def load_config() -> Config:
         db_path=db_path,
         token=os.environ.get("WB_API_TOKEN", ""),
         port=int(_num("WBADS_PORT", 8000)),
+        ca_bundle=(os.environ.get("WBADS_CA_BUNDLE")
+                   or os.environ.get("SSL_CERT_FILE") or "").strip(),
         order_price_field=price_field,
         thresholds=Thresholds.from_env(),
     )

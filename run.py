@@ -329,7 +329,8 @@ def cmd_collect(args: argparse.Namespace) -> int:
     with db.session(cfg.db_path) as conn:
         try:
             result = collector.collect(conn, cfg.token, days=args.days,
-                                       on_progress=_print)
+                                       on_progress=_print,
+                                       ca_bundle=cfg.ca_bundle)
         except WBError as exc:
             _print(f"Ошибка: {exc}")
             return 1
@@ -425,11 +426,34 @@ def _who_breaks_the_connection() -> None:
         print()
         _print("Что сделать: отключите у него проверку защищённых соединений")
         _print("(HTTPS/SSL-сканирование) — или добавьте в исключения python.exe.")
+    elif info["expired"] is False:
+        # Сертификат сайта в порядке, а проверка всё равно говорит
+        # «просрочен» — значит, споткнулись на корне из хранилища системы.
+        _print("Это настоящий сертификат Wildberries, и он НЕ просрочен.")
+        _print("Значит, «просрочен» относится не к нему, а к корневому")
+        _print("сертификату в хранилище вашей системы: оно отстало,")
+        _print("и проверка цепочки срывается на устаревшем корне.")
+        print()
+        _print("Самый быстрый способ — поставить свежий набор корней")
+        _print("для Python. Выполните в этом окне одну команду:")
+        print()
+        _print("    python -m pip install certifi")
+        print()
+        _print("После этого запустите проверку снова — программа")
+        _print("подхватит его сама. Защита при этом не отключается:")
+        _print("проверка остаётся полной, меняется только список корней.")
+        print()
+        _print("Основательный способ — вылечить само хранилище Windows:")
+        _print("  • установите все обновления Windows;")
+        _print("  • либо поставьте корневой сертификат ISRG Root X1")
+        _print("    с сайта letsencrypt.org/certificates: скачать .der,")
+        _print("    двойной клик → Установить → «Доверенные корневые")
+        _print("    центры сертификации».")
     else:
         _print("Имя выдавшего не похоже на антивирус или корпоративный шлюз.")
-        _print("Похоже, сертификат настоящий, а не хватает корневого")
-        _print("сертификата в системе. Установите обновления Windows")
-        _print("и обновите Python до последней версии с python.org.")
+        _print("Похоже, в системе не хватает корневого сертификата.")
+        _print("Установите обновления Windows, а если не поможет —")
+        _print("выполните в этом окне: python -m pip install certifi")
 
 
 def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
@@ -446,7 +470,7 @@ def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
         _print("категории «Продвижение» и «Статистика».")
         return 1
 
-    client = WBAdvertClient(cfg.token)
+    client = WBAdvertClient(cfg.token, ca_bundle=cfg.ca_bundle)
     _print("Проверяем доступ к API продвижения (advert-api.wildberries.ru)…")
     print()
 
@@ -483,7 +507,7 @@ def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
     print()
     _print("Проверяем доступ к заказам (нужен для общего ДРР)…")
     print()
-    stats_client = WBStatisticsClient(cfg.token)
+    stats_client = WBStatisticsClient(cfg.token, ca_bundle=cfg.ca_bundle)
     orders_ok = probe("Заказы кабинета", "GET  /api/v1/supplier/orders",
                       lambda: stats_client.orders(date.today().isoformat(), max_pages=1))
     if orders_ok is None:
@@ -517,6 +541,11 @@ def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
         _print("«Только на чтение»: статистика запрашивается методом POST.")
         _describe_token_for_human(cfg.token)
         return 1
+
+    if getattr(client, "used_fallback_bundle", False):
+        _print("Хранилище сертификатов системы устарело — использую набор certifi.")
+        _print("Работает, но стоит установить обновления Windows.")
+        print()
 
     if orders_ok is None:
         _print("Реклама читается, заказы — нет.")

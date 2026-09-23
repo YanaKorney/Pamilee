@@ -228,12 +228,12 @@ class TestCertificateInspection(unittest.TestCase):
         self.assertIn("исключения python.exe", out)
 
     def test_unknown_issuer_points_at_missing_root(self):
+        """Срок сертификата разобрать не вышло — общий совет про корни."""
         from unittest.mock import patch as p2
         fake = {"host": "advert-api.wildberries.ru",
                 "issuer": "DigiCert Inc · DigiCert Global Root G2",
                 "subject": "advert-api.wildberries.ru",
-                "not_after": "Dec 31 23:59:59 2027 GMT",
-                "expired": False, "error": None}
+                "not_after": None, "expired": None, "error": None}
         buffer = io.StringIO()
         with p2("run.inspect_certificate", lambda *a, **k: fake), \
                 redirect_stdout(buffer):
@@ -241,6 +241,74 @@ class TestCertificateInspection(unittest.TestCase):
         out = buffer.getvalue()
         self.assertIn("не похоже на антивирус", out)
         self.assertIn("обновления Windows", out)
+
+    def test_expired_site_certificate_is_reported_as_such(self):
+        """А если просрочен сам сертификат сайта — это надо сказать прямо."""
+        from unittest.mock import patch as p2
+        fake = {"host": "advert-api.wildberries.ru",
+                "issuer": "Let's Encrypt · YE1",
+                "subject": "advert-api.wildberries.ru",
+                "not_after": "Jan 01 00:00:00 2020 GMT",
+                "expired": True, "error": None}
+        buffer = io.StringIO()
+        with p2("run.inspect_certificate", lambda *a, **k: fake), \
+                redirect_stdout(buffer):
+            cli._who_breaks_the_connection()
+        self.assertIn("СРОК ВЫШЕЛ", buffer.getvalue())
+
+
+class TestTrustStoreFallback(unittest.TestCase):
+    """Устаревший корень в хранилище системы — отдельная причина, и лечится
+    она не отключением антивируса, а свежим набором корней."""
+
+    def test_verification_stays_full_with_custom_bundle(self):
+        """Подмена набора корней не должна ослаблять проверку."""
+        import ssl
+        from wbads.wb_client import build_ssl_context, certifi_bundle
+        for bundle in ("", certifi_bundle() or ""):
+            ctx = build_ssl_context(bundle)
+            self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED, bundle)
+            self.assertTrue(ctx.check_hostname, bundle)
+
+    def test_missing_bundle_path_falls_back_to_system(self):
+        import ssl
+        from wbads.wb_client import build_ssl_context
+        ctx = build_ssl_context("/нет/такого/файла.pem")
+        self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
+
+    def test_valid_site_certificate_points_at_the_system_store(self):
+        """Сертификат сайта не просрочен, а проверка ругается — значит, корень."""
+        from unittest.mock import patch as p2
+        fake = {"host": "advert-api.wildberries.ru",
+                "issuer": "Let's Encrypt · YE1",
+                "subject": "advert-api.wildberries.ru",
+                "not_after": "Oct 31 04:51:24 2026 GMT",
+                "expired": False, "error": None}
+        buffer = io.StringIO()
+        with p2("run.inspect_certificate", lambda *a, **k: fake), \
+                redirect_stdout(buffer):
+            cli._who_breaks_the_connection()
+        out = buffer.getvalue()
+        self.assertIn("НЕ просрочен", out)
+        self.assertIn("pip install certifi", out)
+        self.assertIn("ISRG Root X1", out)
+        # Про антивирус здесь говорить нечего — он ни при чём
+        self.assertNotIn("исключения python.exe", out)
+
+    def test_ca_bundle_is_read_from_environment(self):
+        import os
+        from unittest.mock import patch as p2
+        from wbads.config import load_config
+        with p2.dict(os.environ, {"WBADS_CA_BUNDLE": "/tmp/my-roots.pem"}):
+            self.assertEqual(load_config().ca_bundle, "/tmp/my-roots.pem")
+
+    def test_standard_ssl_cert_file_is_honoured(self):
+        """SSL_CERT_FILE — общепринятая переменная, её тоже уважаем."""
+        import os
+        from unittest.mock import patch as p2
+        from wbads.config import load_config
+        with p2.dict(os.environ, {"WBADS_CA_BUNDLE": "", "SSL_CERT_FILE": "/tmp/roots.pem"}):
+            self.assertEqual(load_config().ca_bundle, "/tmp/roots.pem")
 
 
 class TestClockPlausibility(unittest.TestCase):

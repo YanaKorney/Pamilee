@@ -312,6 +312,33 @@ def describe_token(token: str) -> dict[str, Any]:
     return info
 
 
+def certifi_bundle() -> str | None:
+    """Путь к набору корневых сертификатов certifi, если он установлен.
+
+    Хранилище Windows обновляется вместе с системой, и на отставшей машине
+    в нём попадается просроченный корень: проверка цепочки срывается на нём,
+    хотя сертификат сайта в полном порядке. certifi — тот же набор корней,
+    что используют браузеры, и он поддерживается отдельно от системы.
+    """
+    try:
+        import certifi
+    except ImportError:
+        return None
+    path = certifi.where()
+    return path if os.path.exists(path) else None
+
+
+def build_ssl_context(ca_bundle: str | None = None) -> ssl.SSLContext:
+    """Готовит проверку соединения. Проверка всегда полная.
+
+    ca_bundle подменяет только набор доверенных корней — сама проверка
+    подлинности и имени узла остаётся включённой.
+    """
+    if ca_bundle and os.path.exists(ca_bundle):
+        return ssl.create_default_context(cafile=ca_bundle)
+    return ssl.create_default_context()
+
+
 class _BaseClient:
     """Общий транспорт: заголовки, повторы, разбор ответа.
 
@@ -323,12 +350,15 @@ class _BaseClient:
     scope = "Продвижение"
 
     def __init__(self, token: str, base_url: str | None = None,
-                 timeout: int = 90, max_retries: int = 4) -> None:
+                 timeout: int = 90, max_retries: int = 4,
+                 ca_bundle: str = "") -> None:
         if not token or not token.strip():
             raise WBError(
                 "Не задан токен WB. Скопируйте .env.example в .env и впишите WB_API_TOKEN."
             )
         self.token = token.strip()
+        self.ca_bundle = ca_bundle
+        self.used_fallback_bundle = False
         if base_url:
             self.base_url = base_url
         self.base_url = self.base_url.rstrip("/")
@@ -352,10 +382,14 @@ class _BaseClient:
 
         delay = 2.0
         last_error: Exception | None = None
+        context = build_ssl_context(self.ca_bundle)
+        tried_fallback = bool(self.ca_bundle)
+
         for _ in range(self.max_retries):
             req = urllib.request.Request(url, data=body, headers=headers, method=method)
             try:
-                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                with urllib.request.urlopen(req, timeout=self.timeout,
+                                            context=context) as resp:
                     raw = resp.read().decode("utf-8").strip()
                     return json.loads(raw) if raw else None
             except urllib.error.HTTPError as exc:
@@ -367,10 +401,22 @@ class _BaseClient:
                 raise WBError(explain_status(exc.code, self.scope), exc.code) from exc
             except urllib.error.URLError as exc:
                 reason = getattr(exc, "reason", None)
-                # Отказ проверки сертификата повторять бессмысленно:
-                # он не временный и от повтора не исправится.
-                if isinstance(reason, ssl.SSLCertVerificationError) or \
-                        "CERTIFICATE_VERIFY" in str(reason):
+                is_cert = (isinstance(reason, ssl.SSLCertVerificationError)
+                           or "CERTIFICATE_VERIFY" in str(reason))
+
+                # Проверка сорвалась на корне из хранилища системы — пробуем
+                # тот же запрос с набором корней certifi. Проверка при этом
+                # остаётся полной, меняется только список доверенных корней.
+                if is_cert and not tried_fallback:
+                    bundle = certifi_bundle()
+                    if bundle:
+                        tried_fallback = True
+                        context = build_ssl_context(bundle)
+                        self.used_fallback_bundle = True
+                        continue
+
+                # Повторять отказ по сертификату бессмысленно: он не временный.
+                if is_cert:
                     raise WBError(explain_tls_error(reason, self.token), kind="tls") from exc
                 last_error = exc
                 time.sleep(delay)

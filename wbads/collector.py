@@ -152,8 +152,8 @@ def normalize_order(raw: dict[str, Any], now: str) -> dict[str, Any] | None:
 
 
 def collect_orders(conn: sqlite3.Connection, token: str, days: int = 30,
-                   end: date | None = None,
-                   on_progress: Progress | None = None) -> dict[str, Any]:
+                   end: date | None = None, on_progress: Progress | None = None,
+                   ca_bundle: str = "") -> dict[str, Any]:
     """Забирает заказы кабинета — знаменатель для общего ДРР.
 
     Требует у токена категорию «Статистика». Метод отдаётся раз в минуту,
@@ -164,7 +164,7 @@ def collect_orders(conn: sqlite3.Connection, token: str, days: int = 30,
     start = end - timedelta(days=days - 1)
     now = datetime.now().isoformat(timespec="seconds")
 
-    client = WBStatisticsClient(token)
+    client = WBStatisticsClient(token, ca_bundle=ca_bundle)
     _log(on_progress, f"Забираем заказы с {start.isoformat()}…")
     raw_rows = client.orders(start.isoformat(), on_progress=on_progress)
 
@@ -183,14 +183,14 @@ def collect_orders(conn: sqlite3.Connection, token: str, days: int = 30,
 def collect(conn: sqlite3.Connection, token: str, days: int = 30,
             end: date | None = None, advert_ids: Sequence[int] | None = None,
             on_progress: Progress | None = None,
-            with_orders: bool = True) -> dict[str, Any]:
+            with_orders: bool = True, ca_bundle: str = "") -> dict[str, Any]:
     """Забирает кампании, баланс, статистику рекламы и заказы кабинета."""
     end = end or date.today()
     start = end - timedelta(days=days - 1)
     date_from, date_to = start.isoformat(), end.isoformat()
     now = datetime.now().isoformat(timespec="seconds")
 
-    client = WBAdvertClient(token)
+    client = WBAdvertClient(token, ca_bundle=ca_bundle)
     log_id = db.start_collect(conn, "wb-api", now, date_from, date_to)
     conn.commit()
 
@@ -239,7 +239,8 @@ def collect(conn: sqlite3.Connection, token: str, days: int = 30,
         if with_orders:
             try:
                 orders_result = collect_orders(conn, token, days=days, end=end,
-                                               on_progress=on_progress)
+                                               on_progress=on_progress,
+                                               ca_bundle=ca_bundle)
             except WBError as exc:
                 _log(on_progress, f"Заказы получить не вышло: {exc}")
                 _log(on_progress, "Общий ДРР считаться не будет, рекламный — будет.")
