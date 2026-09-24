@@ -316,6 +316,9 @@ def cmd_demo(args: argparse.Namespace) -> int:
     with db.session(cfg.db_path) as conn:
         result = demo.generate(conn, days=args.days)
     _print(f"Демо-данные готовы: {result['campaigns']} кампаний за {result['days']} дней.")
+    if result.get("changes"):
+        _print(f"Плюс {result['changes']} примеров в журнале изменений — "
+               "чтобы видеть, как считается эффект правок.")
     _print(f"База: {cfg.db_path}")
     _print("Дальше: python3 run.py serve")
     return 0

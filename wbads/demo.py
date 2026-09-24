@@ -350,6 +350,7 @@ def generate(conn: sqlite3.Connection, days: int = 60,
     db.upsert_nm_daily(conn, nm_rows)
     db.upsert_orders(conn, order_rows)
     db.save_balance(conn, now, balance=18400.0, bonus=2300.0, net=20700.0)
+    changes_written = _build_changes(conn, rng, nm_rows, start, end)
     db.finish_collect(conn, log_id, datetime.now().isoformat(timespec="seconds"),
                       len(campaign_rows), len(daily_rows))
     conn.commit()
@@ -360,4 +361,59 @@ def generate(conn: sqlite3.Connection, days: int = 60,
         "rows": len(daily_rows),
         "nm_rows": len(nm_rows),
         "orders": len(order_rows),
+        "changes": changes_written,
     }
+
+
+# Записи журнала для демо-кабинета. Без них вкладка «Журнал изменений»
+# открывается пустой, и понять, что она делает, можно только накопив
+# собственные данные за неделю. Формулировки — как их пишет менеджер.
+DEMO_CHANGES = [
+    "снизила ставку по основному запросу, ДРР был выше цели",
+    "почистила кластеры, убрала запросы с высоким ДРР",
+    "убрала показы в рекомендациях, весь бюджет в поиск",
+    "подняла дневной бюджет: кампания упиралась в лимит к обеду",
+    "настроила время показов с 07 до 23",
+    "поменяла стратегию главной фразы на оптимизацию ДРР",
+    "добавила на тест несколько новых фраз",
+    "вернула рекомендации на минимальной ставке, смотрю за динамикой",
+]
+
+
+def _build_changes(conn: sqlite3.Connection, rng: random.Random,
+                   nm_rows: list[dict[str, Any]], start: date,
+                   end: date) -> int:
+    """Раскладывает примеры правок по артикулам и дням демо-периода.
+
+    Даты берутся с отступом от краёв периода: у записи у самого края не
+    будет ни окна «до», ни окна «после», и вкладка показала бы только
+    «рано судить» — ровно то, чего демо показывать не должно.
+    """
+    from . import changes as journal
+
+    # Берём артикулы с заметным объёмом: на товаре с двумя кликами в день
+    # любой замер показывает «сдвигов нет», и демонстрировать на нём
+    # нечего — а именно демо объясняет человеку, как вкладка работает.
+    volume: dict[int, float] = {}
+    for row in nm_rows:
+        volume[row["nm_id"]] = volume.get(row["nm_id"], 0.0) + float(
+            row.get("spend") or 0)
+    articles = [nm for nm, _ in sorted(volume.items(), key=lambda kv: -kv[1])][:6]
+    if not articles:
+        return 0
+
+    span = (end - start).days
+    if span < 20:
+        return 0
+
+    rows = []
+    for index, text in enumerate(DEMO_CHANGES):
+        nm_id = articles[index % len(articles)]
+        offset = rng.randint(10, max(11, span - 10))
+        rows.append({
+            "date": (start + timedelta(days=offset)).isoformat(),
+            "nm_id": nm_id,
+            "text": text,
+            "source": "демо",
+        })
+    return journal.add_many(conn, rows, source="демо")

@@ -41,6 +41,9 @@ DEFAULT_WINDOW = 7
 # Меньше трёх дней после изменения — судить рано, и об этом надо сказать
 # прямо, а не показывать бодрые проценты по одному дню.
 MIN_DAYS_TO_JUDGE = 3
+# Ниже этого сдвига вывод словами не делается: в таблице числа видны, а
+# фраза «ДРР снизился» про десятые доли процента обещает больше, чем есть.
+NOTABLE_CHANGE_PCT = 5.0
 
 # Показатели, по которым считается эффект. Порядок — как в воронке, чтобы
 # читалось сверху вниз: сначала откуда пришли, потом во что превратилось.
@@ -273,11 +276,13 @@ def effect(conn: sqlite3.Connection, change: dict[str, Any],
         "next_change": next_change,
         "metrics": [],
         "verdict": "",
+        "tone": "early",
         "ready": False,
     }
 
     if after_from > after_to:
         result["verdict"] = "Изменение сделано только что — эффект ещё не виден."
+        result["tone"] = "early"
         return result
 
     before_days = _days_with_data(conn, before_from, before_to, nm_id, advert_id)
@@ -288,6 +293,7 @@ def effect(conn: sqlite3.Connection, change: dict[str, Any],
     if not before_days or not after_days:
         result["verdict"] = ("Не с чем сравнивать: за одно из окон данных "
                              "в базе нет. Соберите статистику за больший период.")
+        result["tone"] = "early"
         return result
 
     before = _per_day(_totals(conn, before_from, before_to, nm_id, advert_id),
@@ -298,7 +304,20 @@ def effect(conn: sqlite3.Connection, change: dict[str, Any],
     result["metrics"] = _compare(before, after)
     result["ready"] = after_days >= MIN_DAYS_TO_JUDGE
     result["verdict"] = _verdict(result, after_days)
+    # Окраска вердикта считается здесь же, из того же порога: иначе
+    # страница красит зелёным фразу «заметных сдвигов нет».
+    result["tone"] = _tone(result)
     return result
+
+
+def _tone(result: dict[str, Any]) -> str:
+    """Каким цветом показать вывод: он обязан совпадать со словами."""
+    if not result.get("ready"):
+        return "early"
+    drr = next((m for m in result["metrics"] if m["key"] == "drr"), None)
+    if not drr or abs(drr.get("delta_pct") or 0) < NOTABLE_CHANGE_PCT:
+        return "none"
+    return "good" if drr["direction"] == "better" else "bad"
 
 
 def _per_day(totals: dict[str, float], days: int) -> dict[str, float]:
@@ -360,16 +379,23 @@ def _verdict(result: dict[str, Any], after_days: int) -> str:
     def as_pct(value: float) -> str:
         return f"{value:.1f}".replace(".", ",") + "%"
 
+    # Порог для вывода словами выше, чем для стрелки в таблице. «ДРР
+    # снизился с 24,9% до 24,6%» звучит как результат, хотя это колебание
+    # в пределах обычного дневного разброса. В таблице точные числа видны,
+    # а фраза обязана говорить только о том, что заметно.
+    def loud(metric: dict[str, Any]) -> bool:
+        return abs(metric.get("delta_pct") or 0) >= NOTABLE_CHANGE_PCT
+
     parts = []
-    if drr.get("direction") == "better":
+    if drr.get("direction") == "better" and loud(drr):
         parts.append(f"ДРР снизился с {as_pct(drr['before'])} "
                      f"до {as_pct(drr['after'])}")
-    elif drr.get("direction") == "worse":
+    elif drr.get("direction") == "worse" and loud(drr):
         parts.append(f"ДРР вырос с {as_pct(drr['before'])} "
                      f"до {as_pct(drr['after'])}")
-    if orders.get("direction") == "better":
+    if orders.get("direction") == "better" and loud(orders):
         parts.append("заказов в день стало больше")
-    elif orders.get("direction") == "worse":
+    elif orders.get("direction") == "worse" and loud(orders):
         parts.append("заказов в день стало меньше")
 
     if not parts:

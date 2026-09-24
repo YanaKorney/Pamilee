@@ -1114,13 +1114,12 @@ function subjectLabel(item) {
   return parts.join(' · ') || 'Без привязки';
 }
 
-/* Цвет вердикта — по смыслу, а не по наличию цифр: «рано судить» не
-   должно выглядеть ни победой, ни провалом. */
+/* Цвет приходит с сервера, из того же порога, что и сам вывод словами.
+   Считать его здесь заново значило бы завести второе мнение о том, что
+   считается результатом, — и однажды покрасить зелёным «сдвигов нет». */
 function verdictClass(e) {
-  if (!e.ready) return 'early';
-  const drr = (e.metrics || []).find((m) => m.key === 'drr');
-  if (!drr || drr.direction === 'same') return '';
-  return drr.direction === 'better' ? 'good' : 'bad';
+  const tone = e.tone || 'early';
+  return tone === 'none' ? '' : tone;
 }
 
 function metricsTable(e) {

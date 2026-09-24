@@ -283,3 +283,70 @@ class TestCampaignLevelChanges(JournalCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestVerdictDoesNotOverpromise(JournalCase):
+    """Фраза словами обязана говорить только о заметном. В таблице точные
+    числа видны и так, а «ДРР снизился с 24,9% до 24,6%» обещает результат
+    там, где это обычное дневное колебание."""
+
+    def test_tiny_drr_move_is_not_called_a_result(self):
+        self.fill(range(-7, 0), spend=249.0, revenue=1000.0)
+        self.fill(range(1, 8), spend=246.0, revenue=1000.0)
+        changes.add(self.conn, day(0), "мелкая правка", nm_id=self.NM)
+        result = changes.effect(self.conn, changes.listing(self.conn)[0],
+                                today=day(7))
+        self.assertEqual(result["verdict"], "Заметных сдвигов в метриках нет.")
+
+    def test_big_drr_move_is_stated(self):
+        self.fill(range(-7, 0), spend=400.0, revenue=1000.0)
+        self.fill(range(1, 8), spend=200.0, revenue=1000.0)
+        changes.add(self.conn, day(0), "крупная правка", nm_id=self.NM)
+        result = changes.effect(self.conn, changes.listing(self.conn)[0],
+                                today=day(7))
+        self.assertIn("ДРР снизился", result["verdict"])
+
+
+class TestToneMatchesTheWords(JournalCase):
+    """Цвет плашки и её текст обязаны говорить одно и то же: зелёная
+    плашка под фразой «заметных сдвигов нет» — это два разных мнения
+    о результате, и человек поверит цвету."""
+
+    def test_tiny_move_is_not_painted_as_a_win(self):
+        self.fill(range(-7, 0), spend=249.0, revenue=1000.0)
+        self.fill(range(1, 8), spend=246.0, revenue=1000.0)
+        changes.add(self.conn, day(0), "мелкая правка", nm_id=self.NM)
+        result = changes.effect(self.conn, changes.listing(self.conn)[0],
+                                today=day(7))
+        self.assertEqual(result["tone"], "none")
+        self.assertIn("нет", result["verdict"])
+
+    def test_real_win_is_green(self):
+        self.fill(range(-7, 0), spend=400.0, revenue=1000.0)
+        self.fill(range(1, 8), spend=200.0, revenue=1000.0)
+        changes.add(self.conn, day(0), "крупная правка", nm_id=self.NM)
+        result = changes.effect(self.conn, changes.listing(self.conn)[0],
+                                today=day(7))
+        self.assertEqual(result["tone"], "good")
+
+    def test_real_loss_is_red(self):
+        self.fill(range(-7, 0), spend=200.0, revenue=1000.0)
+        self.fill(range(1, 8), spend=400.0, revenue=1000.0)
+        changes.add(self.conn, day(0), "неудачная правка", nm_id=self.NM)
+        result = changes.effect(self.conn, changes.listing(self.conn)[0],
+                                today=day(7))
+        self.assertEqual(result["tone"], "bad")
+
+    def test_early_verdicts_are_neutral(self):
+        self.fill(range(-7, 0))
+        self.fill([1])
+        changes.add(self.conn, day(0), "вчерашняя правка", nm_id=self.NM)
+        result = changes.effect(self.conn, changes.listing(self.conn)[0],
+                                today=day(1))
+        self.assertEqual(result["tone"], "early")
+
+    def test_nothing_to_compare_is_neutral_too(self):
+        changes.add(self.conn, day(0), "правка", nm_id=self.NM)
+        result = changes.effect(self.conn, changes.listing(self.conn)[0],
+                                today=day(7))
+        self.assertEqual(result["tone"], "early")
