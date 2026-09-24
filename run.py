@@ -47,7 +47,7 @@ from wbads.config import (
     token_in_template,
     write_token,
 )
-from wbads.rules import money, pct, signed_pct
+from wbads.rules import money, pct, plural, signed_pct
 from wbads.wb_client import (
     WBAdvertClient,
     WBError,
@@ -281,6 +281,8 @@ def cmd_start(args: argparse.Namespace) -> int:
             _print("она проверит все методы сразу и напишет отчёт в файл")
             _print("диагностика.txt — его можно отправить целиком.")
     print()
+
+    _offer_journal_import()
 
     # ── шаг 3: дашборд ───────────────────────────────────────────────────
     _print("Шаг 3 из 3. Открываю дашборд в браузере.")
@@ -843,11 +845,15 @@ def main(argv: list[str] | None = None) -> int:
     p_journal = sub.add_parser(
         "import-changes",
         help="перенести журнал изменений из таблицы Excel")
-    p_journal.add_argument("file", help="путь к файлу .xlsx")
+    p_journal.add_argument("file", nargs="?", default="",
+                           help="путь к файлу .xlsx; по умолчанию ищется "
+                                "рядом с программой")
     p_journal.add_argument("--sheet", default="",
                            help="имя листа, если их несколько")
     p_journal.add_argument("--dry-run", action="store_true",
                            help="только показать, что прочиталось, и ничего не писать")
+    p_journal.add_argument("--yes", action="store_true",
+                           help="не переспрашивать перед записью")
     p_journal.set_defaults(func=cmd_import_changes)
 
     args = parser.parse_args(argv)
@@ -905,28 +911,133 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
     return 1 if report["problems"] else 0
 
 
+def _offer_journal_import() -> None:
+    """Если рядом лежит таблица журнала — предлагает перенести её.
+
+    Отдельная команда для этого есть, но человек, который не работает с
+    командной строкой, до неё не дойдёт. А журнал без истории почти
+    бесполезен: эффект правки виден только рядом с тем, что было до неё.
+    Поэтому спрашиваем ровно один раз — когда есть что переносить.
+    """
+    files = _journal_files()
+    if not files:
+        return
+    cfg = load_config()
+    try:
+        from wbads import journal_import
+
+        with db.session(cfg.db_path) as conn:
+            known = {(row["date"], row["nm_id"], row["text"])
+                     for row in conn.execute(
+                         "SELECT date, nm_id, text FROM changes")}
+        fresh = 0
+        source = None
+        for path in files:
+            try:
+                report = journal_import.read_journal(str(path))
+            except Exception:                                 # noqa: BLE001
+                continue
+            new_rows = sum(1 for record in report.records
+                           if (record["date"], record["nm_id"],
+                               record["text"]) not in known)
+            if new_rows > fresh:
+                fresh, source = new_rows, path
+    except Exception:                                         # noqa: BLE001
+        # Предложение — не главная работа мастера: если разбор не удался,
+        # молча идём дальше, к дашборду.
+        return
+
+    if not fresh or source is None:
+        return
+
+    word = plural(fresh, "запись", "записи", "записей")
+    _print(f"Рядом лежит таблица «{source.name}», и в ней {fresh} {word}")
+    _print("для журнала изменений — сервис покажет, что из каждой правки вышло.")
+    print()
+    if not _ask("Перенести их в журнал?"):
+        print()
+        return
+    print()
+    cmd_import_changes(argparse.Namespace(file=str(source), sheet="",
+                                          dry_run=False, yes=True))
+    print()
+
+
+def _journal_files() -> list[Path]:
+    """Таблицы Excel рядом с программой.
+
+    Просить человека набрать путь к файлу — значит отправить его в
+    командную строку за тем, что программа может найти сама. Временные
+    файлы Excel (~$имя.xlsx) пропускаем: они открываются, но пустые.
+    """
+    found = [path for path in sorted(ROOT.glob("*.xlsx"))
+             if not path.name.startswith("~$")]
+    return found
+
+
+def _choose_journal_file(files: list[Path]) -> Path | None:
+    """Когда таблиц несколько, выбирает человек, а не программа."""
+    if len(files) == 1:
+        return files[0]
+    _print("Рядом с программой несколько таблиц. Какую взять?")
+    for index, path in enumerate(files, start=1):
+        _print(f"  {index}. {path.name}")
+    print()
+    try:
+        answer = input("  Номер (или Enter, чтобы отменить): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+    if not answer.isdigit() or not 1 <= int(answer) <= len(files):
+        return None
+    return files[int(answer) - 1]
+
+
 def cmd_import_changes(args: argparse.Namespace) -> int:
     """Переносит журнал правок из таблицы Excel в базу сервиса.
 
     Журнал без истории бесполезен: эффект правки виден только рядом с тем,
     что было до неё. История у человека уже есть — в таблице, которую он
     вёл руками. Начинать с пустого листа значило бы её выбросить.
+
+    Путь к файлу указывать не обязательно: таблица ищется рядом с
+    программой. Разбор всегда показывается ДО записи — чтобы человек
+    увидел, что прочиталось, прежде чем это попадёт в базу.
     """
-    from wbads import journal_import
+    from wbads import changes, journal_import
     from wbads.xlsx_read import XlsxError
 
     cfg = load_config()
-    path = Path(args.file).expanduser()
     print()
     print("  Перенос журнала изменений")
     print("  " + "─" * 52)
     print()
 
-    if not path.exists():
-        _print(f"Файл не найден: {path}")
-        _print("Проверьте путь. Проще всего положить таблицу рядом с программой")
-        _print("и указать только имя файла.")
-        return 1
+    if args.file:
+        path = Path(args.file).expanduser()
+        if not path.exists():
+            _print(f"Файл не найден: {path}")
+            _print("Положите таблицу в папку с программой — тогда путь")
+            _print("указывать не придётся вовсе.")
+            return 1
+    else:
+        files = _journal_files()
+        if not files:
+            _print("Рядом с программой нет ни одной таблицы Excel.")
+            print()
+            _print("Что сделать:")
+            _print("  1. Положите ваш файл журнала (.xlsx) в эту же папку")
+            _print("  2. Запустите этот файл ещё раз")
+            print()
+            _print(f"Папка: {ROOT}")
+            return 1
+        chosen = _choose_journal_file(files)
+        if chosen is None:
+            _print("Отменено.")
+            return 1
+        path = chosen
+
+    _print(f"Читаю: {path.name}")
+    print()
 
     sheet: str | int = args.sheet or 0
     try:
@@ -941,18 +1052,29 @@ def cmd_import_changes(args: argparse.Namespace) -> int:
 
     if not report.records:
         _print("Записей для переноса не нашлось.")
+        _print("Ожидается таблица, где строки — артикулы, а колонки названы")
+        _print("датами. В ячейках — что было сделано в этот день.")
         return 1
+
+    _print("Первые записи — проверьте, что разобралось верно:")
+    for record in report.records[:5]:
+        _print(f"  {record['date']} · {record['nm_id']} · "
+               f"{record['text'][:58]}")
+    print()
 
     if args.dry_run:
         _print("Пробный разбор: в базу ничего не записано.")
-        _print("Первые записи, чтобы проверить разбор:")
-        for record in report.records[:5]:
-            _print(f"  {record['date']} · {record['nm_id']} · "
-                   f"{record['text'][:60]}")
         return 0
 
+    # Спрашиваем только человека за клавиатурой: в запуске по расписанию
+    # или из мастера вопрос повис бы без ответа.
+    if not args.yes and sys.stdin is not None and sys.stdin.isatty():
+        if not _ask("Перенести эти записи в журнал?"):
+            _print("Отменено. В базе ничего не изменилось.")
+            return 1
+        print()
+
     with db.session(cfg.db_path) as conn:
-        from wbads import changes
         written = changes.add_many(conn, report.records,
                                    source="импорт из таблицы")
     duplicates = len(report.records) - written
@@ -962,7 +1084,7 @@ def cmd_import_changes(args: argparse.Namespace) -> int:
         _print(f"Уже были в журнале, пропущены: {duplicates}")
     print()
     _print("Откройте дашборд и вкладку «Журнал изменений»:")
-    _print("  python3 run.py serve")
+    _print("  двойной клик на START-Windows.bat (или START-Mac.command)")
     return 0
 
 

@@ -27,6 +27,7 @@
 |---|---|---|
 | Запустить сервис | `START-Windows.bat` | `START-Mac.command` |
 | Быстро проверить доступ | `CHECK-Windows.bat` | `CHECK-Mac.command` |
+| Перенести журнал из Excel | `ZHURNAL-Windows.bat` | `ZHURNAL-Mac.command` |
 | Разобраться, если не работает | `DIAGNOSTIKA-Windows.bat` | `DIAGNOSTIKA-Mac.command` |
 
 Файл проверки нужен, когда что-то не подключается: поменяли дату, отключили
@@ -154,8 +155,8 @@ python3 run.py serve
 | `python3 run.py report` | Краткий отчёт прямо в консоли |
 | `python3 run.py report --all` | То же, но все кампании и все находки |
 | `python3 run.py check` | Проверить доступы токена по каждому методу |
-| `python3 run.py import-changes файл.xlsx` | Перенести журнал правок из вашей таблицы |
-| `python3 run.py import-changes файл.xlsx --dry-run` | То же, но только показать разбор |
+| `python3 run.py import-changes` | Перенести журнал правок из таблицы рядом с программой |
+| `python3 run.py import-changes --dry-run` | То же, но только показать разбор |
 | `python3 run.py diagnose` | Полная диагностика: все методы за один запуск + файл отчёта |
 
 ---
@@ -190,11 +191,21 @@ python3 run.py serve
 ### Перенос вашей таблицы
 
 Если вы уже ведёте журнал в Excel — строки артикулы, колонки даты, в ячейках
-текст, — перенесите его целиком:
+текст, — перенесите его целиком. Набирать ничего не нужно:
+
+1. Положите файл `.xlsx` в папку с программой.
+2. Двойной клик на `ZHURNAL-Windows.bat` (на Mac — `ZHURNAL-Mac.command`).
+
+Программа покажет, что прочиталось, и спросит, переносить ли. В базу ничего
+не попадёт, пока вы не ответите «да». Мастер (`START-…`) делает то же самое
+сам: если рядом лежит таблица с новыми записями, он предложит их перенести.
+
+Из командной строки то же самое:
 
 ```bash
-python3 run.py import-changes "мой журнал.xlsx" --dry-run   # посмотреть разбор
-python3 run.py import-changes "мой журнал.xlsx"             # перенести
+python3 run.py import-changes               # найдёт таблицу рядом и спросит
+python3 run.py import-changes --dry-run     # только показать разбор
+python3 run.py import-changes "файл.xlsx"   # если таблица лежит не рядом
 ```
 
 Колонку с артикулами программа находит сама. Даты в шапке разбирает в любом

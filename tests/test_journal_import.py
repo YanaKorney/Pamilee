@@ -9,7 +9,9 @@
 import sys
 import tempfile
 import unittest
+import unittest.mock
 import zipfile
+from argparse import Namespace
 from datetime import date
 from pathlib import Path
 
@@ -250,3 +252,51 @@ class TestImportingTheJournal(unittest.TestCase):
         again = journal_import.import_into(conn, path)
         self.assertEqual(again.written, 0, "повтор не должен плодить дубли")
         self.assertEqual(again.duplicates, 1)
+
+
+class TestNoTypingRequired(unittest.TestCase):
+    """Человек, который не работает с командной строкой, до отдельной
+    команды не дойдёт. Программа обязана найти таблицу сама и предложить
+    перенос — иначе журнал так и останется пустым."""
+
+    def setUp(self):
+        import run as cli
+        self.cli = cli
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.folder = Path(self.tmp.name)
+        self.patcher = unittest.mock.patch.object(cli, "ROOT", self.folder)
+        self.patcher.start()
+        self.addCleanup(self.patcher.stop)
+
+    def test_tables_next_to_the_program_are_found(self):
+        build_xlsx(self.folder / "журнал.xlsx", [["артикул"], [160427990]])
+        found = self.cli._journal_files()
+        self.assertEqual([p.name for p in found], ["журнал.xlsx"])
+
+    def test_excel_temp_files_are_ignored(self):
+        """Excel держит открытый файл как ~$имя.xlsx — он пустой."""
+        build_xlsx(self.folder / "журнал.xlsx", [["артикул"], [160427990]])
+        (self.folder / "~$журнал.xlsx").write_bytes(b"")
+        found = self.cli._journal_files()
+        self.assertEqual([p.name for p in found], ["журнал.xlsx"])
+
+    def test_no_tables_is_not_an_error_to_decipher(self):
+        import contextlib
+        import io
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = self.cli.cmd_import_changes(
+                Namespace(file="", sheet="", dry_run=True, yes=True))
+        self.assertEqual(code, 1)
+        self.assertIn("Положите ваш файл", out.getvalue(),
+                      "человеку надо сказать, что делать, а не «файл не найден»")
+
+    def test_offer_is_silent_when_there_is_nothing_new(self):
+        """Спрашивать про уже перенесённое — значит приучать жать «нет»."""
+        asked = []
+        with unittest.mock.patch.object(self.cli, "_ask",
+                                        lambda q: asked.append(q) or True):
+            self.cli._offer_journal_import()
+        self.assertEqual(asked, [], "нет таблицы — нет и вопроса")
