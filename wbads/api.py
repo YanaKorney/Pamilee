@@ -248,6 +248,70 @@ def handle_change_delete(conn: sqlite3.Connection,
     return {"ok": changes.delete(conn, change_id)}
 
 
+def handle_change_edit(conn: sqlite3.Connection,
+                       body: dict[str, Any]) -> dict[str, Any]:
+    """Правка уже сделанной записи.
+
+    Товар и кампанию форма правки не трогает: менять их вместе с текстом
+    значит незаметно переносить правку на другой объект, а вместе с ней —
+    и границы окон у соседних записей.
+    """
+    change_id = int(body.get("id") or 0)
+    ok = changes.update(conn, change_id,
+                        day=str(body.get("date") or ""),
+                        text=str(body.get("text") or ""),
+                        keep_subject=True)
+    return {"ok": ok}
+
+
+def _disposition(filename: str) -> str:
+    """Заголовок с именем файла, который не ломается о кириллицу.
+
+    Заголовки HTTP отправляются в latin-1, и «журнал-изменений.csv» валит
+    ответ на полуслове: браузер получает пустой файл без единой ошибки.
+    Поэтому русское имя кодируется по RFC 5987, а рядом остаётся простое
+    латинское — для тех, кто этой кодировки не понимает.
+    """
+    from urllib.parse import quote
+
+    ascii_name = filename.encode("ascii", "ignore").decode("ascii").strip()
+    stem = ascii_name.rsplit(".", 1)[0]
+    # От русского имени в latin-1 остаются одни дефисы и точки — такое
+    # запасное имя хуже честного «export.csv».
+    if not any(char.isalnum() for char in stem):
+        suffix = filename.rsplit(".", 1)[-1] if "." in filename else "csv"
+        ascii_name = f"export.{suffix}"
+    return (f'attachment; filename="{ascii_name}"; '
+            f"filename*=UTF-8''{quote(filename)}")
+
+
+def handle_changes_csv(conn: sqlite3.Connection, cfg: Config,
+                       query: dict[str, list[str]]) -> tuple[str, str]:
+    """Журнал целиком — файлом, который открывается в Excel.
+
+    И читается обратно: выгрузка, которую нельзя загрузить, это не
+    резервная копия, а распечатка.
+    """
+    names = _article_names(conn)
+    campaign_names = _campaign_names(conn)
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, delimiter=";")
+    writer.writerow(["Дата", "Артикул", "Товар", "Кампания",
+                     "Название кампании", "Что сделали", "Источник"])
+    for row in changes.export_rows(conn):
+        writer.writerow([
+            row["date"],
+            row["nm_id"] or "",
+            names.get(row["nm_id"], ""),
+            row["advert_id"] or "",
+            campaign_names.get(row["advert_id"], ""),
+            row["text"],
+            row["source"],
+        ])
+    return buffer.getvalue(), "журнал-изменений.csv"
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     server_version = "wbads/1.0"
     config: Config
@@ -284,13 +348,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
         route, query = parsed.path, parse_qs(parsed.query)
 
         try:
-            if route == "/api/export.csv":
+            if route in ("/api/export.csv", "/api/changes.csv"):
+                maker = (handle_changes_csv if route == "/api/changes.csv"
+                         else handle_export)
                 with db.session(self.config.db_path) as conn:
-                    content, filename = handle_export(conn, self.config, query)
+                    content, filename = maker(conn, self.config, query)
                 body = content.encode("utf-8-sig")  # BOM — чтобы Excel не ломал кириллицу
                 self.send_response(200)
                 self.send_header("Content-Type", "text/csv; charset=utf-8")
-                self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+                self.send_header("Content-Disposition",
+                                 _disposition(filename))
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -335,11 +402,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(exc)}, 500)
             return
 
-        if parsed.path in ("/api/changes", "/api/changes/delete"):
+        if parsed.path in ("/api/changes", "/api/changes/delete",
+                           "/api/changes/edit"):
             try:
                 with db.session(self.config.db_path) as conn:
                     if parsed.path.endswith("/delete"):
                         self._send_json(handle_change_delete(conn, body))
+                    elif parsed.path.endswith("/edit"):
+                        self._send_json(handle_change_edit(conn, body))
                     else:
                         self._send_json(handle_change_add(conn, body))
             except ValueError as exc:

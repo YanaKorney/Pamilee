@@ -300,3 +300,63 @@ class TestNoTypingRequired(unittest.TestCase):
                                         lambda q: asked.append(q) or True):
             self.cli._offer_journal_import()
         self.assertEqual(asked, [], "нет таблицы — нет и вопроса")
+
+
+class TestExportCanBeReadBack(unittest.TestCase):
+    """Выгрузка, которую нельзя загрузить обратно, — это распечатка, а не
+    резервная копия: ни перенести журнал на другой компьютер, ни
+    восстановить его после потери базы по ней не выйдет."""
+
+    def write(self, text: str, name: str = "журнал-изменений.csv") -> str:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / name
+        path.write_text(text, encoding="utf-8-sig")
+        return str(path)
+
+    def test_round_trip_keeps_the_records(self):
+        path = self.write(
+            "Дата;Артикул;Товар;Кампания;Название кампании;Что сделали;Источник\n"
+            "2026-09-10;160427990;Шампунь;;;снизила ставку;ручная запись\n"
+            "2026-09-11;;;4242;Поиск;почистила запросы;ручная запись\n")
+        report = journal_import.read_any(path)
+        self.assertEqual(len(report.records), 2)
+        self.assertEqual(report.records[0]["nm_id"], 160427990)
+        self.assertEqual(report.records[1]["advert_id"], 4242)
+        self.assertIsNone(report.records[1]["nm_id"])
+
+    def test_everyday_date_format_is_understood(self):
+        """Файл могли открыть в Excel и сохранить — даты станут русскими."""
+        path = self.write("Дата;Артикул;Что сделали\n"
+                          "24.09.2026;160427990;снизила ставку\n")
+        report = journal_import.read_any(path)
+        self.assertEqual(report.records[0]["date"], "2026-09-24")
+
+    def test_comma_separated_file_also_works(self):
+        path = self.write("Дата,Артикул,Что сделали\n"
+                          "2026-09-10,160427990,снизила ставку\n")
+        report = journal_import.read_any(path)
+        self.assertEqual(len(report.records), 1)
+
+    def test_records_without_a_subject_are_skipped(self):
+        """Запись, не привязанную ни к чему, мерить нечем."""
+        path = self.write("Дата;Артикул;Кампания;Что сделали\n"
+                          "2026-09-10;;;просто заметка\n")
+        report = journal_import.read_any(path)
+        self.assertEqual(report.records, [])
+
+    def test_a_foreign_csv_says_what_is_missing(self):
+        path = self.write("Колонка;Другая\n1;2\n", name="чужое.csv")
+        with self.assertRaises(XlsxError) as caught:
+            journal_import.read_any(path)
+        self.assertIn("Что сделали", str(caught.exception))
+
+    def test_restoring_into_a_clean_database_works(self):
+        path = self.write("Дата;Артикул;Что сделали\n"
+                          "2026-09-10;160427990;снизила ставку\n")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        conn = db.init_db(Path(tmp.name) / "новая.db")
+        self.addCleanup(conn.close)
+        self.assertEqual(journal_import.import_into(conn, path).written, 1)
+        self.assertEqual(journal_import.import_into(conn, path).written, 0)

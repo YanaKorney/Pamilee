@@ -123,6 +123,44 @@ def add_many(conn: sqlite3.Connection, rows: Sequence[dict[str, Any]],
     return written
 
 
+def update(conn: sqlite3.Connection, change_id: int, day: str = "",
+           text: str | None = None, nm_id: int | None = None,
+           advert_id: int | None = None, keep_subject: bool = False) -> bool:
+    """Правит уже сделанную запись.
+
+    Без этого опечатку можно исправить только удалением и повторным вводом,
+    а вместе с записью пропадёт и её место в цепочке правок: соседние
+    записи обрезают окна замера, и удаление незаметно меняет чужие цифры.
+    """
+    current = conn.execute("SELECT * FROM changes WHERE id = ?",
+                           (change_id,)).fetchone()
+    if current is None:
+        return False
+
+    new_text = current["text"] if text is None else text.strip()
+    if not new_text:
+        raise ValueError("Не записано, что именно изменили")
+
+    new_day = _as_day(day) if day else current["date"]
+    if not new_day:
+        raise ValueError("Не разобрана дата изменения")
+
+    if keep_subject:
+        new_nm, new_advert = current["nm_id"], current["advert_id"]
+    else:
+        new_nm, new_advert = nm_id, advert_id
+        if new_nm is None and new_advert is None:
+            raise ValueError("Укажите артикул или кампанию — иначе эффект "
+                             "не с чем сопоставить")
+
+    conn.execute(
+        "UPDATE changes SET date = ?, text = ?, nm_id = ?, advert_id = ?"
+        " WHERE id = ?",
+        (new_day, new_text, new_nm, new_advert, change_id))
+    conn.commit()
+    return True
+
+
 def delete(conn: sqlite3.Connection, change_id: int) -> bool:
     cur = conn.execute("DELETE FROM changes WHERE id = ?", (change_id,))
     conn.commit()
@@ -416,6 +454,19 @@ def with_effects(conn: sqlite3.Connection, rows: Sequence[dict[str, Any]],
         item["effect"] = effect(conn, row, window=window, today=today)
         out.append(item)
     return out
+
+
+def export_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Весь журнал для выгрузки — по одной правке в строке.
+
+    Записи копятся годами и живут в одном файле базы на одном компьютере.
+    Без выгрузки человек, который откажется от своей таблицы ради этого
+    журнала, окажется без резервной копии — и без способа перенести его
+    на другой компьютер.
+    """
+    return [dict(row) for row in conn.execute(
+        "SELECT date, nm_id, advert_id, text, source, created_at"
+        " FROM changes ORDER BY date, id")]
 
 
 def crowding(conn: sqlite3.Connection, day: str, window: int = DEFAULT_WINDOW

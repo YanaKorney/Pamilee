@@ -983,6 +983,7 @@ const journal = {
   articles: [],
   campaigns: [],
   loaded: false,
+  editing: null,
 };
 
 function switchView(view) {
@@ -1079,14 +1080,26 @@ function journalCard(item) {
 
   const top = el('div', 'jitem-top');
   top.appendChild(el('div', 'jitem-who', subjectLabel(item)));
+
+  const actions = el('div', 'jitem-actions');
+  const edit = el('button', 'jitem-del jitem-edit', 'Изменить');
+  edit.type = 'button';
+  edit.dataset.edit = String(item.id);
+  edit.title = 'Поправить текст или дату записи';
+  actions.appendChild(edit);
   const del = el('button', 'jitem-del', 'Удалить');
   del.type = 'button';
   del.dataset.id = String(item.id);
   del.title = 'Убрать эту запись из журнала';
-  top.appendChild(del);
+  actions.appendChild(del);
+  top.appendChild(actions);
   card.appendChild(top);
 
-  card.appendChild(el('p', 'jitem-what', escapeHtml(item.text)));
+  if (journal.editing === item.id) {
+    card.appendChild(editForm(item));
+  } else {
+    card.appendChild(el('p', 'jitem-what', escapeHtml(item.text)));
+  }
 
   const e = item.effect || {};
   card.appendChild(el('div', 'jverdict ' + verdictClass(e),
@@ -1097,6 +1110,40 @@ function journalCard(item) {
     card.appendChild(windowsNote(e, item));
   }
   return card;
+}
+
+/* Правка — прямо в карточке. Форма наверху страницы уводила бы от того,
+   что правишь, а заодно требовала бы заново указывать товар. */
+function editForm(item) {
+  const form = el('form', 'jedit');
+  form.dataset.id = String(item.id);
+
+  const area = document.createElement('textarea');
+  area.rows = 2;
+  area.value = item.text;
+  area.required = true;
+  form.appendChild(area);
+
+  const row = el('div', 'jedit-row');
+  const when = document.createElement('input');
+  when.type = 'date';
+  when.value = item.date;
+  when.required = true;
+  when.title = 'День, когда правка была сделана';
+  row.appendChild(when);
+
+  const save = el('button', 'btn primary', 'Сохранить');
+  save.type = 'submit';
+  row.appendChild(save);
+  const cancel = el('button', 'btn', 'Отмена');
+  cancel.type = 'button';
+  cancel.dataset.cancel = '1';
+  row.appendChild(cancel);
+  form.appendChild(row);
+
+  setTimeout(() => { area.focus(); area.setSelectionRange(
+    area.value.length, area.value.length); }, 0);
+  return form;
 }
 
 function subjectLabel(item) {
@@ -1231,9 +1278,18 @@ async function submitChange(event) {
     });
     const data = await res.json();
     if (data.error) throw new Error(data.error);
+    /* Правки редко приходят по одной: за один заход человек трогает
+       несколько товаров или пишет несколько строк про один. Сбрасывать
+       после каждой записи день и товар значит заставлять вводить их
+       заново — и за этим человек вернётся в свою таблицу. */
     document.getElementById('ch-text').value = '';
-    msg.textContent = 'Записано.';
-    setTimeout(() => { msg.textContent = ''; }, 2500);
+    if (!document.getElementById('ch-keep').checked) {
+      document.getElementById('ch-nm').value = '';
+      document.getElementById('ch-advert').value = '';
+    }
+    document.getElementById('ch-text').focus();
+    msg.textContent = 'Записано. Можно писать следующую.';
+    setTimeout(() => { msg.textContent = ''; }, 3000);
     loadJournal();
   } catch (err) {
     msg.className = 'jform-msg bad';
@@ -1247,6 +1303,26 @@ async function deleteChange(id) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id }),
   });
+  loadJournal();
+}
+
+async function saveEdit(form) {
+  const id = Number(form.dataset.id);
+  const text = form.querySelector('textarea').value;
+  const date = form.querySelector('input[type="date"]').value;
+  const res = await fetch('/api/changes/edit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, text, date }),
+  });
+  const data = await res.json();
+  if (data.error) {
+    const msg = document.getElementById('ch-msg');
+    msg.className = 'jform-msg bad';
+    msg.textContent = 'Не сохранилось: ' + data.error;
+    return;
+  }
+  journal.editing = null;
   loadJournal();
 }
 
@@ -1267,8 +1343,26 @@ document.getElementById('window-seg').addEventListener('click', (e) => {
 document.getElementById('change-form').addEventListener('submit', submitChange);
 
 document.getElementById('journal').addEventListener('click', (e) => {
-  const btn = e.target.closest('.jitem-del');
-  if (btn) deleteChange(Number(btn.dataset.id));
+  const edit = e.target.closest('button[data-edit]');
+  if (edit) {
+    journal.editing = Number(edit.dataset.edit);
+    renderJournal();
+    return;
+  }
+  if (e.target.closest('button[data-cancel]')) {
+    journal.editing = null;
+    renderJournal();
+    return;
+  }
+  const del = e.target.closest('button[data-id]');
+  if (del) deleteChange(Number(del.dataset.id));
+});
+
+document.getElementById('journal').addEventListener('submit', (e) => {
+  const form = e.target.closest('.jedit');
+  if (!form) return;
+  e.preventDefault();
+  saveEdit(form);
 });
 
 let journalFilterTimer = null;

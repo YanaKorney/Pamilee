@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Sequence
 
 from .xlsx_read import XlsxError, as_date, column_letter, read_sheet
@@ -357,11 +357,91 @@ def _as_text(value: Any) -> str:
     return text
 
 
+# Заголовки выгрузки журнала — по ним узнаётся «длинный» формат, где одна
+# строка это одна правка. Так выглядит файл, который сервис отдаёт сам.
+LONG_HEADERS = {"дата": "date", "артикул": "nm_id", "кампания": "advert_id",
+                "что сделали": "text"}
+
+
+def read_csv_journal(path: str) -> ImportReport:
+    """Читает выгрузку журнала: одна строка — одна правка.
+
+    Нужна для обратного пути. Выгрузка, которую нельзя прочитать обратно,
+    это не резервная копия, а распечатка: перенести журнал на другой
+    компьютер по ней не выйдет.
+    """
+    import csv
+
+    report = ImportReport()
+    with open(path, encoding="utf-8-sig", newline="") as stream:
+        sample = stream.read(4096)
+        stream.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=";,\t")
+        except csv.Error:
+            dialect = csv.excel
+            dialect.delimiter = ";"
+        reader = csv.DictReader(stream, dialect=dialect)
+        fields = {(name or "").strip().lower(): name
+                  for name in (reader.fieldnames or [])}
+        # Названия в сообщении пишем так, как они стоят в выгрузке:
+        # человек будет искать их глазами в своём файле.
+        missing = [title for title in ("Дата", "Что сделали")
+                   if title.lower() not in fields]
+        if missing:
+            raise XlsxError(
+                "Это не выгрузка журнала: в ней нет "
+                + ("колонки " if len(missing) == 1 else "колонок ")
+                + ", ".join(f"«{m}»" for m in missing))
+
+        days = set()
+        articles = set()
+        for row in reader:
+            day = _as_day_value(row.get(fields.get("дата", ""), ""))
+            text = str(row.get(fields.get("что сделали", ""), "") or "").strip()
+            if not day or not text:
+                continue
+            nm_id = _as_nm_id(row.get(fields.get("артикул", ""), ""))
+            advert_id = _as_nm_id(row.get(fields.get("кампания", ""), ""))
+            if nm_id is None and advert_id is None:
+                continue
+            days.add(day)
+            if nm_id is not None:
+                articles.add(nm_id)
+            report.records.append({
+                "date": day, "nm_id": nm_id, "advert_id": advert_id,
+                "text": text, "source": "восстановление из выгрузки",
+            })
+    report.articles = len(articles)
+    report.date_columns = len(days)
+    return report
+
+
+def _as_day_value(value: Any) -> str:
+    """Дата из ячейки выгрузки: и ISO, и привычное 24.09.2026."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d.%m.%y"):
+        try:
+            return datetime.strptime(text[:10], fmt).date().isoformat()
+        except ValueError:
+            continue
+    return ""
+
+
+def read_any(path: str, sheet: str | int = 0) -> ImportReport:
+    """Разбирает и таблицу-журнал, и выгрузку сервиса — по расширению."""
+    if str(path).lower().endswith((".csv", ".txt")):
+        return read_csv_journal(str(path))
+    return read_journal(str(path), sheet)
+
+
 def import_into(conn: Any, path: str, sheet: str | int = 0) -> ImportReport:
     """Разбирает таблицу и переносит записи в базу."""
     from . import changes
 
-    report = read_journal(path, sheet)
+    report = read_any(path, sheet)
     before = len(report.records)
     report.written = changes.add_many(conn, report.records,
                                       source="импорт из таблицы")

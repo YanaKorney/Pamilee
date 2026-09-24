@@ -846,8 +846,8 @@ def main(argv: list[str] | None = None) -> int:
         "import-changes",
         help="перенести журнал изменений из таблицы Excel")
     p_journal.add_argument("file", nargs="?", default="",
-                           help="путь к файлу .xlsx; по умолчанию ищется "
-                                "рядом с программой")
+                           help="путь к файлу .xlsx или к выгрузке журнала "
+                                ".csv; по умолчанию ищется рядом с программой")
     p_journal.add_argument("--sheet", default="",
                            help="имя листа, если их несколько")
     p_journal.add_argument("--dry-run", action="store_true",
@@ -934,7 +934,7 @@ def _offer_journal_import() -> None:
         source = None
         for path in files:
             try:
-                report = journal_import.read_journal(str(path))
+                report = journal_import.read_any(str(path))
             except Exception:                                 # noqa: BLE001
                 continue
             new_rows = sum(1 for record in report.records
@@ -972,6 +972,9 @@ def _journal_files() -> list[Path]:
     """
     found = [path for path in sorted(ROOT.glob("*.xlsx"))
              if not path.name.startswith("~$")]
+    # Выгрузку журнала тоже принимаем: иначе перенести его на другой
+    # компьютер или восстановить из копии было бы нечем.
+    found += sorted(ROOT.glob("журнал-изменений*.csv"))
     return found
 
 
@@ -1025,7 +1028,8 @@ def cmd_import_changes(args: argparse.Namespace) -> int:
             _print("Рядом с программой нет ни одной таблицы Excel.")
             print()
             _print("Что сделать:")
-            _print("  1. Положите ваш файл журнала (.xlsx) в эту же папку")
+            _print("  1. Положите ваш файл журнала (.xlsx) или выгрузку")
+            _print("     сервиса (журнал-изменений.csv) в эту же папку")
             _print("  2. Запустите этот файл ещё раз")
             print()
             _print(f"Папка: {ROOT}")
@@ -1041,7 +1045,7 @@ def cmd_import_changes(args: argparse.Namespace) -> int:
 
     sheet: str | int = args.sheet or 0
     try:
-        report = journal_import.read_journal(str(path), sheet)
+        report = journal_import.read_any(str(path), sheet)
     except XlsxError as exc:
         _print(str(exc))
         return 1

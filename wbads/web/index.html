@@ -121,6 +121,10 @@
         </label>
         <div class="jform-actions">
           <button class="btn primary" type="submit">Записать</button>
+          <label class="keep">
+            <input type="checkbox" id="ch-keep" checked>
+            оставить день и товар для следующей записи
+          </label>
           <span class="jform-msg" id="ch-msg"></span>
         </div>
       </form>
@@ -134,10 +138,15 @@
             после. Окна обрезаются соседними правками — иначе одно изменение
             присвоило бы результат другого.</p>
         </div>
-        <div class="seg" id="window-seg" role="group" aria-label="Окно сравнения">
-          <button data-window="3" aria-pressed="false">± 3 дня</button>
-          <button data-window="7" aria-pressed="true">± 7 дней</button>
-          <button data-window="14" aria-pressed="false">± 14 дней</button>
+        <div class="jhead-controls">
+          <div class="seg" id="window-seg" role="group" aria-label="Окно сравнения">
+            <button data-window="3" aria-pressed="false">± 3 дня</button>
+            <button data-window="7" aria-pressed="true">± 7 дней</button>
+            <button data-window="14" aria-pressed="false">± 14 дней</button>
+          </div>
+          <a class="btn" href="/api/changes.csv" download
+             title="Весь журнал файлом: резервная копия и перенос на другой компьютер">
+            Выгрузить журнал</a>
         </div>
       </div>
       <div class="jfilter">

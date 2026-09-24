@@ -350,3 +350,59 @@ class TestToneMatchesTheWords(JournalCase):
         result = changes.effect(self.conn, changes.listing(self.conn)[0],
                                 today=day(7))
         self.assertEqual(result["tone"], "early")
+
+
+class TestEditingAnExistingRecord(JournalCase):
+    """Опечатку надо уметь править. Удалить и записать заново — не выход:
+    вместе с записью пропадает её место в цепочке правок, а соседние
+    записи обрезают по ней окна замера."""
+
+    def test_text_and_date_can_be_fixed(self):
+        change_id = changes.add(self.conn, day(0), "снизила ставу",
+                                nm_id=self.NM)
+        self.assertTrue(changes.update(self.conn, change_id, day=day(-1),
+                                       text="снизила ставку",
+                                       keep_subject=True))
+        row = changes.listing(self.conn)[0]
+        self.assertEqual(row["text"], "снизила ставку")
+        self.assertEqual(row["date"], day(-1))
+        self.assertEqual(row["nm_id"], self.NM, "товар менять не просили")
+
+    def test_empty_text_is_refused(self):
+        change_id = changes.add(self.conn, day(0), "ставка", nm_id=self.NM)
+        with self.assertRaises(ValueError):
+            changes.update(self.conn, change_id, text="  ", keep_subject=True)
+
+    def test_editing_a_missing_record_is_not_a_crash(self):
+        self.assertFalse(changes.update(self.conn, 9999, text="что-то",
+                                        keep_subject=True))
+
+    def test_edit_moves_the_measurement_window_with_it(self):
+        """Дата — не подпись, а точка отсчёта: окна считаются от неё."""
+        self.fill(range(-10, 10))
+        change_id = changes.add(self.conn, day(0), "ставка", nm_id=self.NM)
+        changes.update(self.conn, change_id, day=day(-4), keep_subject=True)
+        result = changes.effect(self.conn, changes.listing(self.conn)[0],
+                                today=day(9))
+        self.assertEqual(result["before_period"][1], day(-5))
+        self.assertEqual(result["after_period"][0], day(-3))
+
+
+class TestJournalCanLeaveTheProgram(JournalCase):
+    """Записи копятся годами в одном файле на одном компьютере. Человеку,
+    который ради журнала откажется от своей таблицы, нужна и резервная
+    копия, и способ перенести её на другой компьютер."""
+
+    def test_export_returns_every_record(self):
+        changes.add(self.conn, day(-1), "первая", nm_id=self.NM)
+        changes.add(self.conn, day(0), "вторая", advert_id=self.ADVERT)
+        rows = changes.export_rows(self.conn)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["date"], day(-1), "по возрастанию даты")
+        self.assertEqual(rows[1]["advert_id"], self.ADVERT)
+
+    def test_export_keeps_what_is_needed_to_restore(self):
+        changes.add(self.conn, day(0), "снизила ставку", nm_id=self.NM)
+        row = changes.export_rows(self.conn)[0]
+        for field in ("date", "nm_id", "advert_id", "text"):
+            self.assertIn(field, row, f"без {field} запись не восстановить")
