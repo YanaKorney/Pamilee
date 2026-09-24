@@ -71,6 +71,24 @@ CREATE TABLE IF NOT EXISTS balance_snapshots (
     net      REAL DEFAULT 0    -- баланс
 );
 
+-- Журнал изменений: что менеджер сделал в рекламе и когда.
+-- Без него динамика отвечает «стало хуже», но не отвечает «после чего».
+-- Привязка к артикулу, к кампании или к обоим сразу: правку ставки делают
+-- в кампании, а следят за ней по товару, и запрещать любую из связок
+-- значило бы навязывать чужой порядок работы.
+CREATE TABLE IF NOT EXISTS changes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    date       TEXT    NOT NULL,          -- YYYY-MM-DD, день изменения
+    nm_id      INTEGER,                   -- артикул WB, если правка про товар
+    advert_id  INTEGER,                   -- кампания, если правка про неё
+    text       TEXT    NOT NULL,          -- что именно сделали, своими словами
+    source     TEXT    NOT NULL DEFAULT 'ручная запись',
+    created_at TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_changes_date ON changes(date);
+CREATE INDEX IF NOT EXISTS idx_changes_nm ON changes(nm_id, date);
+CREATE INDEX IF NOT EXISTS idx_changes_advert ON changes(advert_id, date);
+
 -- Журнал сборов: видно, когда данные обновлялись и не упало ли что-то
 CREATE TABLE IF NOT EXISTS collect_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,

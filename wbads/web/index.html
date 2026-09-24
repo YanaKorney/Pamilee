@@ -16,11 +16,12 @@
       <div class="sub" id="subtitle">Загружаем данные…</div>
     </div>
     <div class="controls">
-      <div class="seg" id="period-seg" role="group" aria-label="Период анализа">
+      <span class="controls-group" id="analytics-controls">
+      <span class="seg" id="period-seg" role="group" aria-label="Период анализа">
         <button data-days="7"  aria-pressed="true">7 дней</button>
         <button data-days="14" aria-pressed="false">14 дней</button>
         <button data-days="30" aria-pressed="false">30 дней</button>
-      </div>
+      </span>
       <input type="date" id="date-from" aria-label="Начало периода">
       <input type="date" id="date-to" aria-label="Конец периода">
       <label class="btn" title="Доля рекламных расходов, выше которой кампания считается проблемной">
@@ -29,11 +30,19 @@
         %
       </label>
       <a class="btn" id="export" href="/api/export.csv" download>Выгрузить в CSV</a>
+      </span>
       <button class="btn" id="theme">Тема</button>
     </div>
   </header>
 
   <div id="error" class="err" hidden></div>
+
+  <nav class="tabs" id="tabs" role="tablist" aria-label="Разделы">
+    <button role="tab" data-view="analytics" aria-selected="true">Аналитика</button>
+    <button role="tab" data-view="journal" aria-selected="false">Журнал изменений</button>
+  </nav>
+
+  <div id="view-analytics">
 
   <section class="card" id="todo-card" hidden>
     <h2>Что сделать сегодня</h2>
@@ -84,6 +93,64 @@
   </section>
 
   <p class="foot" id="foot"></p>
+  </div><!-- /view-analytics -->
+
+  <div id="view-journal" hidden>
+
+    <section class="card">
+      <h2>Что изменили</h2>
+      <p class="hint">Запишите правку в тот день, когда её сделали. Дальше сервис
+        сам покажет, что изменилось в метриках: сравнит дни до и дни после.</p>
+      <form class="jform" id="change-form">
+        <label><span class="cap">День</span>
+          <input type="date" id="ch-date" required>
+        </label>
+        <label><span class="cap">Товар</span>
+          <input list="ch-articles" id="ch-nm" placeholder="артикул или название"
+                 autocomplete="off">
+          <datalist id="ch-articles"></datalist>
+        </label>
+        <label><span class="cap">Кампания <span class="opt">не обязательно</span></span>
+          <input list="ch-campaigns" id="ch-advert" placeholder="номер или название"
+                 autocomplete="off">
+          <datalist id="ch-campaigns"></datalist>
+        </label>
+        <label class="wide"><span class="cap">Что сделали</span>
+          <textarea id="ch-text" rows="2" required
+            placeholder="снизила ставку по основному запросу до 120, убрала показы в рекомендациях"></textarea>
+        </label>
+        <div class="jform-actions">
+          <button class="btn primary" type="submit">Записать</button>
+          <span class="jform-msg" id="ch-msg"></span>
+        </div>
+      </form>
+    </section>
+
+    <section class="card">
+      <div class="jhead">
+        <div>
+          <h2>Что из этого вышло</h2>
+          <p class="hint">Сравниваются средние за день: окно до правки и окно
+            после. Окна обрезаются соседними правками — иначе одно изменение
+            присвоило бы результат другого.</p>
+        </div>
+        <div class="seg" id="window-seg" role="group" aria-label="Окно сравнения">
+          <button data-window="3" aria-pressed="false">± 3 дня</button>
+          <button data-window="7" aria-pressed="true">± 7 дней</button>
+          <button data-window="14" aria-pressed="false">± 14 дней</button>
+        </div>
+      </div>
+      <div class="jfilter">
+        <label><span class="cap">Только товар</span>
+          <input list="ch-articles" id="jf-nm" placeholder="все товары"
+                 autocomplete="off">
+        </label>
+        <button class="btn" id="jf-clear" type="button">Сбросить</button>
+      </div>
+      <div id="journal"></div>
+    </section>
+
+  </div><!-- /view-journal -->
 </div>
 
 <script src="/app.js"></script>

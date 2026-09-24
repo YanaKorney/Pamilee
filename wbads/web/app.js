@@ -966,4 +966,329 @@ window.addEventListener('resize', () => {
   resizeTimer = setTimeout(() => { if (state.report) render(); }, 150);
 });
 
+/* ── журнал изменений ─────────────────────────────────────────────────────
+
+   Динамика отвечает «стало хуже» и «вот где». На вопрос «после чего»
+   отвечает только человек, вносивший правки. Здесь его запись лежит рядом
+   с цифрами, и по каждой видно, что изменилось.
+
+   Сравниваются СРЕДНИЕ ЗА ДЕНЬ, а окна обрезаются соседними правками —
+   иначе число «эффект» мерило бы длину окна или чужой результат. Считает
+   это сервер; здесь только показ. */
+
+const journal = {
+  window: 7,
+  nm: null,
+  items: [],
+  articles: [],
+  campaigns: [],
+  loaded: false,
+};
+
+function switchView(view) {
+  document.querySelectorAll('#tabs button').forEach((b) =>
+    b.setAttribute('aria-selected', String(b.dataset.view === view)));
+  document.getElementById('view-analytics').hidden = view !== 'analytics';
+  document.getElementById('view-journal').hidden = view !== 'journal';
+  /* Период, цель ДРР и выгрузка относятся к аналитике. В журнале своё окно
+     сравнения, и две пары настроек периода рядом только путают. */
+  document.getElementById('analytics-controls').hidden = view !== 'analytics';
+  if (view === 'journal') {
+    if (!journal.loaded) loadDirectories();
+    loadJournal();
+  }
+}
+
+async function loadDirectories() {
+  try {
+    const res = await fetch('/api/articles');
+    const data = await res.json();
+    journal.articles = data.articles || [];
+    journal.campaigns = data.campaigns || [];
+    journal.loaded = true;
+    fillList('ch-articles', journal.articles.map((a) =>
+      ({ value: String(a.nm_id), label: a.name })));
+    fillList('ch-campaigns', journal.campaigns.map((c) =>
+      ({ value: String(c.advert_id), label: c.name })));
+  } catch (_) { /* справочник не обязателен: номер можно вписать руками */ }
+}
+
+/* Список для подсказки: показываем название, а подставляем номер —
+   иначе пришлось бы держать в голове девятизначные артикулы. */
+function fillList(id, items) {
+  const host = document.getElementById(id);
+  if (!host) return;
+  host.innerHTML = '';
+  items.forEach((item) => {
+    const option = document.createElement('option');
+    option.value = item.value;
+    if (item.label) option.label = item.label;
+    option.textContent = item.label || '';
+    host.appendChild(option);
+  });
+}
+
+function journalQuery() {
+  const p = new URLSearchParams();
+  p.set('window', String(journal.window));
+  if (journal.nm) p.set('nm_id', String(journal.nm));
+  return p.toString();
+}
+
+async function loadJournal() {
+  const host = document.getElementById('journal');
+  host.innerHTML = '<p class="jempty">Загружаем…</p>';
+  try {
+    const res = await fetch('/api/changes?' + journalQuery());
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    journal.items = data.changes || [];
+    renderJournal();
+  } catch (err) {
+    host.innerHTML = '';
+    host.appendChild(el('p', 'jempty', 'Не удалось загрузить журнал: ' +
+      escapeHtml(err.message)));
+  }
+}
+
+function renderJournal() {
+  const host = document.getElementById('journal');
+  host.innerHTML = '';
+
+  if (!journal.items.length) {
+    host.appendChild(el('p', 'jempty',
+      journal.nm
+        ? 'По этому товару записей пока нет.'
+        : 'Записей пока нет. Запишите первую правку в форме выше — и ' +
+          'через несколько дней здесь появится, что из неё вышло.'));
+    return;
+  }
+
+  let lastDay = null;
+  journal.items.forEach((item) => {
+    if (item.date !== lastDay) {
+      lastDay = item.date;
+      host.appendChild(el('div', 'jday', dayLabel(item.date)));
+    }
+    host.appendChild(journalCard(item));
+  });
+}
+
+function journalCard(item) {
+  const card = el('div', 'jitem');
+
+  const top = el('div', 'jitem-top');
+  top.appendChild(el('div', 'jitem-who', subjectLabel(item)));
+  const del = el('button', 'jitem-del', 'Удалить');
+  del.type = 'button';
+  del.dataset.id = String(item.id);
+  del.title = 'Убрать эту запись из журнала';
+  top.appendChild(del);
+  card.appendChild(top);
+
+  card.appendChild(el('p', 'jitem-what', escapeHtml(item.text)));
+
+  const e = item.effect || {};
+  card.appendChild(el('div', 'jverdict ' + verdictClass(e),
+    escapeHtml(e.verdict || '')));
+
+  if (e.metrics && e.metrics.length) {
+    card.appendChild(metricsTable(e));
+    card.appendChild(windowsNote(e, item));
+  }
+  return card;
+}
+
+function subjectLabel(item) {
+  const parts = [];
+  if (item.nm_id) {
+    parts.push(item.nm_name
+      ? `<b>${escapeHtml(item.nm_name)}</b> · ${item.nm_id}`
+      : `Артикул <b>${item.nm_id}</b>`);
+  }
+  if (item.advert_id) {
+    parts.push(item.campaign_name
+      ? `кампания <b>${escapeHtml(item.campaign_name)}</b>`
+      : `кампания <b>${item.advert_id}</b>`);
+  }
+  return parts.join(' · ') || 'Без привязки';
+}
+
+/* Цвет вердикта — по смыслу, а не по наличию цифр: «рано судить» не
+   должно выглядеть ни победой, ни провалом. */
+function verdictClass(e) {
+  if (!e.ready) return 'early';
+  const drr = (e.metrics || []).find((m) => m.key === 'drr');
+  if (!drr || drr.direction === 'same') return '';
+  return drr.direction === 'better' ? 'good' : 'bad';
+}
+
+function metricsTable(e) {
+  const table = el('table', 'jmetrics');
+  table.innerHTML =
+    '<thead><tr><th>Показатель</th><th>Было в день</th>' +
+    '<th>Стало в день</th><th>Разница</th></tr></thead>';
+  const body = document.createElement('tbody');
+
+  e.metrics.forEach((m) => {
+    const row = document.createElement('tr');
+    row.appendChild(el('td', '', escapeHtml(m.title)));
+    /* Точность выбирается один раз на строку, по большему из двух чисел:
+       «10,2% → 9,31%» в одной строке читается как разные величины. */
+    const digits = valueDigits(Math.max(Math.abs(m.before), Math.abs(m.after)),
+      m.unit);
+    row.appendChild(el('td', '', metricValue(m.before, m.unit, digits)));
+    row.appendChild(el('td', '', metricValue(m.after, m.unit, digits)));
+    row.appendChild(el('td', 'd-' + m.direction, deltaText(m)));
+    body.appendChild(row);
+  });
+  table.appendChild(body);
+  return table;
+}
+
+/* Здесь показываются средние за день, а они дробные. Округлять их до целых
+   значит получать строки вида «2,1% → 2,1%» с разницей −2% в соседней
+   колонке: выглядит как опечатка, хотя оба числа верны. Поэтому мелким
+   величинам даём больше знаков. */
+function valueDigits(scale, unit) {
+  if (unit === '₽') return scale < 100 ? 2 : 0;
+  if (unit === '%') return scale < 10 ? 2 : 1;
+  return scale < 100 ? 1 : 0;
+}
+
+function metricValue(value, unit, digits) {
+  const v = Number(value) || 0;
+  if (unit === '₽') return money(v, digits);
+  if (unit === '%') return pct(v, digits);
+  if (digits > 0) return v.toFixed(digits).replace('.', ',');
+  return num(v);
+}
+
+function deltaText(m) {
+  if (m.delta_pct === null || m.delta_pct === undefined) {
+    return m.after ? 'появилось' : '—';
+  }
+  if (m.direction === 'same') return '≈';
+  return signed(m.delta_pct);
+}
+
+/* Что именно сравнивалось. Без этих дат «было → стало» пришлось бы
+   принимать на веру, а окна здесь почти всегда разной длины. */
+function windowsNote(e, item) {
+  const note = el('div', 'jwindows');
+  note.appendChild(el('span', '',
+    `до: ${dayLabel(e.before_period[0])} — ${dayLabel(e.before_period[1])} ` +
+    `(${e.before_days} ${plural(e.before_days, 'день', 'дня', 'дней')})`));
+  note.appendChild(el('span', '',
+    `после: ${dayLabel(e.after_period[0])} — ${dayLabel(e.after_period[1])} ` +
+    `(${e.after_days} ${plural(e.after_days, 'день', 'дня', 'дней')})`));
+  if (e.cut_by_next) {
+    note.appendChild(el('span', '', 'окно обрезано следующей правкой'));
+  }
+  if (item.crowding > 1) {
+    note.appendChild(el('span', '',
+      `в эти дни правок было ${item.crowding} — сдвиг мог дать не только эта`));
+  }
+  return note;
+}
+
+/* Из поля-подсказки приходит либо номер, либо название: сопоставляем
+   и то и другое, чтобы форма не требовала помнить артикул. */
+function pickId(value, items, idKey) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  if (/^\d+$/.test(text)) return Number(text);
+  const found = items.find((i) =>
+    (i.name || '').toLowerCase() === text.toLowerCase());
+  return found ? found[idKey] : null;
+}
+
+async function submitChange(event) {
+  event.preventDefault();
+  const msg = document.getElementById('ch-msg');
+  const nm = pickId(document.getElementById('ch-nm').value,
+    journal.articles, 'nm_id');
+  const advert = pickId(document.getElementById('ch-advert').value,
+    journal.campaigns, 'advert_id');
+  const body = {
+    date: document.getElementById('ch-date').value,
+    text: document.getElementById('ch-text').value,
+    nm_id: nm,
+    advert_id: advert,
+  };
+  if (!body.nm_id && !body.advert_id) {
+    msg.className = 'jform-msg bad';
+    msg.textContent = 'Укажите товар или кампанию — иначе не с чем сравнивать.';
+    return;
+  }
+
+  msg.className = 'jform-msg';
+  msg.textContent = 'Записываем…';
+  try {
+    const res = await fetch('/api/changes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    document.getElementById('ch-text').value = '';
+    msg.textContent = 'Записано.';
+    setTimeout(() => { msg.textContent = ''; }, 2500);
+    loadJournal();
+  } catch (err) {
+    msg.className = 'jform-msg bad';
+    msg.textContent = 'Не записалось: ' + err.message;
+  }
+}
+
+async function deleteChange(id) {
+  await fetch('/api/changes/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id }),
+  });
+  loadJournal();
+}
+
+document.getElementById('tabs').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-view]');
+  if (btn) switchView(btn.dataset.view);
+});
+
+document.getElementById('window-seg').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-window]');
+  if (!btn) return;
+  journal.window = Number(btn.dataset.window);
+  document.querySelectorAll('#window-seg button').forEach((b) =>
+    b.setAttribute('aria-pressed', String(b === btn)));
+  loadJournal();
+});
+
+document.getElementById('change-form').addEventListener('submit', submitChange);
+
+document.getElementById('journal').addEventListener('click', (e) => {
+  const btn = e.target.closest('.jitem-del');
+  if (btn) deleteChange(Number(btn.dataset.id));
+});
+
+let journalFilterTimer = null;
+document.getElementById('jf-nm').addEventListener('input', (e) => {
+  clearTimeout(journalFilterTimer);
+  journalFilterTimer = setTimeout(() => {
+    journal.nm = pickId(e.target.value, journal.articles, 'nm_id');
+    loadJournal();
+  }, 400);
+});
+
+document.getElementById('jf-clear').addEventListener('click', () => {
+  document.getElementById('jf-nm').value = '';
+  journal.nm = null;
+  loadJournal();
+});
+
+/* День по умолчанию — сегодня: правку записывают в тот же день, когда
+   сделали, и лишний клик здесь только мешает. */
+document.getElementById('ch-date').value = new Date().toISOString().slice(0, 10);
+
 load();

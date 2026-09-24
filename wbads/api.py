@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
-from . import analytics, db
+from . import analytics, changes, db
 from .config import Config, Thresholds
 from .metrics import parse_date
 
@@ -152,11 +152,100 @@ def handle_export(conn: sqlite3.Connection, cfg: Config,
     return buffer.getvalue(), filename
 
 
+def handle_changes(conn: sqlite3.Connection, cfg: Config,
+                   query: dict[str, list[str]]) -> dict[str, Any]:
+    """Журнал изменений вместе с замером эффекта по каждой записи."""
+    window = int((query.get("window") or [str(changes.DEFAULT_WINDOW)])[0] or 7)
+    window = max(3, min(window, 30))
+    nm_id = (query.get("nm_id") or [""])[0]
+    advert_id = (query.get("advert_id") or [""])[0]
+    limit = int((query.get("limit") or ["200"])[0] or 200)
+
+    rows = changes.listing(
+        conn,
+        date_from=(query.get("from") or [""])[0],
+        date_to=(query.get("to") or [""])[0],
+        nm_id=int(nm_id) if nm_id.isdigit() else None,
+        advert_id=int(advert_id) if advert_id.isdigit() else None,
+        limit=max(1, min(limit, 1000)),
+    )
+    _, data_to = db.data_range(conn)
+    items = changes.with_effects(conn, rows, window=window, today=data_to or "")
+    names = _article_names(conn)
+    campaign_names = _campaign_names(conn)
+    for item in items:
+        item["nm_name"] = names.get(item.get("nm_id"), "")
+        item["campaign_name"] = campaign_names.get(item.get("advert_id"), "")
+        item["crowding"] = changes.crowding(conn, item["date"], window)
+    return {"window": window, "changes": items, "total": len(items)}
+
+
+def handle_articles(conn: sqlite3.Connection, cfg: Config,
+                    query: dict[str, list[str]]) -> dict[str, Any]:
+    """Артикулы и кампании для формы записи — чтобы не набивать номера руками."""
+    articles = [{"nm_id": nm_id, "name": name}
+                for nm_id, name in sorted(_article_names(conn).items(),
+                                          key=lambda kv: kv[1] or str(kv[0]))]
+    campaigns = [{"advert_id": advert_id, "name": name}
+                 for advert_id, name in sorted(_campaign_names(conn).items(),
+                                               key=lambda kv: kv[1] or str(kv[0]))]
+    return {"articles": articles, "campaigns": campaigns}
+
+
+def _article_names(conn: sqlite3.Connection) -> dict[int, str]:
+    """Названия товаров по артикулу — из статистики и из заказов.
+
+    В статистике рекламы название есть не всегда, а в заказах лежит
+    предмет и артикул продавца: вместе получается понятнее, чем номер.
+    """
+    names: dict[int, str] = {}
+    for row in conn.execute(
+            "SELECT nm_id, subject, supplier_article FROM orders_raw"
+            " WHERE nm_id IS NOT NULL GROUP BY nm_id"):
+        parts = [p for p in (row["subject"], row["supplier_article"]) if p]
+        if parts:
+            names[int(row["nm_id"])] = " · ".join(str(p) for p in parts)
+    for row in conn.execute(
+            "SELECT nm_id, name FROM campaign_nm_daily"
+            " WHERE name != '' GROUP BY nm_id"):
+        names.setdefault(int(row["nm_id"]), str(row["name"]))
+    for row in conn.execute("SELECT DISTINCT nm_id FROM campaign_nm_daily"):
+        names.setdefault(int(row["nm_id"]), "")
+    return names
+
+
+def _campaign_names(conn: sqlite3.Connection) -> dict[int, str]:
+    return {int(row["advert_id"]): str(row["name"] or "")
+            for row in conn.execute("SELECT advert_id, name FROM campaigns")}
+
+
 ROUTES: dict[str, Callable] = {
     "/api/report": handle_report,
     "/api/campaign": handle_campaign,
     "/api/meta": handle_meta,
+    "/api/changes": handle_changes,
+    "/api/articles": handle_articles,
 }
+
+
+def handle_change_add(conn: sqlite3.Connection, body: dict[str, Any]) -> dict[str, Any]:
+    """Записывает изменение из формы дашборда."""
+    nm_id = body.get("nm_id")
+    advert_id = body.get("advert_id")
+    change_id = changes.add(
+        conn,
+        day=str(body.get("date") or ""),
+        text=str(body.get("text") or ""),
+        nm_id=int(nm_id) if str(nm_id or "").strip().isdigit() else None,
+        advert_id=int(advert_id) if str(advert_id or "").strip().isdigit() else None,
+    )
+    return {"ok": True, "id": change_id}
+
+
+def handle_change_delete(conn: sqlite3.Connection,
+                         body: dict[str, Any]) -> dict[str, Any]:
+    change_id = int(body.get("id") or 0)
+    return {"ok": changes.delete(conn, change_id)}
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -245,6 +334,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send_json({"error": str(exc)}, 500)
             return
+
+        if parsed.path in ("/api/changes", "/api/changes/delete"):
+            try:
+                with db.session(self.config.db_path) as conn:
+                    if parsed.path.endswith("/delete"):
+                        self._send_json(handle_change_delete(conn, body))
+                    else:
+                        self._send_json(handle_change_add(conn, body))
+            except ValueError as exc:
+                # Понятная ошибка ввода — не повод показывать «сбой сервера».
+                self._send_json({"error": str(exc)}, 400)
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, 500)
+            return
+
         self._send_json({"error": "Не найдено"}, 404)
 
 

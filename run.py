@@ -33,6 +33,7 @@ if sys.version_info < (3, 9):
 
 import argparse
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 from wbads import analytics, collector, db, demo
 from wbads.api import serve
@@ -836,6 +837,16 @@ def main(argv: list[str] | None = None) -> int:
         "diagnose", help="полная диагностика связи с WB одним запуском")
     p_diag.set_defaults(func=cmd_diagnose)
 
+    p_journal = sub.add_parser(
+        "import-changes",
+        help="перенести журнал изменений из таблицы Excel")
+    p_journal.add_argument("file", help="путь к файлу .xlsx")
+    p_journal.add_argument("--sheet", default="",
+                           help="имя листа, если их несколько")
+    p_journal.add_argument("--dry-run", action="store_true",
+                           help="только показать, что прочиталось, и ничего не писать")
+    p_journal.set_defaults(func=cmd_import_changes)
+
     args = parser.parse_args(argv)
     try:
         if not args.command:
@@ -889,6 +900,67 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
         _print(f"Отчёт не удалось сохранить ({exc}), но он напечатан выше.")
 
     return 1 if report["problems"] else 0
+
+
+def cmd_import_changes(args: argparse.Namespace) -> int:
+    """Переносит журнал правок из таблицы Excel в базу сервиса.
+
+    Журнал без истории бесполезен: эффект правки виден только рядом с тем,
+    что было до неё. История у человека уже есть — в таблице, которую он
+    вёл руками. Начинать с пустого листа значило бы её выбросить.
+    """
+    from wbads import journal_import
+    from wbads.xlsx_read import XlsxError
+
+    cfg = load_config()
+    path = Path(args.file).expanduser()
+    print()
+    print("  Перенос журнала изменений")
+    print("  " + "─" * 52)
+    print()
+
+    if not path.exists():
+        _print(f"Файл не найден: {path}")
+        _print("Проверьте путь. Проще всего положить таблицу рядом с программой")
+        _print("и указать только имя файла.")
+        return 1
+
+    sheet: str | int = args.sheet or 0
+    try:
+        report = journal_import.read_journal(str(path), sheet)
+    except XlsxError as exc:
+        _print(str(exc))
+        return 1
+
+    for line in report.summary():
+        _print(line)
+    print()
+
+    if not report.records:
+        _print("Записей для переноса не нашлось.")
+        return 1
+
+    if args.dry_run:
+        _print("Пробный разбор: в базу ничего не записано.")
+        _print("Первые записи, чтобы проверить разбор:")
+        for record in report.records[:5]:
+            _print(f"  {record['date']} · {record['nm_id']} · "
+                   f"{record['text'][:60]}")
+        return 0
+
+    with db.session(cfg.db_path) as conn:
+        from wbads import changes
+        written = changes.add_many(conn, report.records,
+                                   source="импорт из таблицы")
+    duplicates = len(report.records) - written
+
+    _print(f"Перенесено записей: {written}")
+    if duplicates:
+        _print(f"Уже были в журнале, пропущены: {duplicates}")
+    print()
+    _print("Откройте дашборд и вкладку «Журнал изменений»:")
+    _print("  python3 run.py serve")
+    return 0
 
 
 def _report_crash(exc: BaseException) -> int:
