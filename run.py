@@ -32,6 +32,7 @@ if sys.version_info < (3, 9):
     raise SystemExit(1)
 
 import argparse
+import secrets
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -724,7 +725,14 @@ def cmd_serve(args: argparse.Namespace) -> int:
         _print("Заполните демо-данными: python3 run.py demo")
         _print("Или соберите из кабинета:  python3 run.py collect")
         return 1
-    serve(cfg, open_browser=not args.no_browser)
+    network = bool(getattr(args, "network", False))
+    code = str(getattr(args, "code", "") or "").strip()
+    if network and not code:
+        # Код придумываем сами: пустое поле «придумайте пароль» человек
+        # чаще всего пропускает, а сервер при этом уже в сети.
+        code = f"{secrets.randbelow(10000):04d}"
+    serve(cfg, open_browser=not args.no_browser, network=network,
+          access_code=code if network else "")
     return 0
 
 
@@ -828,6 +836,10 @@ def main(argv: list[str] | None = None) -> int:
     p_serve = sub.add_parser("serve", help="открыть дашборд")
     p_serve.add_argument("--port", type=int, default=None)
     p_serve.add_argument("--no-browser", action="store_true", help="не открывать браузер")
+    p_serve.add_argument("--network", action="store_true",
+                         help="открыть доступ с других компьютеров этой сети")
+    p_serve.add_argument("--code", default="",
+                         help="свой код доступа для сетевого режима")
     p_serve.set_defaults(func=cmd_serve)
 
     p_report = sub.add_parser("report", help="краткий отчёт в консоли")

@@ -1184,3 +1184,90 @@ class TestProbeAsksLiveCampaigns(unittest.TestCase):
         run_check({"campaign_index": lambda self: index, "fullstats": fullstats})
         self.assertEqual(asked["ids"], [200],
                          "отменённую кампанию спрашивать незачем")
+
+
+class TestNetworkModeIsDeliberate(unittest.TestCase):
+    """Дашборд показывает обороты, расходы и названия кампаний, а пароля у
+    него нет. Поэтому по умолчанию он слушает только свой компьютер, а
+    выход в сеть включается отдельно — и вместе с кодом доступа."""
+
+    def handler(self, code=""):
+        """Заготовка обработчика без сети — проверяем только правила входа."""
+        from wbads.api import DashboardHandler
+
+        handler = DashboardHandler.__new__(DashboardHandler)
+        handler.access_code = code
+        handler.headers = {}
+        handler.client_address = ("192.168.1.50", 51234)
+        return handler
+
+    def test_without_a_code_nothing_is_asked(self):
+        """На своём компьютере спрашивать у себя пароль незачем."""
+        self.assertTrue(self.handler()._authorized({}))
+
+    def test_wrong_code_is_refused(self):
+        self.assertFalse(self.handler("7391")._authorized({"code": ["0000"]}))
+        self.assertFalse(self.handler("7391")._authorized({}))
+
+    def test_right_code_passes_in_the_address(self):
+        handler = self.handler("7391")
+        self.assertTrue(handler._authorized({"code": ["7391"]}))
+        self.assertTrue(handler._authorized({"код": ["7391"]}))
+
+    def test_remembered_code_passes(self):
+        handler = self.handler("7391")
+        handler.headers = {"Cookie": "theme=dark; wbads_code=7391"}
+        self.assertTrue(handler._authorized({}))
+
+    def test_a_similar_cookie_does_not_pass(self):
+        handler = self.handler("7391")
+        handler.headers = {"Cookie": "wbads_code=739"}
+        self.assertFalse(handler._authorized({}))
+
+    def test_own_computer_is_not_asked_for_the_code(self):
+        """Тот, кто сидит за этим компьютером, видит код в окне программы.
+        Спрашивать его там же — значит мешать хозяину."""
+        handler = self.handler("7391")
+        handler.client_address = ("127.0.0.1", 51234)
+        self.assertTrue(handler._authorized({}))
+
+    def test_server_stays_on_localhost_by_default(self):
+        """Самая важная проверка: случайно в сеть выйти нельзя."""
+        import inspect
+        from wbads.api import _bind_server
+
+        signature = inspect.signature(_bind_server)
+        self.assertEqual(signature.parameters["host"].default, "127.0.0.1")
+
+    def test_network_mode_generates_a_code_when_none_given(self):
+        """Пустое поле «придумайте пароль» человек пропускает, а сервер
+        при этом уже в сети. Поэтому код придумываем сами."""
+        from unittest.mock import patch as p2
+
+        seen = {}
+
+        def fake_serve(cfg, open_browser=True, network=False, access_code=""):
+            seen["network"] = network
+            seen["code"] = access_code
+
+        with p2("run.serve", fake_serve), \
+                p2("wbads.db.data_range", lambda conn: ("2026-09-01", "2026-09-20")):
+            cli.cmd_serve(Namespace(port=None, no_browser=True,
+                                    network=True, code=""))
+        self.assertTrue(seen["network"])
+        self.assertTrue(seen["code"], "в сети код обязателен")
+        self.assertEqual(len(seen["code"]), 4)
+
+    def test_local_mode_has_no_code_at_all(self):
+        from unittest.mock import patch as p2
+
+        seen = {}
+
+        def fake_serve(cfg, open_browser=True, network=False, access_code=""):
+            seen["code"] = access_code
+
+        with p2("run.serve", fake_serve), \
+                p2("wbads.db.data_range", lambda conn: ("2026-09-01", "2026-09-20")):
+            cli.cmd_serve(Namespace(port=None, no_browser=True,
+                                    network=False, code=""))
+        self.assertEqual(seen["code"], "")

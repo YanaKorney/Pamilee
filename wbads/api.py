@@ -8,9 +8,12 @@
 from __future__ import annotations
 
 import csv
+import hmac
 import io
 import json
+import socket
 import sqlite3
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -264,6 +267,63 @@ def handle_change_edit(conn: sqlite3.Connection,
     return {"ok": ok}
 
 
+def lan_addresses() -> list[str]:
+    """Адреса этого компьютера в локальной сети.
+
+    Спрашиваем у системы, каким адресом она пошла бы наружу: перебирать
+    сетевые карты руками значит выдать человеку список из шести строк,
+    где пять не работают.
+    """
+    found: list[str] = []
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # Соединения не происходит: UDP-сокет просто выбирает маршрут.
+            probe.connect(("192.168.255.255", 9))
+            found.append(probe.getsockname()[0])
+        finally:
+            probe.close()
+    except OSError:
+        pass
+
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None,
+                                       socket.AF_INET):
+            address = info[4][0]
+            if address.startswith("127.") or address in found:
+                continue
+            found.append(address)
+    except OSError:
+        pass
+    return found
+
+
+def _print_network_hint(port: int, access_code: str) -> None:
+    """Говорит, что набрать на другом компьютере, и чем это чревато."""
+    addresses = lan_addresses()
+    print()
+    if addresses:
+        print("  С другого компьютера в этой же сети наберите в браузере:")
+        for address in addresses:
+            line = f"http://{address}:{port}"
+            print(f"      {line}")
+    else:
+        print("  Адрес в локальной сети определить не вышло. Посмотрите его")
+        print("  в настройках сети — это адрес вида 192.168.х.х.")
+    if access_code:
+        print()
+        print(f"  Код доступа: {access_code}")
+        print("  Его спросят один раз на каждом компьютере.")
+    print()
+    print("  Важно: дашборд сейчас виден всем в этой сети. Код — это щеколда,")
+    print("  а не замок: он от случайных глаз, не от злого умысла.")
+    print("  В чужой сети (кафе, коворкинг) так запускать не стоит.")
+    if sys.platform == "win32":
+        print()
+        print("  Windows спросит разрешение на доступ к сети — разрешите")
+        print("  для ЧАСТНЫХ сетей. Без этого другой компьютер не достучится.")
+
+
 def _disposition(filename: str) -> str:
     """Заголовок с именем файла, который не ломается о кириллицу.
 
@@ -330,7 +390,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_file(self, path: Path) -> None:
+    def _send_file(self, path: Path,
+                   query: dict[str, list[str]] | None = None) -> None:
         if not path.exists() or not path.is_file():
             self._send_json({"error": "Файл не найден"}, 404)
             return
@@ -338,14 +399,75 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", CONTENT_TYPES.get(path.suffix, "application/octet-stream"))
         self.send_header("Content-Length", str(len(body)))
+        if query is not None:
+            # Верный код запоминаем здесь: иначе его пришлось бы вводить
+            # при каждом открытии страницы.
+            self._remember_code(query)
         self.end_headers()
         self.wfile.write(body)
 
     # ── маршрутизация ─────────────────────────────────────────────────────
 
+    # ── код доступа ───────────────────────────────────────────────────────
+    #
+    # Пустой код означает «сервер слушает только этот компьютер»: спрашивать
+    # у себя же пароль незачем. Код появляется вместе с выходом в сеть.
+
+    access_code = ""
+
+    def _authorized(self, query: dict[str, list[str]]) -> bool:
+        if not self.access_code:
+            return True
+        # С самого компьютера код не спрашиваем: тот, кто сидит за ним,
+        # и так видит его в окне программы. Иначе в сетевом режиме
+        # дашборд требовал бы пароль у собственного хозяина.
+        if self._from_this_computer():
+            return True
+        given = (query.get("код") or query.get("code") or [""])[0]
+        if hmac.compare_digest(given, self.access_code):
+            return True
+        cookie = self.headers.get("Cookie") or ""
+        for part in cookie.split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == "wbads_code" and hmac.compare_digest(value,
+                                                            self.access_code):
+                return True
+        return False
+
+    def _from_this_computer(self) -> bool:
+        """Запрос пришёл с самой машины, а не из сети."""
+        address = (self.client_address or ("",))[0]
+        return address in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+
+    def _ask_for_code(self, route: str) -> None:
+        """Показывает поле для кода вместо запрошенной страницы."""
+        if route.startswith("/api/"):
+            self._send_json({"error": "Нужен код доступа"}, 401)
+            return
+        body = CODE_PAGE.encode("utf-8")
+        self.send_response(401)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _remember_code(self, query: dict[str, list[str]]) -> None:
+        """Запоминает верный код в браузере, чтобы не спрашивать снова."""
+        if not self.access_code:
+            return
+        given = (query.get("код") or query.get("code") or [""])[0]
+        if given and hmac.compare_digest(given, self.access_code):
+            self.send_header("Set-Cookie",
+                             f"wbads_code={self.access_code}; Path=/; "
+                             "Max-Age=2592000; SameSite=Lax")
+
     def do_GET(self) -> None:  # noqa: N802 (имя задано базовым классом)
         parsed = urlparse(self.path)
         route, query = parsed.path, parse_qs(parsed.query)
+
+        if not self._authorized(query):
+            self._ask_for_code(route)
+            return
 
         try:
             if route in ("/api/export.csv", "/api/changes.csv"):
@@ -370,7 +492,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
 
             if route in ("/", "/index.html"):
-                self._send_file(WEB_DIR / "index.html")
+                self._send_file(WEB_DIR / "index.html", query)
                 return
 
             # статика: только из папки web, без выхода наружу
@@ -385,6 +507,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if not self._authorized(parse_qs(parsed.query)):
+            self._send_json({"error": "Нужен код доступа"}, 401)
+            return
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b"{}"
         try:
@@ -428,15 +553,53 @@ class DashboardHandler(BaseHTTPRequestHandler):
 # последний — 0: система сама выдаст любой свободный.
 FALLBACK_PORTS = (8000, 8080, 8123, 8765, 5000, 3000, 0)
 
+# Страница ввода кода. Отдельным файлом её делать незачем: она должна
+# работать даже тогда, когда всё остальное закрыто кодом.
+CODE_PAGE = """<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Аналитика рекламы — код доступа</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 16px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif;
+         display: grid; place-items: center; min-height: 100vh; margin: 0;
+         background: #f4f3f0; color: #0b0b0b; padding: 16px; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #131312; color: #fff; }
+    .card { background: #1a1a19; border-color: #2e2e2b; }
+    input { background: #232321; color: #fff; border-color: #43433f; }
+  }
+  .card { background: #fff; border: 1px solid #e2e0da; border-radius: 12px;
+          padding: 28px; max-width: 360px; width: 100%; }
+  h1 { font-size: 19px; margin: 0 0 6px; }
+  p { margin: 0 0 18px; color: #6b6a64; font-size: 14px; }
+  input { width: 100%; box-sizing: border-box; font: inherit; font-size: 19px;
+          letter-spacing: .18em; text-align: center; padding: 11px;
+          border: 1px solid #cbc8c0; border-radius: 8px; }
+  button { width: 100%; margin-top: 12px; font: inherit; font-weight: 600;
+           padding: 11px; border: 0; border-radius: 8px;
+           background: #2a78d6; color: #fff; cursor: pointer; }
+</style></head>
+<body><form class="card" method="get" action="/">
+  <h1>Аналитика рекламы Wildberries</h1>
+  <p>Введите код, который показан в окне программы на том компьютере,
+     где она запущена.</p>
+  <input name="code" inputmode="numeric" autocomplete="off" autofocus
+         aria-label="Код доступа" placeholder="0000">
+  <button type="submit">Открыть</button>
+</form></body></html>
+"""
 
-def _bind_server(config: Config, handler: type) -> tuple[ThreadingHTTPServer, int]:
+
+def _bind_server(config: Config, handler: type,
+                 host: str = "127.0.0.1") -> tuple[ThreadingHTTPServer, int]:
     """Занимает первый доступный порт и возвращает сервер вместе с ним."""
     tried: list[int] = []
     candidates = [config.port] + [p for p in FALLBACK_PORTS if p != config.port]
 
     for port in candidates:
         try:
-            server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+            server = ThreadingHTTPServer((host, port), handler)
         except (PermissionError, OSError) as exc:
             tried.append(port)
             last = exc
@@ -450,11 +613,20 @@ def _bind_server(config: Config, handler: type) -> tuple[ThreadingHTTPServer, in
     )
 
 
-def serve(config: Config, open_browser: bool = True) -> None:
-    """Поднимает локальный дашборд на http://127.0.0.1:<порт>."""
-    handler = type("BoundHandler", (DashboardHandler,), {"config": config})
+def serve(config: Config, open_browser: bool = True, network: bool = False,
+          access_code: str = "") -> None:
+    """Поднимает дашборд: только для этого компьютера или для всей сети.
+
+    По умолчанию сервер слушает 127.0.0.1 — адрес, доступный лишь самому
+    компьютеру. Это не перестраховка: в дашборде видны обороты, расходы и
+    названия кампаний, а пароля у него нет. Выход в сеть включается
+    отдельно и осознанно, и тогда же появляется код доступа.
+    """
+    handler = type("BoundHandler", (DashboardHandler,),
+                   {"config": config, "access_code": access_code})
+    host = "0.0.0.0" if network else "127.0.0.1"
     try:
-        server, port = _bind_server(config, handler)
+        server, port = _bind_server(config, handler, host)
     except OSError as exc:
         print()
         print("  Не удалось открыть дашборд: все проверенные порты заняты.")
@@ -474,7 +646,10 @@ def serve(config: Config, open_browser: bool = True) -> None:
         print(f"\n  Порт {config.port} занят системой — открываю на {port}.")
 
     print(f"\n  Дашборд запущен: {url}")
-    print("  Ссылку можно скопировать и открыть в браузере вручную.")
+    if network:
+        _print_network_hint(port, access_code)
+    else:
+        print("  Ссылку можно скопировать и открыть в браузере вручную.")
     print("  Остановить — закройте это окно или нажмите Ctrl+C\n")
 
     if open_browser:
