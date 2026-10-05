@@ -157,12 +157,21 @@ def handle_export(conn: sqlite3.Connection, cfg: Config,
 
 def handle_changes(conn: sqlite3.Connection, cfg: Config,
                    query: dict[str, list[str]]) -> dict[str, Any]:
-    """Журнал изменений вместе с замером эффекта по каждой записи."""
+    """Журнал изменений вместе с замером эффекта по каждой записи.
+
+    Замер считается на лету и стоит нескольких запросов к базе на запись,
+    поэтому страница берёт журнал порциями. Отбор и сортировка по эффекту
+    идут здесь же: на клиенте пришлось бы сначала привезти все 800 записей
+    вместе с рядами по дням.
+    """
     window = int((query.get("window") or [str(changes.DEFAULT_WINDOW)])[0] or 7)
     window = max(3, min(window, 30))
     nm_id = (query.get("nm_id") or [""])[0]
     advert_id = (query.get("advert_id") or [""])[0]
-    limit = int((query.get("limit") or ["200"])[0] or 200)
+    limit = max(1, min(int((query.get("limit") or ["40"])[0] or 40), 200))
+    offset = max(0, int((query.get("offset") or ["0"])[0] or 0))
+    order = (query.get("sort") or ["date"])[0]
+    only_ready = (query.get("ready") or [""])[0] in ("1", "true", "да")
 
     rows = changes.listing(
         conn,
@@ -170,17 +179,103 @@ def handle_changes(conn: sqlite3.Connection, cfg: Config,
         date_to=(query.get("to") or [""])[0],
         nm_id=int(nm_id) if nm_id.isdigit() else None,
         advert_id=int(advert_id) if advert_id.isdigit() else None,
-        limit=max(1, min(limit, 1000)),
+        limit=1000,
     )
     _, data_to = db.data_range(conn)
-    items = changes.with_effects(conn, rows, window=window, today=data_to or "")
+    today = data_to or ""
+
+    # Отбор и сортировка требуют замера по каждой записи, но ряды по дням
+    # нужны только тем, что уйдут на страницу: иначе на 800 записей
+    # уехало бы под сотню тысяч точек.
+    measured = [{**row, "effect": changes.effect(conn, row, window=window,
+                                                 today=today)}
+                for row in rows]
+    if only_ready:
+        measured = [item for item in measured if item["effect"].get("ready")]
+    measured = _sorted_changes(measured, order)
+
+    total = len(measured)
+    page = measured[offset:offset + limit]
+
     names = _article_names(conn)
     campaign_names = _campaign_names(conn)
-    for item in items:
+    for item in page:
         item["nm_name"] = names.get(item.get("nm_id"), "")
         item["campaign_name"] = campaign_names.get(item.get("advert_id"), "")
         item["crowding"] = changes.crowding(conn, item["date"], window)
-    return {"window": window, "changes": items, "total": len(items)}
+
+    return {
+        "window": window,
+        "changes": page,
+        "total": total,
+        "offset": offset,
+        "has_more": offset + len(page) < total,
+        "ready_recent": changes.ready_recently(conn, window=window, today=today),
+        "sort": order,
+    }
+
+
+def _sorted_changes(items: list[dict[str, Any]], order: str) -> list[dict[str, Any]]:
+    """Порядок записей. По умолчанию хронология — журнал читают как дневник.
+
+    Сортировка по эффекту нужна для другого вопроса: «где я сделала хуже».
+    В хронологии такой случай легко пролистать, а это самое дорогое, что
+    есть в журнале.
+    """
+    def drr_shift(item: dict[str, Any]) -> float:
+        effect = item.get("effect") or {}
+        if not effect.get("ready"):
+            return 0.0
+        drr = next((m for m in effect.get("metrics", [])
+                    if m["key"] == "drr"), None)
+        return float((drr or {}).get("delta_pct") or 0)
+
+    if order == "worse":
+        return sorted(items, key=drr_shift, reverse=True)
+    if order == "better":
+        return sorted(items, key=drr_shift)
+    return items
+
+
+def handle_change_marks(conn: sqlite3.Connection, cfg: Config,
+                        query: dict[str, list[str]]) -> dict[str, Any]:
+    """Дни с правками для меток на графиках аналитики.
+
+    Отдельно от журнала и нарочно без замера: графикам нужны только даты
+    и текст подсказки, а считать для этого эффект по каждой записи значило
+    бы тормозить каждую перерисовку дашборда.
+    """
+    date_from = (query.get("from") or [""])[0]
+    date_to = (query.get("to") or [""])[0]
+    nm_id = (query.get("nm_id") or [""])[0]
+    advert_id = (query.get("advert_id") or [""])[0]
+
+    where, params = [], []
+    if date_from:
+        where.append("date >= ?")
+        params.append(date_from)
+    if date_to:
+        where.append("date <= ?")
+        params.append(date_to)
+    if nm_id.isdigit():
+        where.append("nm_id = ?")
+        params.append(int(nm_id))
+    if advert_id.isdigit():
+        where.append("(advert_id = ? OR nm_id IN "
+                     "(SELECT DISTINCT nm_id FROM campaign_nm_daily"
+                     "  WHERE advert_id = ?))")
+        params.extend([int(advert_id), int(advert_id)])
+
+    sql = "SELECT date, text FROM changes"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY date, id"
+
+    by_day: dict[str, list[str]] = {}
+    for row in conn.execute(sql, params):
+        by_day.setdefault(str(row["date"])[:10], []).append(str(row["text"]))
+    return {"marks": [{"date": day, "texts": texts}
+                      for day, texts in sorted(by_day.items())]}
 
 
 def handle_articles(conn: sqlite3.Connection, cfg: Config,
@@ -227,6 +322,7 @@ ROUTES: dict[str, Callable] = {
     "/api/campaign": handle_campaign,
     "/api/meta": handle_meta,
     "/api/changes": handle_changes,
+    "/api/changes/marks": handle_change_marks,
     "/api/articles": handle_articles,
 }
 

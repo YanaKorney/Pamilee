@@ -1271,3 +1271,123 @@ class TestNetworkModeIsDeliberate(unittest.TestCase):
             cli.cmd_serve(Namespace(port=None, no_browser=True,
                                     network=False, code=""))
         self.assertEqual(seen["code"], "")
+
+
+class TestJournalPagingAndSorting(unittest.TestCase):
+    """Замер считается на лету и стоит нескольких запросов к базе на
+    запись. Восемьсот записей с рядами по дням за один ответ — это и
+    долгая страница, и мегабайты впустую."""
+
+    def setUp(self):
+        import tempfile
+        from wbads import changes, db
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.conn = db.init_db(Path(self.tmp.name) / "t.db")
+        self.addCleanup(self.conn.close)
+        self.changes = changes
+
+        for i in range(1, 26):
+            self.conn.execute(
+                "INSERT OR REPLACE INTO campaign_nm_daily"
+                " (advert_id, date, nm_id, name, views, clicks, atbs, orders,"
+                "  shks, spend, revenue) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (1, f"2026-09-{i:02d}", 777, "Товар", 1000, 20, 4, 2, 2,
+                 200.0 if i < 15 else 400.0, 2000.0))
+        self.conn.commit()
+        for i in (5, 10, 14, 20):
+            changes.add(self.conn, f"2026-09-{i:02d}", f"правка {i}", nm_id=777)
+
+    def call(self, **params):
+        from wbads.api import handle_changes
+        from wbads.config import Config
+
+        query = {k: [str(v)] for k, v in params.items()}
+        return handle_changes(self.conn, Config(), query)
+
+    def test_page_is_limited_and_says_there_is_more(self):
+        data = self.call(limit=2, **{"to": "2026-09-30"})
+        self.assertEqual(len(data["changes"]), 2)
+        self.assertEqual(data["total"], 4)
+        self.assertTrue(data["has_more"])
+
+    def test_offset_continues_without_repeating(self):
+        first = self.call(limit=2)
+        second = self.call(limit=2, offset=2)
+        ids = [c["id"] for c in first["changes"]] + \
+              [c["id"] for c in second["changes"]]
+        self.assertEqual(len(set(ids)), 4, "страницы не должны повторяться")
+        self.assertFalse(second["has_more"])
+
+    def test_default_order_is_chronological(self):
+        dates = [c["date"] for c in self.call(limit=10)["changes"]]
+        self.assertEqual(dates, sorted(dates, reverse=True))
+
+    def test_worse_first_puts_the_damage_on_top(self):
+        """В хронологии провал легко пролистать, а это самое дорогое,
+        что есть в журнале."""
+        data = self.call(limit=10, sort="worse", window=5)
+        shifts = []
+        for item in data["changes"]:
+            drr = next((m for m in item["effect"].get("metrics", [])
+                        if m["key"] == "drr"), None)
+            shifts.append((drr or {}).get("delta_pct") or 0)
+        self.assertEqual(shifts, sorted(shifts, reverse=True))
+
+    def test_ready_filter_hides_the_immature(self):
+        data = self.call(limit=10, ready=1, window=5)
+        for item in data["changes"]:
+            self.assertTrue(item["effect"]["ready"])
+
+    def test_ready_counter_is_reported(self):
+        self.assertIn("ready_recent", self.call(limit=1))
+
+    def test_series_travel_only_with_the_page(self):
+        """Ряды по дням нужны лишь тем записям, что уедут на экран."""
+        data = self.call(limit=1)
+        self.assertTrue(data["changes"][0]["effect"].get("series"))
+
+
+class TestMarksForCharts(unittest.TestCase):
+    """Метки на графиках — это слой пометок. Считать для них эффект по
+    каждой записи значило бы тормозить каждую перерисовку дашборда."""
+
+    def setUp(self):
+        import tempfile
+        from wbads import changes, db
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.conn = db.init_db(Path(self.tmp.name) / "t.db")
+        self.addCleanup(self.conn.close)
+        changes.add(self.conn, "2026-09-10", "первая", nm_id=777)
+        changes.add(self.conn, "2026-09-10", "вторая", nm_id=777)
+        changes.add(self.conn, "2026-09-20", "третья", nm_id=888)
+
+    def call(self, **params):
+        from wbads.api import handle_change_marks
+        from wbads.config import Config
+
+        return handle_change_marks(self.conn, Config(),
+                                   {k: [str(v)] for k, v in params.items()})
+
+    def test_changes_of_one_day_come_together(self):
+        marks = self.call()["marks"]
+        self.assertEqual(len(marks), 2, "один день — одна метка")
+        first = [m for m in marks if m["date"] == "2026-09-10"][0]
+        self.assertEqual(first["texts"], ["первая", "вторая"])
+
+    def test_period_is_respected(self):
+        marks = self.call(**{"from": "2026-09-15", "to": "2026-09-30"})["marks"]
+        self.assertEqual([m["date"] for m in marks], ["2026-09-20"])
+
+    def test_filtering_by_article_leaves_only_its_own(self):
+        """Правка по чужому товару к этим графикам отношения не имеет."""
+        marks = self.call(nm_id=888)["marks"]
+        self.assertEqual([m["date"] for m in marks], ["2026-09-20"])
+
+    def test_marks_carry_no_measurement(self):
+        marks = self.call()["marks"]
+        self.assertNotIn("effect", marks[0])
+        self.assertEqual(set(marks[0]), {"date", "texts"})

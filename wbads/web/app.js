@@ -5,6 +5,7 @@
 'use strict';
 
 const state = {
+  marks: [],
   days: 7,
   from: null,
   to: null,
@@ -77,6 +78,17 @@ const svgEl = (tag, attrs = {}) => {
  *   height      — высота полотна
  *   target      — { value, label } горизонтальная линия-ориентир
  */
+/* Потолок оси, который делится на ticks круглыми шагами: 1, 2, 2.5 или 5
+   на порядок. Так подписи выходят «20%», «40%», а не «19,3%», «38,6%». */
+function niceCeiling(value, ticks) {
+  const rough = value / ticks;
+  const power = Math.pow(10, Math.floor(Math.log10(rough)));
+  const scaled = rough / power;
+  const step = (scaled <= 1 ? 1 : scaled <= 2 ? 2 : scaled <= 2.5 ? 2.5
+    : scaled <= 5 ? 5 : 10) * power;
+  return step * ticks;
+}
+
 function lineChart(host, spec) {
   host.innerHTML = '';
   const width = host.clientWidth || 520;
@@ -88,9 +100,11 @@ function lineChart(host, spec) {
 
   const all = spec.series.flatMap((s) => s.values);
   if (spec.target) all.push(spec.target.value);
-  let max = Math.max(...all, 0);
-  if (max <= 0) max = 1;
-  max *= 1.1;
+  if (spec.levels) spec.levels.forEach((l) => all.push(l.value));
+  const rawMax = Math.max(...all, 0);
+  /* Круглый потолок шкалы. Иначе подписи получаются вида «77,1%» и
+     «38,6%» — читать их приходится, а ось должна подсказывать мельком. */
+  const max = niceCeiling(rawMax <= 0 ? 1 : rawMax * 1.08, 4);
 
   const x = (i) => pad.left + (n <= 1 ? plotW / 2 : (i * plotW) / (n - 1));
   const y = (v) => pad.top + plotH - (Math.max(0, v) / max) * plotH;
@@ -142,6 +156,53 @@ function lineChart(host, spec) {
     });
     label.textContent = spec.target.label;
     svg.appendChild(label);
+  }
+
+  /* Метки правок. Рисуются ДО серий: это слой пометок, а не данные, и
+     линии обязаны оставаться поверх. Сплошные и приглушённые — пунктир
+     читается как «прогноз», а цвет состояния на графике без подписи
+     означал бы смысл одним цветом. Смысл несёт подсказка. */
+  const markIndex = new Map();
+  if (spec.marks && spec.marks.length) {
+    const byDate = new Map(spec.marks.map((m) => [m.date, m]));
+    spec.dates.forEach((d, i) => {
+      const mark = byDate.get(d);
+      if (!mark) return;
+      markIndex.set(i, mark);
+      svg.appendChild(svgEl('line', {
+        x1: x(i), x2: x(i), y1: pad.top, y2: pad.top + plotH,
+        stroke: cssVar('--border-strong'), 'stroke-width': 1, opacity: 0.75,
+      }));
+      /* Засечка у основания: по ней видно, что это пометка, а не сетка. */
+      svg.appendChild(svgEl('circle', {
+        cx: x(i), cy: pad.top + plotH, r: 3,
+        fill: cssVar('--text-muted'),
+      }));
+    });
+  }
+
+  /* Уровни «было в день» и «стало в день» — то же, что в таблице, но
+     видно как две высоты и перелом между ними. Подписи прямые: двух
+     линий одного смысла цветом не различают. */
+  if (spec.levels) {
+    spec.levels.forEach((level) => {
+      const ly = y(level.value);
+      svg.appendChild(svgEl('line', {
+        x1: x(level.from), x2: x(level.to), y1: ly, y2: ly,
+        stroke: cssVar('--text-muted'), 'stroke-width': 1.5, opacity: 0.85,
+      }));
+      /* Обводка цветом подложки: подпись уровня стоит поверх самой
+         линии данных, и без неё они сливаются. */
+      const label = svgEl('text', {
+        x: (x(level.from) + x(level.to)) / 2, y: ly - 7,
+        'text-anchor': 'middle', fill: cssVar('--text-secondary'),
+        'font-size': 11, 'font-weight': 600,
+        stroke: cssVar('--surface-1'), 'stroke-width': 3,
+        'paint-order': 'stroke', 'stroke-linejoin': 'round',
+      });
+      label.textContent = level.label;
+      svg.appendChild(label);
+    });
   }
 
   /* серии */
@@ -202,11 +263,14 @@ function lineChart(host, spec) {
       dot.setAttribute('opacity', 1);
     });
 
+    const mark = markIndex.get(idx);
     tip.innerHTML =
       `<div class="t-date">${dayLabel(spec.dates[idx])}</div>` +
       spec.series.map((s) =>
         `<div class="t-row"><span><span class="swatch dot" style="background:${s.color}"></span> ${s.name}</span>` +
-        `<b>${spec.format(s.values[idx])}</b></div>`).join('');
+        `<b>${spec.format(s.values[idx])}</b></div>`).join('') +
+      /* Что вы в этот день меняли — здесь и живёт смысл метки. */
+      (mark ? `<div class="t-mark">${mark.texts.map(escapeHtml).join('<br>')}</div>` : '');
     tip.style.opacity = 1;
 
     const left = (x(idx) / scale) + 14;
@@ -252,12 +316,27 @@ function query() {
   return p.toString();
 }
 
+/* Метки правок для графиков аналитики. Грузятся отдельно от отчёта: если
+   журнал пуст или запрос не удался, дашборд обязан работать как прежде —
+   пометки это дополнение, а не данные. */
+async function loadMarks(from, to) {
+  try {
+    const p = new URLSearchParams({ from, to });
+    const res = await fetch('/api/changes/marks?' + p.toString());
+    const data = await res.json();
+    state.marks = data.marks || [];
+  } catch (_) {
+    state.marks = [];
+  }
+}
+
 async function load() {
   try {
     const res = await fetch('/api/report?' + query());
     const data = await res.json();
     if (data.error) throw new Error(data.error);
     state.report = data;
+    await loadMarks(data.period.from, data.period.to);
     document.getElementById('error').hidden = true;
     render();
   } catch (err) {
@@ -403,7 +482,7 @@ function renderConvCharts(r) {
 
     requestAnimationFrame(() => {
       lineChart(chartHost, {
-        dates, height: 165,
+        dates, height: 165, marks: state.marks,
         series: [{ name: step.label, values, color, fill: true }],
         format: (v) => pct(v, 2),
         axisFormat: (v) => v.toFixed(digits).replace('.', ',') + '%',
@@ -530,6 +609,7 @@ function renderCharts(r) {
       { name: 'Выручка', values: r.series.map((p) => p.revenue), color: c1, fill: true },
       { name: 'Расход', values: r.series.map((p) => p.spend), color: c2, fill: true },
     ],
+    marks: state.marks,
     format: (v) => money(v),
     axisFormat: (v) => (v >= 1000 ? Math.round(v / 1000) + 'к' : num(v)),
     ariaLabel: 'Расход и выручка с рекламы по дням, рубли',
@@ -555,7 +635,7 @@ function renderCharts(r) {
     `<span><i class="swatch" style="background:${cssVar('--border-strong')}"></i> Цель</span>`;
 
   lineChart(document.getElementById('chart-drr'), {
-    dates, series: drrSeries,
+    dates, series: drrSeries, marks: state.marks,
     format: (v) => pct(v),
     axisFormat: (v) => v.toFixed(0) + '%',
     target: { value: r.thresholds.target_drr, label: `цель ${pct(r.thresholds.target_drr, 0)}` },
@@ -679,6 +759,24 @@ function cell(value, cls = '', deltaPct = null) {
   return `<div class="cell ${cls}">${value}${change}</div>`;
 }
 
+/* Метки этой кампании: общие по кабинету здесь не годятся — правка по
+   чужому товару к её графикам отношения не имеет. Подгружаются после
+   отрисовки и дорисовываются поверх, чтобы не задерживать раскрытие. */
+async function loadCampaignMarks(advertId, hosts, specs) {
+  try {
+    const period = state.report.period;
+    const p = new URLSearchParams({
+      from: period.from, to: period.to, advert_id: String(advertId),
+    });
+    const res = await fetch('/api/changes/marks?' + p.toString());
+    const marks = (await res.json()).marks || [];
+    if (!marks.length) return;
+    hosts.forEach((host, i) => {
+      if (host.isConnected) lineChart(host, { ...specs[i], marks });
+    });
+  } catch (_) { /* пометки необязательны: график и без них на месте */ }
+}
+
 function fillBody(body, c, r) {
   const m = c.metrics;
   const target = r.thresholds.target_drr;
@@ -787,8 +885,13 @@ function fillBody(body, c, r) {
   });
 
   /* размеры контейнеров известны только после вставки в документ */
+  const drawn = [];
+  const draw = (host, spec) => {
+    drawn.push([host, spec]);
+    lineChart(host, spec);
+  };
   requestAnimationFrame(() => {
-    lineChart(moneyHost, {
+    draw(moneyHost, {
       dates, height: 170,
       series: [
         { name: 'Выручка', values: c.series.map((p) => p.revenue), color: c1, fill: true },
@@ -798,7 +901,7 @@ function fillBody(body, c, r) {
       axisFormat: (v) => (v >= 1000 ? Math.round(v / 1000) + 'к' : num(v)),
       ariaLabel: 'Расход и выручка кампании по дням',
     });
-    lineChart(drrHost, {
+    draw(drrHost, {
       dates, height: 170,
       series: [{
         name: 'ДРР', color: c1, fill: true,
@@ -809,7 +912,7 @@ function fillBody(body, c, r) {
       target: { value: r.thresholds.target_drr, label: 'цель' },
       ariaLabel: 'ДРР кампании по дням',
     });
-    lineChart(cpcHost, {
+    draw(cpcHost, {
       dates, height: 170,
       series: [{ name: 'Цена клика', values: c.series.map((p) => p.cpc), color: c2, fill: true }],
       format: (v) => money(v, 2),
@@ -817,7 +920,7 @@ function fillBody(body, c, r) {
       ariaLabel: 'Цена клика по дням',
     });
     convHosts.forEach(({ step, host }) => {
-      lineChart(host, {
+      draw(host, {
         dates, height: 170,
         series: [{ name: step.label, values: c.series.map((p) => p[step.key]),
                    color: c1, fill: true }],
@@ -829,6 +932,8 @@ function fillBody(body, c, r) {
         ariaLabel: `${step.label} кампании по дням`,
       });
     });
+    loadCampaignMarks(c.advert_id, drawn.map((d) => d[0]),
+                      drawn.map((d) => d[1]));
   });
 
   /* артикулы внутри кампании */
@@ -984,6 +1089,12 @@ const journal = {
   campaigns: [],
   loaded: false,
   editing: null,
+  metric: 'drr',
+  sort: 'date',
+  onlyReady: false,
+  offset: 0,
+  total: 0,
+  hasMore: false,
 };
 
 function switchView(view) {
@@ -1029,27 +1140,73 @@ function fillList(id, items) {
   });
 }
 
+const PAGE_SIZE = 20;
+
 function journalQuery() {
   const p = new URLSearchParams();
   p.set('window', String(journal.window));
+  p.set('limit', String(PAGE_SIZE));
+  p.set('offset', String(journal.offset));
+  p.set('sort', journal.sort);
+  if (journal.onlyReady) p.set('ready', '1');
   if (journal.nm) p.set('nm_id', String(journal.nm));
   return p.toString();
 }
 
-async function loadJournal() {
+/* append — догрузка следующей порции. Замер считается на лету и стоит
+   нескольких запросов к базе на каждую запись, поэтому восемьсот сразу
+   не грузим. */
+async function loadJournal(append = false) {
   const host = document.getElementById('journal');
-  host.innerHTML = '<p class="jempty">Загружаем…</p>';
+  if (!append) {
+    journal.offset = 0;
+    host.innerHTML = '<p class="jempty">Загружаем…</p>';
+  }
   try {
     const res = await fetch('/api/changes?' + journalQuery());
     const data = await res.json();
     if (data.error) throw new Error(data.error);
-    journal.items = data.changes || [];
+    journal.items = append ? journal.items.concat(data.changes || [])
+                           : (data.changes || []);
+    journal.total = data.total || 0;
+    journal.hasMore = Boolean(data.has_more);
+    journal.offset = journal.items.length;
+    renderReadyBanner(data.ready_recent || 0);
     renderJournal();
   } catch (err) {
     host.innerHTML = '';
     host.appendChild(el('p', 'jempty', 'Не удалось загрузить журнал: ' +
       escapeHtml(err.message)));
   }
+}
+
+/* Правки, по которым уже есть что сказать. Без этой строки человек
+   возвращается к записи, когда вспомнит, — то есть почти никогда. */
+function renderReadyBanner(count) {
+  const box = document.getElementById('jf-ready');
+  if (!count || journal.onlyReady) {
+    box.hidden = !journal.onlyReady;
+    if (journal.onlyReady) {
+      box.innerHTML = '';
+      box.appendChild(el('span', '', 'Показаны только созревшие правки.'));
+      const back = document.createElement('button');
+      back.type = 'button';
+      back.dataset.ready = 'off';
+      back.textContent = 'Показать все';
+      box.appendChild(back);
+    }
+    return;
+  }
+  box.hidden = false;
+  box.innerHTML = '';
+  box.appendChild(el('span', '',
+    `У ${count} ${plural(count, 'правки', 'правок', 'правок')} за последние ` +
+    'три недели уже есть результат.'));
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.dataset.ready = 'on';
+  btn.textContent = 'Показать их';
+  box.appendChild(btn);
 }
 
 function renderJournal() {
@@ -1065,21 +1222,35 @@ function renderJournal() {
     return;
   }
 
+  /* Заголовки дней уместны только в хронологии: при сортировке по
+     эффекту даты идут вперемешку, и «12 сент.» над каждой карточкой
+     превращается в шум. */
+  const byDay = journal.sort === 'date';
   let lastDay = null;
   journal.items.forEach((item) => {
-    if (item.date !== lastDay) {
+    if (byDay && item.date !== lastDay) {
       lastDay = item.date;
       host.appendChild(el('div', 'jday', dayLabel(item.date)));
     }
     host.appendChild(journalCard(item));
   });
+
+  const more = document.getElementById('jf-more');
+  more.hidden = !journal.hasMore;
+  document.getElementById('jf-count').textContent =
+    journal.total
+      ? `Показано ${journal.items.length} из ${journal.total}`
+      : '';
 }
 
 function journalCard(item) {
   const card = el('div', 'jitem');
 
   const top = el('div', 'jitem-top');
-  top.appendChild(el('div', 'jitem-who', subjectLabel(item)));
+  const who = journal.sort === 'date'
+    ? subjectLabel(item)
+    : `<b>${dayLabel(item.date)}</b> · ${subjectLabel(item)}`;
+  top.appendChild(el('div', 'jitem-who', who));
 
   const actions = el('div', 'jitem-actions');
   const edit = el('button', 'jitem-del jitem-edit', 'Изменить');
@@ -1106,10 +1277,88 @@ function journalCard(item) {
     escapeHtml(e.verdict || '')));
 
   if (e.metrics && e.metrics.length) {
-    card.appendChild(metricsTable(e));
+    /* Сначала картинка, потом числа. Таблица точна, но её надо читать и
+       сравнивать; изгиб линии рядом с днём правки виден сразу. */
+    if (e.series && e.series.length) card.appendChild(effectChart(e));
     card.appendChild(windowsNote(e, item));
+
+    const more = el('details', 'jmore');
+    const summary = document.createElement('summary');
+    summary.textContent = 'Все показатели: было в день → стало в день';
+    more.appendChild(summary);
+    more.appendChild(metricsTable(e));
+    card.appendChild(more);
   }
   return card;
+}
+
+/* Показатель для мини-графика. Один на весь журнал, а не на каждую
+   карточку: двести одинаковых переключателей — это шум, а не выбор. */
+const CHART_METRICS = [
+  { key: 'drr', label: 'ДРР', unit: '%' },
+  { key: 'spend', label: 'Расход', unit: '₽' },
+  { key: 'orders', label: 'Заказы', unit: 'шт' },
+  { key: 'clicks', label: 'Клики', unit: 'шт' },
+];
+
+function currentMetric() {
+  return CHART_METRICS.find((m) => m.key === journal.metric) || CHART_METRICS[0];
+}
+
+function effectChart(e) {
+  const metric = currentMetric();
+  const box = el('div', 'jchart');
+  const host = el('div', 'chart-host');
+  box.appendChild(host);
+
+  const dates = e.series.map((p) => p.date);
+  const values = e.series.map((p) => Number(p[metric.key]) || 0);
+  const changeDay = changeDate(e);
+  const splitAt = dates.indexOf(changeDay);
+  const levels = e.levels && e.levels[metric.key];
+
+  const fmt = (v) => {
+    if (metric.unit === '₽') return money(v, Math.abs(v) < 100 ? 2 : 0);
+    if (metric.unit === '%') return pct(v, Math.abs(v) < 10 ? 2 : 1);
+    return Math.abs(v) < 100 ? v.toFixed(1).replace('.', ',') : num(v);
+  };
+
+  /* Два горизонтальных отрезка — те же «было в день» и «стало в день»,
+     что в таблице, но видно как две высоты и перелом между ними. */
+  const marks = [{ date: changeDay, texts: ['правка'] }];
+  const levelSpecs = [];
+  if (levels && splitAt > 0) {
+    levelSpecs.push({ from: 0, to: splitAt - 1, value: levels.before,
+                      label: 'было ' + fmt(levels.before) });
+  }
+  if (levels && splitAt >= 0 && splitAt < dates.length - 1) {
+    levelSpecs.push({ from: splitAt + 1, to: dates.length - 1,
+                      value: levels.after, label: 'стало ' + fmt(levels.after) });
+  }
+
+  requestAnimationFrame(() => {
+    lineChart(host, {
+      dates, height: 170, marks, levels: levelSpecs,
+      series: [{ name: metric.label, values,
+                 color: cssVar('--series-1'), fill: true }],
+      format: fmt,
+      axisFormat: (v) => (metric.unit === '₽'
+        ? (v >= 1000 ? Math.round(v / 1000) + 'к' : Math.round(v) + '')
+        : fmt(v)),
+      ariaLabel: `${metric.label} по дням вокруг правки`,
+    });
+  });
+  return box;
+}
+
+/* День правки в ряду: окно «после» начинается назавтра, значит сам день
+   стоит ровно перед ним. */
+function changeDate(e) {
+  const after = e.after_period && e.after_period[0];
+  if (!after) return '';
+  const d = new Date(after + 'T00:00:00');
+  d.setDate(d.getDate() - 1);
+  return d.toISOString().slice(0, 10);
 }
 
 /* Правка — прямо в карточке. Форма наверху страницы уводила бы от того,
@@ -1377,7 +1626,31 @@ document.getElementById('jf-nm').addEventListener('input', (e) => {
 document.getElementById('jf-clear').addEventListener('click', () => {
   document.getElementById('jf-nm').value = '';
   journal.nm = null;
+  journal.onlyReady = false;
   loadJournal();
+});
+
+document.getElementById('jf-metric').addEventListener('change', (e) => {
+  /* Показатель меняет только картинку: данные уже привезены, ходить за
+     ними снова незачем. */
+  journal.metric = e.target.value;
+  renderJournal();
+});
+
+document.getElementById('jf-sort').addEventListener('change', (e) => {
+  journal.sort = e.target.value;
+  loadJournal();
+});
+
+document.getElementById('jf-ready').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-ready]');
+  if (!btn) return;
+  journal.onlyReady = btn.dataset.ready === 'on';
+  loadJournal();
+});
+
+document.getElementById('jf-more').addEventListener('click', () => {
+  loadJournal(true);
 });
 
 /* День по умолчанию — сегодня: правку записывают в тот же день, когда

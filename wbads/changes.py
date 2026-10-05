@@ -33,7 +33,7 @@ import sqlite3
 from datetime import date, datetime, timedelta
 from typing import Any, Sequence
 
-from .metrics import RAW_KEYS, derive, parse_date, safe_div
+from .metrics import RAW_KEYS, daterange, derive, parse_date, safe_div
 
 # Сколько дней смотрим до и после изменения. Неделя — чтобы сгладить
 # разницу между буднями и выходными, которая на WB заметна.
@@ -342,10 +342,58 @@ def effect(conn: sqlite3.Connection, change: dict[str, Any],
     result["metrics"] = _compare(before, after)
     result["ready"] = after_days >= MIN_DAYS_TO_JUDGE
     result["verdict"] = _verdict(result, after_days)
+    # Ряд по дням вокруг правки. Таблица «было → стало» точна, но это не
+    # картинка: изгиб линии рядом с днём правки виден глазом, а двенадцать
+    # строк чисел приходится читать и сравнивать.
+    result["series"] = daily_series(conn, before_from, after_to, nm_id,
+                                    advert_id)
+    result["levels"] = {key: {"before": before.get(key, 0.0),
+                              "after": after.get(key, 0.0)}
+                        for key in CHART_METRICS}
     # Окраска вердикта считается здесь же, из того же порога: иначе
     # страница красит зелёным фразу «заметных сдвигов нет».
     result["tone"] = _tone(result)
     return result
+
+
+# Показатели, которые можно вывести на маленький график в карточке.
+# Больше четырёх здесь не нужно: переключатель с десятью кнопками читается
+# дольше, чем сама таблица под ним.
+CHART_METRICS = ("drr", "spend", "orders", "clicks")
+
+
+def daily_series(conn: sqlite3.Connection, day_from: str, day_to: str,
+                 nm_id: int | None, advert_id: int | None) -> list[dict[str, Any]]:
+    """Значения по дням для графика вокруг правки.
+
+    Календарь сквозной: день без открутки должен быть в ряду нулём, а не
+    пропуском, — иначе «три дня не крутилось» превращается в ровную линию.
+    """
+    if nm_id is not None:
+        sql = ("SELECT date, " + ", ".join(f"SUM({k}) AS {k}" for k in RAW_KEYS) +
+               " FROM campaign_nm_daily WHERE nm_id = ? AND date BETWEEN ? AND ?")
+        params: list[Any] = [nm_id, day_from, day_to]
+        if advert_id is not None:
+            sql += " AND advert_id = ?"
+            params.append(advert_id)
+    else:
+        sql = ("SELECT date, " + ", ".join(f"SUM({k}) AS {k}" for k in RAW_KEYS) +
+               " FROM campaign_daily WHERE advert_id = ? AND date BETWEEN ? AND ?")
+        params = [advert_id, day_from, day_to]
+    sql += " GROUP BY date"
+
+    by_day = {str(row["date"])[:10]: {key: float(row[key] or 0)
+                                      for key in RAW_KEYS}
+              for row in conn.execute(sql, params)}
+
+    points = []
+    for day in daterange(day_from, day_to):
+        values = derive(by_day.get(day, {key: 0.0 for key in RAW_KEYS}))
+        point = {"date": day}
+        for key in CHART_METRICS:
+            point[key] = round(float(values.get(key) or 0), 3)
+        points.append(point)
+    return points
 
 
 def _tone(result: dict[str, Any]) -> str:
@@ -467,6 +515,23 @@ def export_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return [dict(row) for row in conn.execute(
         "SELECT date, nm_id, advert_id, text, source, created_at"
         " FROM changes ORDER BY date, id")]
+
+
+def ready_recently(conn: sqlite3.Connection, window: int = DEFAULT_WINDOW,
+                   today: str = "", span: int = 21) -> int:
+    """Сколько недавних правок уже можно оценить.
+
+    Человек записывает правку и должен сам вспомнить вернуться через
+    неделю. Сервис знает, когда вывод созрел, — молчать об этом значит
+    оставлять журнал наполовину бесполезным.
+    """
+    last_day = parse_date(today) if today else date.today()
+    start = (last_day - timedelta(days=span)).isoformat()
+    rows = listing(conn, date_from=start, date_to=last_day.isoformat(),
+                   limit=500)
+    return sum(1 for row in rows
+               if effect(conn, row, window=window,
+                         today=last_day.isoformat()).get("ready"))
 
 
 def crowding(conn: sqlite3.Connection, day: str, window: int = DEFAULT_WINDOW

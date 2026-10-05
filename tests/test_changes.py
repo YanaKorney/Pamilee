@@ -406,3 +406,74 @@ class TestJournalCanLeaveTheProgram(JournalCase):
         row = changes.export_rows(self.conn)[0]
         for field in ("date", "nm_id", "advert_id", "text"):
             self.assertIn(field, row, f"без {field} запись не восстановить")
+
+
+class TestSeriesForTheChart(JournalCase):
+    """Таблица «было → стало» точна, но её надо читать. Изгиб линии рядом
+    с днём правки виден глазом — поэтому к замеру прилагается ряд по дням."""
+
+    def test_series_covers_both_windows_and_the_change_day(self):
+        self.fill(range(-7, 8))
+        changes.add(self.conn, day(0), "ставка", nm_id=self.NM)
+        result = changes.effect(self.conn, changes.listing(self.conn)[0],
+                                today=day(7))
+        dates = [p["date"] for p in result["series"]]
+        self.assertEqual(dates[0], result["before_period"][0])
+        self.assertEqual(dates[-1], result["after_period"][1])
+        self.assertIn(day(0), dates, "сам день правки обязан быть на графике")
+
+    def test_days_without_spend_are_zeros_not_gaps(self):
+        """«Три дня не крутилось» видно, только если дни есть в ряду."""
+        self.fill([-7, -6, -5, -4, -3, -2, -1])
+        self.fill([4, 5, 6, 7])
+        changes.add(self.conn, day(0), "пауза", nm_id=self.NM)
+        result = changes.effect(self.conn, changes.listing(self.conn)[0],
+                                today=day(7))
+        by_date = {p["date"]: p for p in result["series"]}
+        self.assertEqual(by_date[day(2)]["clicks"], 0.0)
+        self.assertEqual(len(result["series"]), 15, "календарь сквозной")
+
+    def test_levels_match_the_table(self):
+        """Горизонтальные отрезки на графике — те же числа, что в таблице.
+        Разойтись они не должны: это одно и то же, показанное дважды."""
+        self.fill(range(-7, 0), spend=400.0, revenue=1000.0)
+        self.fill(range(1, 8), spend=200.0, revenue=1000.0)
+        changes.add(self.conn, day(0), "ставка", nm_id=self.NM)
+        result = changes.effect(self.conn, changes.listing(self.conn)[0],
+                                today=day(7))
+        drr_row = [m for m in result["metrics"] if m["key"] == "drr"][0]
+        self.assertAlmostEqual(result["levels"]["drr"]["before"],
+                               drr_row["before"], places=6)
+        self.assertAlmostEqual(result["levels"]["drr"]["after"],
+                               drr_row["after"], places=6)
+
+    def test_every_chart_metric_has_a_level(self):
+        self.fill(range(-7, 8))
+        changes.add(self.conn, day(0), "ставка", nm_id=self.NM)
+        result = changes.effect(self.conn, changes.listing(self.conn)[0],
+                                today=day(7))
+        for key in changes.CHART_METRICS:
+            self.assertIn(key, result["levels"], f"нет уровня для {key}")
+            self.assertIn(key, result["series"][0], f"нет ряда для {key}")
+
+
+class TestReadyRecently(JournalCase):
+    """Человек записывает правку и должен сам вспомнить вернуться через
+    неделю. Сервис знает, когда вывод созрел, — молчать об этом значит
+    оставлять журнал наполовину бесполезным."""
+
+    def test_counts_only_what_can_be_judged(self):
+        self.fill(range(-10, 10))
+        changes.add(self.conn, day(-6), "давняя", nm_id=self.NM)   # созрела
+        changes.add(self.conn, day(-1), "вчерашняя", nm_id=self.NM)  # рано
+        count = changes.ready_recently(self.conn, today=day(0))
+        self.assertEqual(count, 1)
+
+    def test_old_changes_are_not_counted_forever(self):
+        """Иначе счётчик однажды покажет 800 и перестанет что-то значить."""
+        self.fill(range(-40, 1))
+        changes.add(self.conn, day(-35), "очень давняя", nm_id=self.NM)
+        self.assertEqual(changes.ready_recently(self.conn, today=day(0)), 0)
+
+    def test_empty_journal_counts_zero(self):
+        self.assertEqual(changes.ready_recently(self.conn, today=day(0)), 0)

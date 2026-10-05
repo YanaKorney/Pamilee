@@ -154,9 +154,29 @@
           <input list="ch-articles" id="jf-nm" placeholder="все товары"
                  autocomplete="off">
         </label>
+        <label><span class="cap">На графике</span>
+          <select id="jf-metric">
+            <option value="drr">ДРР</option>
+            <option value="spend">Расход</option>
+            <option value="orders">Заказы</option>
+            <option value="clicks">Клики</option>
+          </select>
+        </label>
+        <label><span class="cap">Порядок</span>
+          <select id="jf-sort">
+            <option value="date">сначала свежие</option>
+            <option value="worse">сначала где стало хуже</option>
+            <option value="better">сначала где стало лучше</option>
+          </select>
+        </label>
         <button class="btn" id="jf-clear" type="button">Сбросить</button>
       </div>
+      <div class="jready" id="jf-ready" hidden></div>
       <div id="journal"></div>
+      <div class="jmore-wrap">
+        <button class="btn" id="jf-more" type="button" hidden>Показать ещё</button>
+        <span class="jcount" id="jf-count"></span>
+      </div>
     </section>
 
   </div><!-- /view-journal -->
