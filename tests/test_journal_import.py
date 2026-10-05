@@ -17,6 +17,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import isolate  # noqa: E402,F401 — должен идти до wbads: пути берутся при импорте
+
 from wbads import db, journal_import  # noqa: E402
 from wbads.xlsx_read import XlsxError, column_letter, read_sheet  # noqa: E402
 

@@ -6,6 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import isolate  # noqa: E402,F401 — должен идти до wbads: пути берутся при импорте
+
 from wbads.metrics import (  # noqa: E402
     build_series, compare, derive, days_with_activity, moving_average,
     pct_change, safe_div, shift_window, trailing_zero_days, trend_slope,

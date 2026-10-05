@@ -13,6 +13,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import isolate  # noqa: E402,F401 — должен идти до wbads: пути берутся при импорте
+
 import run as cli  # noqa: E402
 from wbads.config import (  # noqa: E402
     clear_template_token,

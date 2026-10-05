@@ -17,6 +17,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import isolate  # noqa: E402,F401 — должен идти до wbads: пути берутся при импорте
+
 from wbads import diagnose  # noqa: E402
 
 TOKEN = "header.payload.signature"

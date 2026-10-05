@@ -39,7 +39,9 @@ from pathlib import Path
 from wbads import analytics, collector, db, demo
 from wbads.api import serve
 from wbads.config import (
+    DATA_HOME,
     ROOT,
+    migrate_from_program_folder,
     TOKEN_DROP_FILE,
     clear_template_token,
     load_config,
@@ -722,6 +724,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
         lo, _ = db.data_range(conn)
     if not lo:
         _print("В базе пока нет данных.")
+        _print(f"База лежит здесь: {cfg.db_path}")
+        _print("Если раньше данные были, а теперь их нет — вероятно, это")
+        _print("новая папка программы. Старая база осталась в прежней.")
+        print()
         _print("Заполните демо-данными: python3 run.py demo")
         _print("Или соберите из кабинета:  python3 run.py collect")
         return 1
@@ -869,6 +875,20 @@ def main(argv: list[str] | None = None) -> int:
     p_journal.set_defaults(func=cmd_import_changes)
 
     args = parser.parse_args(argv)
+
+    # Переезд данных из папки программы — один раз, молча, если нечего
+    # переносить. Делается до любой команды: иначе она откроет пустую
+    # базу в новом месте, пока старая лежит рядом.
+    try:
+        moved = migrate_from_program_folder()
+        if moved:
+            print()
+            _print(f"Перенесла в постоянную папку: {', '.join(moved)}.")
+            _print(f"Теперь данные живут здесь: {DATA_HOME}")
+            _print("Обновление программы их больше не затрагивает.")
+    except Exception:  # noqa: BLE001 — переезд не повод не запуститься
+        pass
+
     try:
         if not args.command:
             # Без аргументов человеку нужен не список команд, а результат

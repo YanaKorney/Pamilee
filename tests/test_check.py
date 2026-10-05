@@ -11,6 +11,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import isolate  # noqa: E402,F401 — должен идти до wbads: пути берутся при импорте
+
 import run as cli  # noqa: E402
 from wbads.config import token_in_template  # noqa: E402
 from wbads.wb_client import WBError  # noqa: E402
@@ -1391,3 +1393,89 @@ class TestMarksForCharts(unittest.TestCase):
         marks = self.call()["marks"]
         self.assertNotIn("effect", marks[0])
         self.assertEqual(set(marks[0]), {"date", "texts"})
+
+
+class TestDataSurvivesAnUpdate(unittest.TestCase):
+    """Данные лежали внутри папки программы, и каждое обновление их
+    стирало: человек скачивал новый архив, распаковывал в новую папку —
+    и терял журнал на 797 записей вместе со всей собранной статистикой.
+    Теперь данные живут отдельно, в домашней папке."""
+
+    def setUp(self):
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name) / "дом"
+        self.program = Path(self.tmp.name) / "программа"
+        (self.program / "data").mkdir(parents=True)
+
+        import wbads.config as config
+        self.config = config
+        self.patches = [
+            unittest.mock.patch.object(config, "DATA_HOME", self.home),
+            unittest.mock.patch.object(config, "ROOT", self.program),
+            unittest.mock.patch.object(config, "LEGACY_DB",
+                                       self.program / "data" / "wbads.db"),
+            unittest.mock.patch.object(config, "LEGACY_ENV",
+                                       self.program / ".env"),
+            unittest.mock.patch.object(config, "ENV_FILE", self.home / ".env"),
+        ]
+        for patch_ in self.patches:
+            patch_.start()
+            self.addCleanup(patch_.stop)
+
+    def test_database_is_outside_the_program_folder(self):
+        """Главное свойство: обновление программы её не трогает."""
+        path = self.config.ensure_data_home() / "wbads.db"
+        self.assertNotIn(str(self.program), str(path))
+        self.assertIn(str(self.home), str(path))
+
+    def test_old_database_moves_over_and_is_announced(self):
+        legacy = self.program / "data" / "wbads.db"
+        legacy.write_bytes(b"sqlite-ish")
+        moved = self.config.migrate_from_program_folder()
+        self.assertIn("база данных", moved,
+                      "переезд обязан быть назван: файлы пропали не сами")
+        self.assertFalse(legacy.exists())
+        self.assertEqual((self.home / "wbads.db").read_bytes(), b"sqlite-ish")
+
+    def test_token_moves_too(self):
+        """Иначе токен пришлось бы вводить заново после каждого обновления."""
+        (self.program / ".env").write_text("WB_API_TOKEN=abc\n", encoding="utf-8")
+        moved = self.config.migrate_from_program_folder()
+        self.assertIn("настройки с токеном", moved)
+        self.assertIn("abc", (self.home / ".env").read_text(encoding="utf-8"))
+
+    def test_existing_data_is_never_overwritten(self):
+        """Если в новом месте уже что-то есть, старое не затирается:
+        это чужая работа, и решать за человека тут нельзя."""
+        self.home.mkdir(parents=True)
+        (self.home / "wbads.db").write_bytes(b"fresh")
+        legacy = self.program / "data" / "wbads.db"
+        legacy.write_bytes(b"old")
+        self.assertEqual(self.config.migrate_from_program_folder(), [])
+        self.assertEqual((self.home / "wbads.db").read_bytes(), b"fresh")
+        self.assertTrue(legacy.exists(), "старую тоже не теряем")
+
+    def test_nothing_to_move_is_silent(self):
+        self.assertEqual(self.config.migrate_from_program_folder(), [])
+
+    def test_a_still_present_old_database_keeps_working(self):
+        """У того, кто не обновился, база лежит рядом с программой.
+        Переезд мог не состояться — читать её всё равно надо оттуда."""
+        legacy = self.program / "data" / "wbads.db"
+        legacy.write_bytes(b"sqlite-ish")
+        with unittest.mock.patch.dict("os.environ", {}, clear=False):
+            import os
+            os.environ.pop("WBADS_DB", None)
+            self.assertEqual(self.config.load_config().db_path, legacy)
+
+    def test_explicit_setting_still_wins(self):
+        import os
+
+        with unittest.mock.patch.dict("os.environ",
+                                      {"WBADS_DB": "/tmp/моя-база.db"}):
+            self.assertEqual(str(self.config.load_config().db_path),
+                             "/tmp/моя-база.db")
+        os.environ.pop("WBADS_DB", None)

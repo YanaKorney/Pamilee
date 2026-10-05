@@ -11,14 +11,77 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-ENV_FILE = ROOT / ".env"
+
+# Данные живут ОТДЕЛЬНО от программы — в домашней папке пользователя.
+#
+# Иначе каждое обновление их стирает: человек скачивает новый архив,
+# распаковывает в новую папку, переносит туда токен — и теряет базу
+# вместе с журналом изменений и собранной статистикой, потому что они
+# лежали внутри старой папки. Ровно так и произошло: журнал на 797
+# записей исчез при первом же обновлении.
+#
+# Папка названа по-русски и лежит на виду: её должно быть легко найти,
+# чтобы скопировать на другой компьютер или положить в резервную копию.
+DATA_HOME = Path(os.environ.get("WBADS_HOME")
+                 or (Path.home() / "Аналитика рекламы WB"))
+
+# Старое место. Читается, если там что-то есть: у тех, кто уже работает,
+# данные не должны пропасть из-за переезда.
+LEGACY_DB = ROOT / "data" / "wbads.db"
+LEGACY_ENV = ROOT / ".env"
+
+ENV_FILE = DATA_HOME / ".env"
 
 
-def load_env(path: Path = ENV_FILE) -> None:
+def ensure_data_home() -> Path:
+    """Создаёт папку данных и переносит туда всё из старого места."""
+    try:
+        DATA_HOME.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # Нет доступа к домашней папке — работаем по-старому, рядом
+        # с программой. Лучше так, чем не запуститься вовсе.
+        return ROOT
+    return DATA_HOME
+
+
+def migrate_from_program_folder() -> list[str]:
+    """Переносит базу и токен из папки программы в папку данных.
+
+    Возвращает, что именно переехало, — человеку надо об этом сказать:
+    файлы пропали не сами по себе.
+    """
+    moved: list[str] = []
+    home = ensure_data_home()
+    if home == ROOT:
+        return moved
+
+    for source, target, title in (
+        (LEGACY_DB, home / "wbads.db", "база данных"),
+        (LEGACY_ENV, home / ".env", "настройки с токеном"),
+    ):
+        if not source.exists() or target.exists():
+            continue
+        try:
+            target.write_bytes(source.read_bytes())
+            source.unlink()
+            moved.append(title)
+        except OSError:
+            continue
+    return moved
+
+
+def load_env(path: Path | None = None) -> None:
     """Простой парсер .env — без внешних зависимостей.
 
     Переменные, уже заданные в окружении, имеют приоритет над файлом.
     """
+    if path is None:
+        # Сначала новое место, потом старое: у того, кто ещё не обновился,
+        # токен лежит рядом с программой и обязан продолжать работать.
+        for candidate in (ENV_FILE, LEGACY_ENV):
+            if candidate.exists():
+                load_env(candidate)
+        return
     if not path.exists():
         return
     for raw in path.read_text(encoding="utf-8").splitlines():
@@ -54,6 +117,8 @@ def token_in_template(path: Path = ROOT / ".env.example") -> bool:
     return False
 
 
+# Файл-подсказка для вставки токена ищется рядом с программой: человек
+# кладёт его туда, где видит ярлыки, а не в папку данных.
 TOKEN_DROP_FILE = ROOT / "token.txt"
 
 
@@ -82,7 +147,7 @@ def token_from_file(path: Path = TOKEN_DROP_FILE) -> str:
     return token
 
 
-def write_token(token: str, env_path: Path = ENV_FILE,
+def write_token(token: str, env_path: Path | None = None,
                 template: Path = ROOT / ".env.example") -> Path:
     """Сохраняет токен в .env, сохраняя остальные настройки.
 
@@ -90,6 +155,9 @@ def write_token(token: str, env_path: Path = ENV_FILE,
     приехали и комментарии с объяснениями настроек.
     """
     token = token.strip().strip('"').strip("'")
+    if env_path is None:
+        ensure_data_home()
+        env_path = ENV_FILE
     if env_path.exists():
         lines = env_path.read_text(encoding="utf-8").splitlines()
     elif template.exists():
@@ -222,10 +290,17 @@ class Config:
 
 def load_config() -> Config:
     load_env()
-    db_raw = os.environ.get("WBADS_DB", "data/wbads.db")
-    db_path = Path(db_raw)
-    if not db_path.is_absolute():
-        db_path = ROOT / db_path
+    db_raw = os.environ.get("WBADS_DB", "")
+    if db_raw:
+        db_path = Path(db_raw)
+        if not db_path.is_absolute():
+            db_path = ROOT / db_path
+    elif LEGACY_DB.exists():
+        # Переехать не удалось (или программа запущена без прав на
+        # домашнюю папку) — работаем там, где данные лежат сейчас.
+        db_path = LEGACY_DB
+    else:
+        db_path = ensure_data_home() / "wbads.db"
     price_field = os.environ.get("WBADS_ORDER_PRICE", "price_with_disc").strip()
     if price_field not in ORDER_PRICE_FIELDS:
         price_field = "price_with_disc"

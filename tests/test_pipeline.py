@@ -7,6 +7,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import isolate  # noqa: E402,F401 — должен идти до wbads: пути берутся при импорте
+
 from wbads import analytics, db, demo  # noqa: E402
 from wbads.api import handle_export, handle_meta, handle_report  # noqa: E402
 from wbads.collector import normalize_campaign, normalize_stats  # noqa: E402
