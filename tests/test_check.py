@@ -1583,3 +1583,118 @@ class TestFindingAPreviousDatabase(unittest.TestCase):
     def test_transfer_twice_does_not_duplicate(self):
         cli._merge_journal(self.old / "wbads.db", self.fresh)
         self.assertEqual(cli._merge_journal(self.old / "wbads.db", self.fresh), 0)
+
+
+class TestOnlyOneDatabaseIsEverUsed(unittest.TestCase):
+    """Если база окажется и в старом месте, и в новом, программа обязана
+    выбрать одну и ту же в любой момент. Иначе она пишет в одну, а читает
+    другую: человек видит то пустой журнал, то полный, и не понимает, от
+    чего это зависит."""
+
+    def setUp(self):
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name) / "дом"
+        self.home.mkdir()
+        self.program = Path(self.tmp.name) / "программа"
+        (self.program / "data").mkdir(parents=True)
+
+        import wbads.config as config
+        self.config = config
+        for attr, value in (("DATA_HOME", self.home), ("ROOT", self.program),
+                            ("LEGACY_DB", self.program / "data" / "wbads.db")):
+            patch_ = unittest.mock.patch.object(config, attr, value)
+            patch_.start()
+            self.addCleanup(patch_.stop)
+        import os
+        os.environ.pop("WBADS_DB", None)
+
+    def test_permanent_place_wins_when_both_exist(self):
+        (self.home / "wbads.db").write_bytes(b"home")
+        self.config.LEGACY_DB.write_bytes(b"legacy")
+        self.assertEqual(self.config.load_config().db_path,
+                         self.home / "wbads.db")
+
+    def test_old_place_is_used_only_while_there_is_no_new_one(self):
+        self.config.LEGACY_DB.write_bytes(b"legacy")
+        self.assertEqual(self.config.load_config().db_path,
+                         self.config.LEGACY_DB)
+
+    def test_fresh_install_uses_the_permanent_place(self):
+        self.assertEqual(self.config.load_config().db_path,
+                         self.home / "wbads.db")
+
+
+class TestTemplateDoesNotPinTheDatabase(unittest.TestCase):
+    """Шаблон настроек копируется в .env при первом сохранении токена.
+    Строка WBADS_DB=data/wbads.db в нём перекрывала постоянное место и
+    возвращала базу внутрь папки программы — то есть отменяла переезд
+    для всех, кто когда-либо вводил токен."""
+
+    def test_template_has_no_active_database_path(self):
+        from wbads.config import ROOT
+
+        template = (ROOT / ".env.example").read_text(encoding="utf-8")
+        active = [line for line in template.splitlines()
+                  if line.strip().startswith("WBADS_DB=")]
+        self.assertEqual(active, [],
+                         "путь к базе в шаблоне обязан быть закомментирован")
+
+    def test_saving_a_token_does_not_pin_the_database(self):
+        import tempfile
+        from wbads.config import ROOT, write_token
+
+        with tempfile.TemporaryDirectory() as tmp:
+            env = Path(tmp) / ".env"
+            write_token("a" * 120 + ".b" * 30 + ".sig", env_path=env,
+                        template=ROOT / ".env.example")
+            saved = env.read_text(encoding="utf-8")
+        self.assertNotIn("\nWBADS_DB=", saved)
+        self.assertIn("WB_API_TOKEN=", saved)
+
+
+class TestHealingAnEnvThatPinsTheDatabase(unittest.TestCase):
+    """Строка WBADS_DB из шаблона уже лежит в .env у всех, кто когда-либо
+    сохранял токен. Пока она там, вся затея с отдельной папкой не
+    работает: база возвращается внутрь программы и пропадает с ней."""
+
+    def write(self, text: str) -> Path:
+        import tempfile
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / ".env"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_template_value_is_commented_out(self):
+        from wbads.config import heal_pinned_database
+
+        env = self.write("WB_API_TOKEN=abc\nWBADS_DB=data/wbads.db\n")
+        self.assertTrue(heal_pinned_database(env))
+        text = env.read_text(encoding="utf-8")
+        self.assertIn("# WBADS_DB=data/wbads.db", text)
+        self.assertIn("WB_API_TOKEN=abc", text, "остальное трогать нельзя")
+
+    def test_a_deliberate_path_is_left_alone(self):
+        """Свой путь человек задал осознанно; ошибаться надо в сторону
+        сохранения чужого выбора."""
+        from wbads.config import heal_pinned_database
+
+        env = self.write("WBADS_DB=D:/база/wbads.db\n")
+        self.assertFalse(heal_pinned_database(env))
+        self.assertIn("WBADS_DB=D:/база/wbads.db",
+                      env.read_text(encoding="utf-8"))
+
+    def test_already_clean_file_is_not_rewritten(self):
+        from wbads.config import heal_pinned_database
+
+        env = self.write("WB_API_TOKEN=abc\n")
+        self.assertFalse(heal_pinned_database(env))
+
+    def test_missing_file_is_not_an_error(self):
+        from wbads.config import heal_pinned_database
+
+        self.assertFalse(heal_pinned_database(Path("/нет/такого/.env")))

@@ -212,6 +212,13 @@ def cmd_start(args: argparse.Namespace) -> int:
     print("  " + "─" * 52)
     print()
 
+    # Прежняя установка ищется ДО всего остального: в ней может лежать и
+    # токен, и журнал. Спрашивать токен у человека, у которого он уже
+    # есть в соседней папке, — значит гонять его за тем, что программа
+    # может найти сама.
+    if _offer_previous_install():
+        cfg = load_config()
+
     # ── шаг 1: токен ─────────────────────────────────────────────────────
     if token_from_template() or not cfg.has_token:
         _print("Шаг 1 из 3. Доступ к кабинету.")
@@ -285,7 +292,6 @@ def cmd_start(args: argparse.Namespace) -> int:
             _print("диагностика.txt — его можно отправить целиком.")
     print()
 
-    _offer_previous_database()
     _offer_journal_import()
 
     # ── шаг 3: дашборд ───────────────────────────────────────────────────
@@ -950,43 +956,66 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
     return 1 if report["problems"] else 0
 
 
-def _offer_previous_database() -> None:
-    """Если текущая база пуста, а рядом есть база постарее — предлагает её.
+def _offer_previous_install() -> bool:
+    """Ищет прежнюю установку и предлагает забрать из неё токен и журнал.
 
-    Данные переехали из папки программы в домашнюю, и у того, кто
-    обновлялся раньше, журнал остался в прежней папке. Просить человека
-    искать её самому — значит переложить на него последствия моей
-    собственной ошибки в устройстве программы.
+    Перенос из папки программы спасает только того, кто обновляется
+    поверх старой папки. Во всех моих инструкциях было написано другое —
+    «распакуйте в новую папку», — и для такого обновления переносить в
+    новой папке нечего: и токен, и база остались в прежней.
+
+    Возвращает True, если что-то перенесли: тогда настройки надо
+    перечитать, иначе мастер пойдёт дальше со старыми.
     """
-    from wbads.config import describe_database, find_other_databases
+    from wbads.config import (describe_database, find_other_databases,
+                              find_previous_tokens, heal_pinned_database,
+                              write_token)
 
     cfg = load_config()
+    changed = False
+
     try:
         here = describe_database(cfg.db_path) if cfg.db_path.exists() else None
         mine = int(here["changes"]) if here else 0
-        if mine:
-            return
-        others = [i for i in find_other_databases(cfg.db_path)
-                  if int(i["changes"]) > 0]
+        others = ([i for i in find_other_databases(cfg.db_path)
+                   if int(i["changes"]) > mine] if not mine else [])
+        tokens = [] if cfg.has_token else find_previous_tokens()
     except Exception:  # noqa: BLE001 — поиск не повод не запуститься
-        return
-    if not others:
-        return
+        return False
 
-    best = max(others, key=lambda i: int(i["changes"]))
-    count = int(best["changes"])
-    word = plural(count, "запись", "записи", "записей")
-    _print("Журнал изменений здесь пуст, но рядом нашлась прежняя база:")
-    _print(f"  {best['path']}")
-    _print(f"  в ней {count} {word}.")
+    if not others and not tokens:
+        return False
+
+    _print("Похоже, программа у вас уже стояла. Нашла от прежней версии:")
     print()
-    if not _ask("Перенести журнал оттуда?"):
+    best = max(others, key=lambda i: int(i["changes"])) if others else None
+    if best:
+        count = int(best["changes"])
+        word = plural(count, "запись", "записи", "записей")
+        _print(f"  • журнал изменений — {count} {word}")
+        _print(f"    {best['path']}")
+    if tokens:
+        _print("  • токен доступа к кабинету")
+        _print(f"    {tokens[0]['path']}")
+    print()
+
+    if not _ask("Перенести сюда?"):
         print()
-        return
-    written = _merge_journal(Path(str(best["path"])), cfg.db_path)
-    _print(f"Перенесено записей: {written}")
-    _print("Статистику соберём заново — она всё равно будет свежее.")
+        return False
     print()
+
+    if tokens:
+        write_token(str(tokens[0]["token"]))
+        heal_pinned_database()
+        _print("Токен перенесён — вводить его заново не нужно.")
+        changed = True
+    if best:
+        written = _merge_journal(Path(str(best["path"])), cfg.db_path)
+        _print(f"Записей журнала перенесено: {written}")
+        _print("Статистику соберём заново — она всё равно будет свежее.")
+        changed = True
+    print()
+    return changed
 
 
 def _offer_journal_import() -> None:
@@ -1176,8 +1205,11 @@ def cmd_data(args: argparse.Namespace) -> int:
     «Почему журнал пустой» — вопрос, на который программа обязана
     отвечать сама. Гадать о путях и папках должна она, а не человек.
     """
-    from wbads.config import describe_database, find_other_databases
+    from wbads.config import (describe_database, find_other_databases,
+                              find_previous_tokens, heal_pinned_database,
+                              write_token)
 
+    heal_pinned_database()
     cfg = load_config()
     print()
     print("  Ваши данные")
@@ -1198,8 +1230,25 @@ def cmd_data(args: argparse.Namespace) -> int:
         _print("База пустая или ещё не создана.")
     print()
 
-    _print("Ищу базы от прежних установок…")
+    _print(f"Токен: {'на месте' if cfg.has_token else 'НЕ ЗАДАН'}")
+    print()
+
+    _print("Ищу следы прежних установок…")
     others = find_other_databases(cfg.db_path)
+    tokens = [] if cfg.has_token else find_previous_tokens()
+    if tokens:
+        print()
+        _print("Нашла токен от прежней версии:")
+        _print(f"  {tokens[0]['path']}")
+        if sys.stdin is not None and sys.stdin.isatty():
+            if _ask("Перенести его сюда?"):
+                write_token(str(tokens[0]["token"]))
+                heal_pinned_database()
+                _print("Токен перенесён.")
+        elif getattr(args, "yes", False):
+            write_token(str(tokens[0]["token"]))
+            heal_pinned_database()
+            _print("Токен перенесён.")
     if not others:
         print()
         _print("Других баз рядом не нашлось.")

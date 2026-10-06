@@ -44,6 +44,46 @@ def ensure_data_home() -> Path:
     return DATA_HOME
 
 
+# Значение, которое шаблон прописывал в .env сам. Это не выбор человека,
+# а моя оплошность: строка возвращала базу внутрь папки программы и
+# отменяла переезд для всех, кто когда-либо сохранял токен.
+TEMPLATE_DB_VALUE = "data/wbads.db"
+
+
+def heal_pinned_database(env_path: Path | None = None) -> bool:
+    """Убирает из .env путь к базе, который прописал шаблон.
+
+    Трогаем только точное значение из шаблона: если человек задал свой
+    путь осознанно, он должен остаться. Отличить одно от другого больше
+    нечем, и ошибаться надо в сторону сохранения чужого выбора.
+    """
+    path = env_path or ENV_FILE
+    if not path.exists():
+        return False
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+
+    cleaned, changed = [], False
+    for raw in lines:
+        stripped = raw.strip()
+        if stripped.startswith("WBADS_DB="):
+            value = stripped.partition("=")[2].strip().strip('"').strip("'")
+            if value == TEMPLATE_DB_VALUE:
+                cleaned.append("# " + raw + "   # убрано: база живёт отдельно")
+                changed = True
+                continue
+        cleaned.append(raw)
+
+    if changed:
+        try:
+            path.write_text("\n".join(cleaned) + "\n", encoding="utf-8")
+        except OSError:
+            return False
+    return changed
+
+
 def migrate_from_program_folder() -> list[str]:
     """Переносит базу и токен из папки программы в папку данных.
 
@@ -58,7 +98,7 @@ def migrate_from_program_folder() -> list[str]:
     for source, target, title in (
         (LEGACY_DB, home / "wbads.db", "база данных"),
         (LEGACY_ENV, home / ".env", "настройки с токеном"),
-    ):
+    ):  # noqa: E501
         if not source.exists() or target.exists():
             continue
         try:
@@ -67,6 +107,11 @@ def migrate_from_program_folder() -> list[str]:
             moved.append(title)
         except OSError:
             continue
+
+    # Старые .env несут в себе путь к базе из шаблона. Пока он там, вся
+    # затея с отдельной папкой не работает.
+    if heal_pinned_database():
+        moved.append("путь к базе в настройках")
     return moved
 
 
@@ -295,12 +340,14 @@ def load_config() -> Config:
         db_path = Path(db_raw)
         if not db_path.is_absolute():
             db_path = ROOT / db_path
-    elif LEGACY_DB.exists():
-        # Переехать не удалось (или программа запущена без прав на
-        # домашнюю папку) — работаем там, где данные лежат сейчас.
-        db_path = LEGACY_DB
     else:
-        db_path = ensure_data_home() / "wbads.db"
+        # Постоянное место — главное. Старое рядом с программой берём,
+        # только если постоянного ещё нет: иначе программа пишет в одну
+        # базу, а читает другую, и человек видит то пустой журнал, то
+        # полный, не понимая, от чего это зависит.
+        home_db = ensure_data_home() / "wbads.db"
+        db_path = home_db if home_db.exists() or not LEGACY_DB.exists() \
+            else LEGACY_DB
     price_field = os.environ.get("WBADS_ORDER_PRICE", "price_with_disc").strip()
     if price_field not in ORDER_PRICE_FIELDS:
         price_field = "price_with_disc"
@@ -356,9 +403,14 @@ def find_other_databases(current: Path, limit: int = 12) -> list[dict[str, objec
         try:
             # Вглубь не лезем: база лежит в папке программы, в её data/
             # или в папке данных — дальше второго уровня её не бывает.
-            candidates = list(root.glob("*/data/wbads.db"))
-            candidates += list(root.glob("*/wbads.db"))
-            candidates += list(root.glob("wbads.db"))
+            # Архив с гитхаба распаковывается во вложенную папку, и
+            # человек нередко кладёт её ещё в одну — «новая папка».
+            # Поэтому три уровня, но не больше: глубже начинается обход
+            # всего диска.
+            candidates = []
+            for pattern in ("wbads.db", "*/wbads.db", "*/data/wbads.db",
+                            "*/*/wbads.db", "*/*/data/wbads.db"):
+                candidates += list(root.glob(pattern))
         except OSError:
             continue
         for path in candidates:
@@ -413,3 +465,66 @@ def describe_database(path: Path) -> dict[str, object] | None:
         conn.close()
 
     return {"path": path, "last_day": last, **counts}
+
+
+def find_previous_tokens(current: Path | None = None) -> list[dict[str, object]]:
+    """Ищет токен в прежних установках программы.
+
+    Перенос из папки программы помогает только тому, кто обновляется
+    поверх старой папки. Человек, который распаковывает архив в новую, —
+    а именно так и написано во всех моих инструкциях — остаётся и без
+    токена, и без базы: переносить в его новой папке нечего.
+    """
+    found: list[dict[str, object]] = []
+    seen: set[Path] = set()
+    current = (current or ENV_FILE)
+    try:
+        current = current.resolve()
+    except OSError:
+        pass
+
+    for root in search_roots():
+        candidates: list[Path] = []
+        for pattern in (".env", "*/.env", "*/*/.env",
+                        "token.txt", "*/token.txt", "*/*/token.txt"):
+            try:
+                candidates += list(root.glob(pattern))
+            except OSError:
+                continue
+        for path in candidates:
+            try:
+                resolved = path.resolve()
+            except OSError:
+                continue
+            if resolved == current or resolved in seen:
+                continue
+            seen.add(resolved)
+            token = _token_in_file(resolved)
+            if token:
+                found.append({"path": resolved, "token": token})
+    return found
+
+
+def _token_in_file(path: Path) -> str:
+    """Достаёт токен из .env или token.txt. Пустая строка — если его нет."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    if path.name == "token.txt":
+        candidate = text.strip().strip('"').strip("'")
+        return candidate if _looks_like_token(candidate) else ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith("WB_API_TOKEN="):
+            continue
+        candidate = line.partition("=")[2].strip().strip('"').strip("'")
+        if _looks_like_token(candidate):
+            return candidate
+    return ""
+
+
+def _looks_like_token(value: str) -> bool:
+    """Токен WB — длинный JWT из трёх частей. Заготовка в шаблоне — нет."""
+    value = (value or "").strip()
+    return len(value) > 80 and value.count(".") == 2 and " " not in value
