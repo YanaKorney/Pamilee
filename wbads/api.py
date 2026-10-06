@@ -495,6 +495,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", CONTENT_TYPES.get(path.suffix, "application/octet-stream"))
         self.send_header("Content-Length", str(len(body)))
+        # Адрес у страницы и скриптов всегда один и тот же, и браузер
+        # считает себя вправе отдать их из кеша. После обновления
+        # программы это означает старый дашборд на новых данных: человек
+        # обновил сервис, а нововведений не видит и не понимает почему.
+        self.send_header("Cache-Control", "no-store, must-revalidate")
         if query is not None:
             # Верный код запоминаем здесь: иначе его пришлось бы вводить
             # при каждом открытии страницы.

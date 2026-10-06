@@ -1479,3 +1479,107 @@ class TestDataSurvivesAnUpdate(unittest.TestCase):
             self.assertEqual(str(self.config.load_config().db_path),
                              "/tmp/моя-база.db")
         os.environ.pop("WBADS_DB", None)
+
+
+class TestBrowserDoesNotServeAnOldDashboard(unittest.TestCase):
+    """Адрес у страницы и скриптов всегда один, и браузер держит их в
+    кеше. После обновления программы это означает старый дашборд на новых
+    данных: человек обновил сервис, видит прежний экран и не понимает,
+    почему обещанного нет."""
+
+    def test_static_files_forbid_caching(self):
+        import tempfile
+        from unittest.mock import MagicMock
+        from wbads.api import DashboardHandler
+
+        handler = DashboardHandler.__new__(DashboardHandler)
+        sent = {}
+        handler.send_response = lambda code: sent.setdefault("code", code)
+        handler.send_header = lambda name, value: sent.setdefault(
+            "headers", {}).__setitem__(name, value)
+        handler.end_headers = lambda: None
+        handler.wfile = MagicMock()
+        handler.access_code = ""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "app.js"
+            path.write_text("console.log(1)", encoding="utf-8")
+            handler._send_file(path)
+
+        self.assertIn("Cache-Control", sent["headers"])
+        self.assertIn("no-store", sent["headers"]["Cache-Control"])
+
+
+class TestFindingAPreviousDatabase(unittest.TestCase):
+    """«Почему журнал пустой» — вопрос, на который программа обязана
+    отвечать сама. После переезда данных журнал остался в прежней папке,
+    и просить человека искать её — значит переложить на него последствия
+    моей ошибки в устройстве программы."""
+
+    def setUp(self):
+        import tempfile
+        from wbads import changes, db
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.old = Path(self.tmp.name) / "старая" / "data"
+        self.old.mkdir(parents=True)
+        conn = db.init_db(self.old / "wbads.db")
+        changes.add(conn, "2026-09-10", "снизила ставку", nm_id=777)
+        changes.add(conn, "2026-09-12", "почистила запросы", nm_id=777)
+        conn.close()
+
+        self.fresh = Path(self.tmp.name) / "новая.db"
+        db.init_db(self.fresh).close()
+
+        import wbads.config as config
+        self.config = config
+        patch_ = unittest.mock.patch.object(
+            config, "search_roots", lambda: [Path(self.tmp.name)])
+        patch_.start()
+        self.addCleanup(patch_.stop)
+
+    def test_old_database_is_found_and_described(self):
+        found = self.config.find_other_databases(self.fresh)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["changes"], 2,
+                         "число записей важнее размера файла: оно понятно")
+
+    def test_current_database_is_not_offered_to_itself(self):
+        found = self.config.find_other_databases(self.old / "wbads.db")
+        self.assertEqual(found, [])
+
+    def test_a_foreign_sqlite_file_is_ignored(self):
+        import sqlite3
+
+        alien = Path(self.tmp.name) / "чужое" / "wbads.db"
+        alien.parent.mkdir()
+        sqlite3.connect(alien).execute("CREATE TABLE другое (x)")
+        self.assertEqual(
+            [i["path"] for i in self.config.find_other_databases(self.fresh)],
+            [self.old / "wbads.db"])
+
+    def test_transfer_takes_the_journal_and_leaves_statistics(self):
+        """Подменять файл целиком нельзя: в текущей базе уже может быть
+        собранная статистика, и её бы потеряли."""
+        from wbads import db
+
+        with db.session(self.fresh) as conn:
+            conn.execute(
+                "INSERT INTO campaign_daily (advert_id, date, views, clicks,"
+                " atbs, orders, shks, spend, revenue, collected_at)"
+                " VALUES (1,'2026-10-01',10,1,0,0,0,5.0,0.0,'now')")
+            conn.commit()
+
+        written = cli._merge_journal(self.old / "wbads.db", self.fresh)
+        self.assertEqual(written, 2)
+        with db.session(self.fresh) as conn:
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM changes").fetchone()[0], 2)
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM campaign_daily").fetchone()[0], 1,
+                "статистика в текущей базе обязана уцелеть")
+
+    def test_transfer_twice_does_not_duplicate(self):
+        cli._merge_journal(self.old / "wbads.db", self.fresh)
+        self.assertEqual(cli._merge_journal(self.old / "wbads.db", self.fresh), 0)

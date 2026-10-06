@@ -313,3 +313,103 @@ def load_config() -> Config:
         order_price_field=price_field,
         thresholds=Thresholds.from_env(),
     )
+
+
+# Где искать базу от прежней установки. Человек распаковывает архив туда,
+# куда скачал, поэтому смотрим в привычные места, а не просим вспомнить путь.
+def search_roots() -> list[Path]:
+    home = Path.home()
+    roots = [ROOT.parent, home]
+    for name in ("Downloads", "Загрузки", "Desktop", "Рабочий стол",
+                 "Documents", "Документы", "OneDrive"):
+        roots.append(home / name)
+    seen, unique = set(), []
+    for root in roots:
+        try:
+            resolved = root.resolve()
+        except OSError:
+            continue
+        if resolved in seen or not resolved.is_dir():
+            continue
+        seen.add(resolved)
+        unique.append(resolved)
+    return unique
+
+
+def find_other_databases(current: Path, limit: int = 12) -> list[dict[str, object]]:
+    """Ищет базы прежних установок и рассказывает, что в каждой.
+
+    Размер файла ни о чём не говорит человеку, а «812 записей журнала и
+    30 дней статистики» говорит всё. Поэтому каждая найденная база
+    открывается на чтение и пересчитывается.
+    """
+    import sqlite3
+
+    found: list[dict[str, object]] = []
+    seen: set[Path] = set()
+    try:
+        current = current.resolve()
+    except OSError:
+        pass
+
+    for root in search_roots():
+        try:
+            # Вглубь не лезем: база лежит в папке программы, в её data/
+            # или в папке данных — дальше второго уровня её не бывает.
+            candidates = list(root.glob("*/data/wbads.db"))
+            candidates += list(root.glob("*/wbads.db"))
+            candidates += list(root.glob("wbads.db"))
+        except OSError:
+            continue
+        for path in candidates:
+            try:
+                resolved = path.resolve()
+            except OSError:
+                continue
+            if resolved == current or resolved in seen:
+                continue
+            seen.add(resolved)
+            info = describe_database(resolved)
+            if info:
+                found.append(info)
+            if len(found) >= limit:
+                return found
+    return found
+
+
+def describe_database(path: Path) -> dict[str, object] | None:
+    """Что лежит в файле базы. None — если это не наша база."""
+    import sqlite3
+
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        tables = {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if "campaign_daily" not in tables:
+            return None
+        counts = {}
+        for key, sql in (
+            ("changes", "SELECT COUNT(*) FROM changes"),
+            ("days", "SELECT COUNT(DISTINCT date) FROM campaign_daily"),
+            ("campaigns", "SELECT COUNT(*) FROM campaigns"),
+            ("orders", "SELECT COUNT(*) FROM orders_raw"),
+        ):
+            try:
+                counts[key] = int(conn.execute(sql).fetchone()[0] or 0)
+            except sqlite3.Error:
+                counts[key] = 0
+        last = ""
+        try:
+            last = str(conn.execute(
+                "SELECT MAX(date) FROM campaign_daily").fetchone()[0] or "")
+        except sqlite3.Error:
+            pass
+    except sqlite3.DatabaseError:
+        return None
+    finally:
+        conn.close()
+
+    return {"path": path, "last_day": last, **counts}

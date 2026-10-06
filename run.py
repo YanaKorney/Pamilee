@@ -285,6 +285,7 @@ def cmd_start(args: argparse.Namespace) -> int:
             _print("диагностика.txt — его можно отправить целиком.")
     print()
 
+    _offer_previous_database()
     _offer_journal_import()
 
     # ── шаг 3: дашборд ───────────────────────────────────────────────────
@@ -874,6 +875,12 @@ def main(argv: list[str] | None = None) -> int:
                            help="не переспрашивать перед записью")
     p_journal.set_defaults(func=cmd_import_changes)
 
+    p_data = sub.add_parser(
+        "data", help="где лежат данные, что в них и нет ли базы постарее")
+    p_data.add_argument("--yes", action="store_true",
+                        help="переносить найденный журнал без вопроса")
+    p_data.set_defaults(func=cmd_data)
+
     args = parser.parse_args(argv)
 
     # Переезд данных из папки программы — один раз, молча, если нечего
@@ -941,6 +948,45 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
         _print(f"Отчёт не удалось сохранить ({exc}), но он напечатан выше.")
 
     return 1 if report["problems"] else 0
+
+
+def _offer_previous_database() -> None:
+    """Если текущая база пуста, а рядом есть база постарее — предлагает её.
+
+    Данные переехали из папки программы в домашнюю, и у того, кто
+    обновлялся раньше, журнал остался в прежней папке. Просить человека
+    искать её самому — значит переложить на него последствия моей
+    собственной ошибки в устройстве программы.
+    """
+    from wbads.config import describe_database, find_other_databases
+
+    cfg = load_config()
+    try:
+        here = describe_database(cfg.db_path) if cfg.db_path.exists() else None
+        mine = int(here["changes"]) if here else 0
+        if mine:
+            return
+        others = [i for i in find_other_databases(cfg.db_path)
+                  if int(i["changes"]) > 0]
+    except Exception:  # noqa: BLE001 — поиск не повод не запуститься
+        return
+    if not others:
+        return
+
+    best = max(others, key=lambda i: int(i["changes"]))
+    count = int(best["changes"])
+    word = plural(count, "запись", "записи", "записей")
+    _print("Журнал изменений здесь пуст, но рядом нашлась прежняя база:")
+    _print(f"  {best['path']}")
+    _print(f"  в ней {count} {word}.")
+    print()
+    if not _ask("Перенести журнал оттуда?"):
+        print()
+        return
+    written = _merge_journal(Path(str(best["path"])), cfg.db_path)
+    _print(f"Перенесено записей: {written}")
+    _print("Статистику соберём заново — она всё равно будет свежее.")
+    print()
 
 
 def _offer_journal_import() -> None:
@@ -1122,6 +1168,104 @@ def cmd_import_changes(args: argparse.Namespace) -> int:
     _print("Откройте дашборд и вкладку «Журнал изменений»:")
     _print("  двойной клик на START-Windows.bat (или START-Mac.command)")
     return 0
+
+
+def cmd_data(args: argparse.Namespace) -> int:
+    """Показывает, где база и что в ней, и ищет базы прежних установок.
+
+    «Почему журнал пустой» — вопрос, на который программа обязана
+    отвечать сама. Гадать о путях и папках должна она, а не человек.
+    """
+    from wbads.config import describe_database, find_other_databases
+
+    cfg = load_config()
+    print()
+    print("  Ваши данные")
+    print("  " + "─" * 52)
+    print()
+    _print(f"Папка данных: {DATA_HOME}")
+    _print(f"База: {cfg.db_path}")
+    print()
+
+    here = describe_database(cfg.db_path) if cfg.db_path.exists() else None
+    if here:
+        _print(f"Записей в журнале изменений: {here['changes']}")
+        _print(f"Кампаний: {here['campaigns']} · дней статистики: {here['days']}"
+               f" · заказов: {here['orders']}")
+        if here.get("last_day"):
+            _print(f"Последний день статистики: {here['last_day']}")
+    else:
+        _print("База пустая или ещё не создана.")
+    print()
+
+    _print("Ищу базы от прежних установок…")
+    others = find_other_databases(cfg.db_path)
+    if not others:
+        print()
+        _print("Других баз рядом не нашлось.")
+        if not here or not here["changes"]:
+            _print("Журнал можно перенести заново из вашей таблицы:")
+            _print("  двойной клик на ZHURNAL-Windows.bat")
+        return 0
+
+    print()
+    _print("Нашла:")
+    for index, info in enumerate(others, start=1):
+        print()
+        _print(f"  {index}. {info['path']}")
+        _print(f"     журнал: {info['changes']} · дней статистики: "
+               f"{info['days']} · заказов: {info['orders']}")
+        if info.get("last_day"):
+            _print(f"     последний день: {info['last_day']}")
+    print()
+
+    richer = [i for i in others
+              if int(i["changes"]) > (int(here["changes"]) if here else 0)]
+    if not richer:
+        _print("Ни в одной из них журнал не богаче текущей — переносить нечего.")
+        return 0
+
+    best = max(richer, key=lambda i: int(i["changes"]))
+    _print(f"Больше всего записей здесь: {best['path']}")
+    _print(f"Это {best['changes']} записей журнала.")
+    print()
+    if sys.stdin is not None and sys.stdin.isatty():
+        if not _ask("Перенести журнал из неё в текущую базу?"):
+            _print("Отменено.")
+            return 0
+    elif not getattr(args, "yes", False):
+        _print("Запустите ещё раз и ответьте «да», чтобы перенести.")
+        return 0
+
+    written = _merge_journal(Path(str(best["path"])), cfg.db_path)
+    print()
+    _print(f"Перенесено записей: {written}")
+    _print("Статистика не переносится: её проще собрать заново из кабинета,")
+    _print("и она всегда будет свежее.")
+    return 0
+
+
+def _merge_journal(source: Path, target: Path) -> int:
+    """Переносит журнал из чужой базы, не трогая ничего остального.
+
+    Копировать файл целиком нельзя: в текущей базе уже может быть
+    собранная статистика, и подменой её потеряли бы. Переносим только
+    записи, повторы пропускаются по дате, артикулу и тексту.
+    """
+    import sqlite3
+
+    from wbads import changes
+
+    conn = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = [dict(row) for row in conn.execute(
+            "SELECT date, nm_id, advert_id, text, source FROM changes")]
+    finally:
+        conn.close()
+
+    with db.session(target) as out:
+        return changes.add_many(out, rows, source="перенос из прежней базы")
 
 
 def _report_crash(exc: BaseException) -> int:
