@@ -1654,3 +1654,53 @@ class TestHealingAnEnvThatPinsTheDatabase(unittest.TestCase):
         from wbads.config import heal_pinned_database
 
         self.assertFalse(heal_pinned_database(Path("/нет/такого/.env")))
+
+
+class TestVersionIsVisible(unittest.TestCase):
+    """Папок с программой у человека накапливается несколько, и
+    запускается не всегда свежая. «Обновил, а нового не видно» почти
+    всегда означало старую копию — и выяснялось это перепиской через
+    день. Версия и папка должны быть видны сразу."""
+
+    def test_meta_reports_version_and_folder(self):
+        import tempfile
+        from wbads import db
+        from wbads.api import handle_meta
+        from wbads.config import APP_VERSION, ROOT, Config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = db.init_db(Path(tmp) / "t.db")
+            meta = handle_meta(conn, Config(), {})
+            conn.close()
+
+        self.assertEqual(meta["version"], APP_VERSION)
+        self.assertEqual(meta["program_folder"], str(ROOT))
+
+    def test_version_looks_like_a_build_date(self):
+        """Дата говорит человеку больше, чем номер сборки."""
+        from datetime import date
+        from wbads.config import APP_VERSION
+
+        parsed = date.fromisoformat(APP_VERSION)
+        self.assertGreater(parsed.year, 2024)
+
+    def test_report_carries_it_too(self):
+        """Подвал дашборда берёт сведения из отчёта, а не из /api/meta."""
+        import tempfile
+        from wbads import analytics, db
+        from wbads.config import APP_VERSION, Thresholds
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = db.init_db(Path(tmp) / "t.db")
+            report = analytics.build_report(conn, "2026-10-01", "2026-10-07",
+                                            Thresholds())
+            conn.close()
+        self.assertEqual(report["meta"]["version"], APP_VERSION)
+        self.assertTrue(report["meta"]["program_folder"])
+
+    def test_dashboard_shows_it(self):
+        from wbads.config import ROOT
+
+        app_js = (ROOT / "wbads" / "web" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("версия программы", app_js)
+        self.assertIn("meta.program_folder", app_js)

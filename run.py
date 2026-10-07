@@ -39,6 +39,7 @@ from pathlib import Path
 from wbads import analytics, collector, db, demo
 from wbads.api import serve
 from wbads.config import (
+    APP_VERSION,
     DATA_HOME,
     ROOT,
     migrate_from_program_folder,
@@ -209,6 +210,7 @@ def cmd_start(args: argparse.Namespace) -> int:
     cfg = load_config()
     print()
     print("  Аналитика рекламы Wildberries")
+    print(f"  Версия {APP_VERSION} · папка: {ROOT}")
     print("  " + "─" * 52)
     print()
 
@@ -1214,6 +1216,9 @@ def cmd_data(args: argparse.Namespace) -> int:
     print()
     print("  Ваши данные")
     print("  " + "─" * 52)
+    print()
+    _print(f"Версия программы: {APP_VERSION}")
+    _print(f"Запущена из папки: {ROOT}")
     print()
     _print(f"Папка данных: {DATA_HOME}")
     _print(f"База: {cfg.db_path}")

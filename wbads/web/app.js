@@ -943,6 +943,11 @@ function renderFoot(r) {
                (lc.source === 'demo' ? ' (демо-данные)' : ''));
   }
   if (meta.balance && meta.balance.net) parts.push(`баланс кабинета: ${money(meta.balance.net)}`);
+  /* Версия и папка — чтобы «обновил, а нового не видно» решалось
+     взглядом, а не перепиской. Папок с программой накапливается
+     несколько, и запускается не всегда свежая. */
+  if (meta.version) parts.push(`версия программы: ${meta.version}`);
+  if (meta.program_folder) parts.push(`папка: ${meta.program_folder}`);
   document.getElementById('foot').textContent = parts.join(' · ');
 }
 

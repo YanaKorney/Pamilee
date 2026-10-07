@@ -11,7 +11,7 @@ from datetime import date, timedelta
 from typing import Any, Mapping, Sequence
 
 from . import db
-from .config import Thresholds
+from .config import APP_VERSION, ROOT, Thresholds
 from .metrics import (
     RAW_KEYS,
     safe_div,
@@ -353,6 +353,12 @@ def _meta(conn: sqlite3.Connection) -> dict[str, Any]:
     last = db.last_collect(conn)
     balance = db.latest_balance(conn)
     return {
+        # Версия и папка нужны в самом дашборде: папок с программой у
+        # человека накапливается несколько, и «обновил, а нового не видно»
+        # почти всегда означает запуск старой копии. Выяснять это
+        # перепиской — терять день на каждом обновлении.
+        "version": APP_VERSION,
+        "program_folder": str(ROOT),
         "data_from": lo,
         "data_to": hi,
         "last_collect": dict(last) if last else None,

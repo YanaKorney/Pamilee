@@ -21,7 +21,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
 from . import analytics, changes, daily, db
-from .config import Config, Thresholds
+from .config import APP_VERSION, ROOT, Config, Thresholds
 from .metrics import parse_date
 
 WEB_DIR = Path(__file__).parent / "web"
@@ -80,6 +80,8 @@ def handle_meta(conn: sqlite3.Connection, cfg: Config,
     last = db.last_collect(conn)
     orders_lo, orders_hi = db.orders_range(conn)
     return {
+        "version": APP_VERSION,
+        "program_folder": str(ROOT),
         "has_token": cfg.has_token,
         "has_orders": db.has_orders(conn),
         "orders_from": orders_lo,
@@ -460,7 +462,7 @@ def handle_changes_csv(conn: sqlite3.Connection, cfg: Config,
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    server_version = "wbads/1.0"
+    server_version = f"wbads/{APP_VERSION}"
     config: Config
 
     def log_message(self, fmt: str, *args: Any) -> None:  # тише в консоли
@@ -739,6 +741,10 @@ def serve(config: Config, open_browser: bool = True, network: bool = False,
     if port != config.port:
         print(f"\n  Порт {config.port} занят системой — открываю на {port}.")
 
+    # Версия и папка — первое, что надо знать, когда «обновил, а нового
+    # не видно». Папок с программой у человека несколько.
+    print(f"\n  Версия программы: {APP_VERSION}")
+    print(f"  Запущена из папки: {ROOT}")
     print(f"\n  Дашборд запущен: {url}")
     if network:
         _print_network_hint(port, access_code)
