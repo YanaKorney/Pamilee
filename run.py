@@ -266,8 +266,15 @@ def cmd_start(args: argparse.Namespace) -> int:
     with db.session(cfg.db_path) as conn:
         last, _ = db.data_range(conn)
         fresh = _data_is_fresh(conn)
+        incomplete = _article_breakdown_missing(conn)
 
-    if not last:
+    if last and incomplete:
+        _print("В собранных данных нет разбивки по товарам.")
+        _print("Без неё не выбрать товар в сводке по дням, не увидеть")
+        _print("артикулы внутри кампании и не замерить эффект правок.")
+        print()
+        need_collect = _ask("Собрать статистику заново?")
+    elif not last:
         _print("Данных ещё нет — заберём их из кабинета.")
         _print("Первый сбор идёт не быстро: WB отдаёт статистику "
                "по три запроса в минуту.")
@@ -302,7 +309,14 @@ def cmd_start(args: argparse.Namespace) -> int:
 
 
 def _data_is_fresh(conn, hours: int = 20) -> bool:
-    """Свежие ли данные — чтобы не гонять долгий сбор без нужды."""
+    """Свежие ли данные — чтобы не гонять долгий сбор без нужды.
+
+    Свежесть считается не только по времени. Данные, собранные час назад,
+    но без разбивки по товарам, бесполезны там, где эта разбивка нужна:
+    не выбрать товар в сводке, не увидеть артикулы внутри кампании, не
+    замерить эффект правки. Называть их свежими и пропускать сбор —
+    значит оставить человека с неполными данными и без подсказки.
+    """
     last = db.last_collect(conn)
     if not last or not last["finished_at"]:
         return False
@@ -310,7 +324,21 @@ def _data_is_fresh(conn, hours: int = 20) -> bool:
         finished = datetime.fromisoformat(str(last["finished_at"]))
     except ValueError:
         return False
-    return (datetime.now() - finished) < timedelta(hours=hours)
+    if (datetime.now() - finished) >= timedelta(hours=hours):
+        return False
+    return not _article_breakdown_missing(conn)
+
+
+def _article_breakdown_missing(conn) -> bool:
+    """Статистика по дням есть, а по товарам — нет.
+
+    Так выглядят данные, собранные до того, как починили чтение поля
+    «nms»: дни сохранились, товары потерялись.
+    """
+    days = conn.execute("SELECT COUNT(*) FROM campaign_daily").fetchone()[0]
+    articles = conn.execute(
+        "SELECT COUNT(*) FROM campaign_nm_daily").fetchone()[0]
+    return bool(days) and not articles
 
 
 def _start_demo(cfg) -> int:

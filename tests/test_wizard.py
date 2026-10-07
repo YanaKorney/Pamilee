@@ -381,3 +381,123 @@ class TestCrashReport(unittest.TestCase):
             self.assertIn("WinError 10013", out)
             self.assertNotIn("Traceback", out)
             self.assertTrue((Path(tmp) / "ошибка.txt").exists())
+
+
+class TestFreshnessMeansUsable(unittest.TestCase):
+    """«Данные свежие» решалось по времени последнего сбора. Данные,
+    собранные час назад, но без разбивки по товарам, бесполезны там, где
+    эта разбивка нужна: не выбрать товар в сводке, не увидеть артикулы
+    внутри кампании, не замерить эффект правки. Мастер объявлял их
+    свежими и молча пропускал сбор."""
+
+    def setUp(self):
+        import tempfile
+        from datetime import datetime
+        from wbads import db
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.conn = db.init_db(Path(self.tmp.name) / "t.db")
+        self.addCleanup(self.conn.close)
+        now = datetime.now().isoformat(timespec="seconds")
+        log_id = db.start_collect(self.conn, "wb-api", now,
+                                  "2026-10-01", "2026-10-07")
+        db.finish_collect(self.conn, log_id, now, 1, 1)
+        self.conn.commit()
+
+    def add_day(self, *, with_articles: bool):
+        self.conn.execute(
+            "INSERT OR REPLACE INTO campaign_daily (advert_id, date, views,"
+            " clicks, atbs, orders, shks, spend, revenue, collected_at)"
+            " VALUES (1,'2026-10-01',100,5,1,1,1,50.0,500.0,'now')")
+        if with_articles:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO campaign_nm_daily (advert_id, date,"
+                " nm_id, name, views, clicks, atbs, orders, shks, spend,"
+                " revenue) VALUES (1,'2026-10-01',777,'Товар',100,5,1,1,1,"
+                "50.0,500.0)")
+        self.conn.commit()
+
+    def test_days_without_articles_are_not_fresh(self):
+        self.add_day(with_articles=False)
+        self.assertTrue(cli._article_breakdown_missing(self.conn))
+        self.assertFalse(cli._data_is_fresh(self.conn),
+                         "неполные данные нельзя объявлять свежими")
+
+    def test_complete_data_stays_fresh(self):
+        self.add_day(with_articles=True)
+        self.assertFalse(cli._article_breakdown_missing(self.conn))
+        self.assertTrue(cli._data_is_fresh(self.conn))
+
+    def test_empty_database_is_not_called_incomplete(self):
+        """Пустая база — это «данных ещё нет», а не «разбивки не хватает»."""
+        self.assertFalse(cli._article_breakdown_missing(self.conn))
+
+    def test_old_data_is_stale_even_with_articles(self):
+        from datetime import datetime, timedelta
+        from wbads import db
+
+        self.add_day(with_articles=True)
+        long_ago = (datetime.now() - timedelta(days=3)).isoformat(
+            timespec="seconds")
+        self.conn.execute("UPDATE collect_log SET finished_at = ?", (long_ago,))
+        self.conn.commit()
+        self.assertFalse(cli._data_is_fresh(self.conn))
+
+    def test_wizard_offers_to_recollect_instead_of_skipping(self):
+        """Главное: мастер не должен молча пропустить сбор и открыть
+        дашборд на неполных данных."""
+        import contextlib
+        import io
+        from argparse import Namespace
+        from unittest.mock import patch
+
+        self.add_day(with_articles=False)
+        asked, out = [], io.StringIO()
+
+        def fake_check(args, quiet_tail=False):
+            return 0
+
+        with patch.object(cli, "load_config", lambda: _CfgStub(self.conn)), \
+                patch.object(cli, "cmd_check", fake_check), \
+                patch.object(cli, "_offer_previous_install", lambda: False), \
+                patch.object(cli, "_offer_journal_import", lambda: None), \
+                patch.object(cli, "cmd_serve", lambda args: 0), \
+                patch.object(cli, "token_from_template", lambda: ""), \
+                patch.object(cli.db, "session", _session_stub(self.conn)), \
+                patch.object(cli, "_ask", lambda q: asked.append(q) or False), \
+                contextlib.redirect_stdout(out):
+            cli.cmd_start(Namespace(days=30))
+
+        text = out.getvalue()
+        self.assertIn("нет разбивки по товарам", text)
+        self.assertTrue(any("Собрать статистику заново" in q for q in asked),
+                        f"мастер обязан предложить сбор, а спросил: {asked}")
+        self.assertNotIn("Данные свежие", text)
+
+
+class _CfgStub:
+    """Настройки с готовым токеном и уже открытой базой."""
+
+    def __init__(self, conn):
+        self.conn = conn
+        self.token = "t" * 100
+        self.db_path = Path("не используется")
+        self.port = 8000
+        self.ca_bundle = ""
+        self.order_price_field = "price_with_disc"
+
+    @property
+    def has_token(self):
+        return True
+
+
+def _session_stub(conn):
+    """db.session, которая отдаёт уже открытое соединение теста."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def session(_path):
+        yield conn
+
+    return session
