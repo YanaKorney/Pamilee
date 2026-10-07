@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
-from . import analytics, changes, db
+from . import analytics, changes, daily, db
 from .config import Config, Thresholds
 from .metrics import parse_date
 
@@ -237,45 +237,36 @@ def _sorted_changes(items: list[dict[str, Any]], order: str) -> list[dict[str, A
     return items
 
 
-def handle_change_marks(conn: sqlite3.Connection, cfg: Config,
-                        query: dict[str, list[str]]) -> dict[str, Any]:
-    """Дни с правками для меток на графиках аналитики.
+def handle_daily(conn: sqlite3.Connection, cfg: Config,
+                 query: dict[str, list[str]]) -> dict[str, Any]:
+    """Сводка по дням: по всему кабинету или по одному артикулу."""
+    date_from, date_to = _period(conn, query)
+    nm_raw = (query.get("nm_id") or [""])[0]
+    nm_id = int(nm_raw) if nm_raw.isdigit() else None
 
-    Отдельно от журнала и нарочно без замера: графикам нужны только даты
-    и текст подсказки, а считать для этого эффект по каждой записи значило
-    бы тормозить каждую перерисовку дашборда.
-    """
-    date_from = (query.get("from") or [""])[0]
-    date_to = (query.get("to") or [""])[0]
-    nm_id = (query.get("nm_id") or [""])[0]
-    advert_id = (query.get("advert_id") or [""])[0]
+    table = daily.daily_table(conn, date_from, date_to, nm_id)
+    names = _article_names(conn)
+    table["articles"] = daily.articles(conn, date_from, date_to, names)
+    table["nm_name"] = names.get(nm_id, "") if nm_id else ""
+    return table
 
-    where, params = [], []
-    if date_from:
-        where.append("date >= ?")
-        params.append(date_from)
-    if date_to:
-        where.append("date <= ?")
-        params.append(date_to)
-    if nm_id.isdigit():
-        where.append("nm_id = ?")
-        params.append(int(nm_id))
-    if advert_id.isdigit():
-        where.append("(advert_id = ? OR nm_id IN "
-                     "(SELECT DISTINCT nm_id FROM campaign_nm_daily"
-                     "  WHERE advert_id = ?))")
-        params.extend([int(advert_id), int(advert_id)])
 
-    sql = "SELECT date, text FROM changes"
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY date, id"
+def handle_daily_csv(conn: sqlite3.Connection, cfg: Config,
+                     query: dict[str, list[str]]) -> tuple[str, str]:
+    """Та же таблица файлом — её открывают в Excel и доделывают руками."""
+    date_from, date_to = _period(conn, query)
+    nm_raw = (query.get("nm_id") or [""])[0]
+    nm_id = int(nm_raw) if nm_raw.isdigit() else None
 
-    by_day: dict[str, list[str]] = {}
-    for row in conn.execute(sql, params):
-        by_day.setdefault(str(row["date"])[:10], []).append(str(row["text"]))
-    return {"marks": [{"date": day, "texts": texts}
-                      for day, texts in sorted(by_day.items())]}
+    table = daily.daily_table(conn, date_from, date_to, nm_id)
+    if nm_id:
+        name = _article_names(conn).get(nm_id, "")
+        title = f"Артикул {nm_id}" + (f" · {name}" if name else "")
+        filename = f"reklama-{nm_id}-{date_from}_{date_to}.csv"
+    else:
+        title = "Весь кабинет"
+        filename = f"reklama-{date_from}_{date_to}.csv"
+    return daily.to_csv(table, f"{title} · {date_from} — {date_to}"), filename
 
 
 def handle_articles(conn: sqlite3.Connection, cfg: Config,
@@ -321,8 +312,8 @@ ROUTES: dict[str, Callable] = {
     "/api/report": handle_report,
     "/api/campaign": handle_campaign,
     "/api/meta": handle_meta,
+    "/api/daily": handle_daily,
     "/api/changes": handle_changes,
-    "/api/changes/marks": handle_change_marks,
     "/api/articles": handle_articles,
 }
 
@@ -571,9 +562,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            if route in ("/api/export.csv", "/api/changes.csv"):
-                maker = (handle_changes_csv if route == "/api/changes.csv"
-                         else handle_export)
+            if route in ("/api/export.csv", "/api/changes.csv",
+                         "/api/daily.csv"):
+                maker = {"/api/changes.csv": handle_changes_csv,
+                         "/api/daily.csv": handle_daily_csv}.get(
+                             route, handle_export)
                 with db.session(self.config.db_path) as conn:
                     content, filename = maker(conn, self.config, query)
                 body = content.encode("utf-8-sig")  # BOM — чтобы Excel не ломал кириллицу

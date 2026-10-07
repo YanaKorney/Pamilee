@@ -39,6 +39,7 @@
 
   <nav class="tabs" id="tabs" role="tablist" aria-label="Разделы">
     <button role="tab" data-view="analytics" aria-selected="true">Аналитика</button>
+    <button role="tab" data-view="daily" aria-selected="false">Сводка по дням</button>
     <button role="tab" data-view="journal" aria-selected="false">Журнал изменений</button>
   </nav>
 
@@ -94,6 +95,41 @@
 
   <p class="foot" id="foot"></p>
   </div><!-- /view-analytics -->
+
+  <div id="view-daily" hidden>
+
+    <section class="card">
+      <div class="dhead">
+        <div>
+          <h2 id="daily-title">Сводка по дням</h2>
+          <p class="hint" id="daily-sub">Показатели по строкам, дни по колонкам.</p>
+        </div>
+        <a class="btn" id="daily-export" href="/api/daily.csv" download>
+          Выгрузить в CSV</a>
+      </div>
+
+      <div class="dfilter">
+        <div class="seg" id="daily-seg" role="group" aria-label="Период">
+          <button data-days="7" aria-pressed="true">7 дней</button>
+          <button data-days="14" aria-pressed="false">14 дней</button>
+          <button data-days="30" aria-pressed="false">30 дней</button>
+        </div>
+        <label><span class="cap">с</span>
+          <input type="date" id="daily-from"></label>
+        <label><span class="cap">по</span>
+          <input type="date" id="daily-to"></label>
+        <label><span class="cap">Товар</span>
+          <select id="daily-nm"></select>
+        </label>
+      </div>
+
+      <div class="dgrid-scroll">
+        <table class="dgrid" id="daily-table"></table>
+      </div>
+      <p class="jempty" id="daily-empty" hidden></p>
+    </section>
+
+  </div><!-- /view-daily -->
 
   <div id="view-journal" hidden>
 

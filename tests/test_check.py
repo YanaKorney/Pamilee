@@ -1351,50 +1351,6 @@ class TestJournalPagingAndSorting(unittest.TestCase):
         self.assertTrue(data["changes"][0]["effect"].get("series"))
 
 
-class TestMarksForCharts(unittest.TestCase):
-    """Метки на графиках — это слой пометок. Считать для них эффект по
-    каждой записи значило бы тормозить каждую перерисовку дашборда."""
-
-    def setUp(self):
-        import tempfile
-        from wbads import changes, db
-
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.conn = db.init_db(Path(self.tmp.name) / "t.db")
-        self.addCleanup(self.conn.close)
-        changes.add(self.conn, "2026-09-10", "первая", nm_id=777)
-        changes.add(self.conn, "2026-09-10", "вторая", nm_id=777)
-        changes.add(self.conn, "2026-09-20", "третья", nm_id=888)
-
-    def call(self, **params):
-        from wbads.api import handle_change_marks
-        from wbads.config import Config
-
-        return handle_change_marks(self.conn, Config(),
-                                   {k: [str(v)] for k, v in params.items()})
-
-    def test_changes_of_one_day_come_together(self):
-        marks = self.call()["marks"]
-        self.assertEqual(len(marks), 2, "один день — одна метка")
-        first = [m for m in marks if m["date"] == "2026-09-10"][0]
-        self.assertEqual(first["texts"], ["первая", "вторая"])
-
-    def test_period_is_respected(self):
-        marks = self.call(**{"from": "2026-09-15", "to": "2026-09-30"})["marks"]
-        self.assertEqual([m["date"] for m in marks], ["2026-09-20"])
-
-    def test_filtering_by_article_leaves_only_its_own(self):
-        """Правка по чужому товару к этим графикам отношения не имеет."""
-        marks = self.call(nm_id=888)["marks"]
-        self.assertEqual([m["date"] for m in marks], ["2026-09-20"])
-
-    def test_marks_carry_no_measurement(self):
-        marks = self.call()["marks"]
-        self.assertNotIn("effect", marks[0])
-        self.assertEqual(set(marks[0]), {"date", "texts"})
-
-
 class TestDataSurvivesAnUpdate(unittest.TestCase):
     """Данные лежали внутри папки программы, и каждое обновление их
     стирало: человек скачивал новый архив, распаковывал в новую папку —

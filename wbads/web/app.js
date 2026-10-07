@@ -5,7 +5,6 @@
 'use strict';
 
 const state = {
-  marks: [],
   days: 7,
   from: null,
   to: null,
@@ -316,27 +315,12 @@ function query() {
   return p.toString();
 }
 
-/* Метки правок для графиков аналитики. Грузятся отдельно от отчёта: если
-   журнал пуст или запрос не удался, дашборд обязан работать как прежде —
-   пометки это дополнение, а не данные. */
-async function loadMarks(from, to) {
-  try {
-    const p = new URLSearchParams({ from, to });
-    const res = await fetch('/api/changes/marks?' + p.toString());
-    const data = await res.json();
-    state.marks = data.marks || [];
-  } catch (_) {
-    state.marks = [];
-  }
-}
-
 async function load() {
   try {
     const res = await fetch('/api/report?' + query());
     const data = await res.json();
     if (data.error) throw new Error(data.error);
     state.report = data;
-    await loadMarks(data.period.from, data.period.to);
     document.getElementById('error').hidden = true;
     render();
   } catch (err) {
@@ -482,7 +466,7 @@ function renderConvCharts(r) {
 
     requestAnimationFrame(() => {
       lineChart(chartHost, {
-        dates, height: 165, marks: state.marks,
+        dates, height: 165,
         series: [{ name: step.label, values, color, fill: true }],
         format: (v) => pct(v, 2),
         axisFormat: (v) => v.toFixed(digits).replace('.', ',') + '%',
@@ -609,7 +593,6 @@ function renderCharts(r) {
       { name: 'Выручка', values: r.series.map((p) => p.revenue), color: c1, fill: true },
       { name: 'Расход', values: r.series.map((p) => p.spend), color: c2, fill: true },
     ],
-    marks: state.marks,
     format: (v) => money(v),
     axisFormat: (v) => (v >= 1000 ? Math.round(v / 1000) + 'к' : num(v)),
     ariaLabel: 'Расход и выручка с рекламы по дням, рубли',
@@ -635,7 +618,7 @@ function renderCharts(r) {
     `<span><i class="swatch" style="background:${cssVar('--border-strong')}"></i> Цель</span>`;
 
   lineChart(document.getElementById('chart-drr'), {
-    dates, series: drrSeries, marks: state.marks,
+    dates, series: drrSeries,
     format: (v) => pct(v),
     axisFormat: (v) => v.toFixed(0) + '%',
     target: { value: r.thresholds.target_drr, label: `цель ${pct(r.thresholds.target_drr, 0)}` },
@@ -759,24 +742,6 @@ function cell(value, cls = '', deltaPct = null) {
   return `<div class="cell ${cls}">${value}${change}</div>`;
 }
 
-/* Метки этой кампании: общие по кабинету здесь не годятся — правка по
-   чужому товару к её графикам отношения не имеет. Подгружаются после
-   отрисовки и дорисовываются поверх, чтобы не задерживать раскрытие. */
-async function loadCampaignMarks(advertId, hosts, specs) {
-  try {
-    const period = state.report.period;
-    const p = new URLSearchParams({
-      from: period.from, to: period.to, advert_id: String(advertId),
-    });
-    const res = await fetch('/api/changes/marks?' + p.toString());
-    const marks = (await res.json()).marks || [];
-    if (!marks.length) return;
-    hosts.forEach((host, i) => {
-      if (host.isConnected) lineChart(host, { ...specs[i], marks });
-    });
-  } catch (_) { /* пометки необязательны: график и без них на месте */ }
-}
-
 function fillBody(body, c, r) {
   const m = c.metrics;
   const target = r.thresholds.target_drr;
@@ -885,13 +850,8 @@ function fillBody(body, c, r) {
   });
 
   /* размеры контейнеров известны только после вставки в документ */
-  const drawn = [];
-  const draw = (host, spec) => {
-    drawn.push([host, spec]);
-    lineChart(host, spec);
-  };
   requestAnimationFrame(() => {
-    draw(moneyHost, {
+    lineChart(moneyHost, {
       dates, height: 170,
       series: [
         { name: 'Выручка', values: c.series.map((p) => p.revenue), color: c1, fill: true },
@@ -901,7 +861,7 @@ function fillBody(body, c, r) {
       axisFormat: (v) => (v >= 1000 ? Math.round(v / 1000) + 'к' : num(v)),
       ariaLabel: 'Расход и выручка кампании по дням',
     });
-    draw(drrHost, {
+    lineChart(drrHost, {
       dates, height: 170,
       series: [{
         name: 'ДРР', color: c1, fill: true,
@@ -912,7 +872,7 @@ function fillBody(body, c, r) {
       target: { value: r.thresholds.target_drr, label: 'цель' },
       ariaLabel: 'ДРР кампании по дням',
     });
-    draw(cpcHost, {
+    lineChart(cpcHost, {
       dates, height: 170,
       series: [{ name: 'Цена клика', values: c.series.map((p) => p.cpc), color: c2, fill: true }],
       format: (v) => money(v, 2),
@@ -920,7 +880,7 @@ function fillBody(body, c, r) {
       ariaLabel: 'Цена клика по дням',
     });
     convHosts.forEach(({ step, host }) => {
-      draw(host, {
+      lineChart(host, {
         dates, height: 170,
         series: [{ name: step.label, values: c.series.map((p) => p[step.key]),
                    color: c1, fill: true }],
@@ -932,8 +892,6 @@ function fillBody(body, c, r) {
         ariaLabel: `${step.label} кампании по дням`,
       });
     });
-    loadCampaignMarks(c.advert_id, drawn.map((d) => d[0]),
-                      drawn.map((d) => d[1]));
   });
 
   /* артикулы внутри кампании */
@@ -1101,9 +1059,12 @@ function switchView(view) {
   document.querySelectorAll('#tabs button').forEach((b) =>
     b.setAttribute('aria-selected', String(b.dataset.view === view)));
   document.getElementById('view-analytics').hidden = view !== 'analytics';
+  document.getElementById('view-daily').hidden = view !== 'daily';
   document.getElementById('view-journal').hidden = view !== 'journal';
+  if (view === 'daily') loadDaily();
   /* Период, цель ДРР и выгрузка относятся к аналитике. В журнале своё окно
      сравнения, и две пары настроек периода рядом только путают. */
+  /* У сводки и журнала свои периоды, две пары настроек рядом путают. */
   document.getElementById('analytics-controls').hidden = view !== 'analytics';
   if (view === 'journal') {
     if (!journal.loaded) loadDirectories();
@@ -1668,3 +1629,140 @@ document.getElementById('jf-more').addEventListener('click', () => {
 document.getElementById('ch-date').value = new Date().toISOString().slice(0, 10);
 
 load();
+
+/* ── сводка по дням ───────────────────────────────────────────────────────
+
+   Строки — показатели, колонки — дни. Привычная для аналитики форма
+   обратная, строка на день, но менеджер читает свои цифры именно так:
+   движением глаза вдоль строки «ДРР» по дням. Переучивать здесь нечему. */
+
+const daily = { days: 7, from: null, to: null, nm: null, table: null };
+
+function dailyQuery() {
+  const p = new URLSearchParams();
+  if (daily.from && daily.to) { p.set('from', daily.from); p.set('to', daily.to); }
+  else p.set('days', String(daily.days));
+  if (daily.nm) p.set('nm_id', String(daily.nm));
+  return p.toString();
+}
+
+async function loadDaily() {
+  const host = document.getElementById('daily-table');
+  const empty = document.getElementById('daily-empty');
+  try {
+    const res = await fetch('/api/daily?' + dailyQuery());
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    daily.table = data;
+    document.getElementById('daily-export').href = '/api/daily.csv?' + dailyQuery();
+    renderDailyFilters(data);
+    renderDaily(data);
+    empty.hidden = data.has_data;
+    if (!data.has_data) {
+      empty.textContent = daily.nm
+        ? 'У этого товара за выбранный период открутки не было.'
+        : 'За выбранный период данных нет. Соберите статистику из кабинета ' +
+          'или выберите другой период.';
+    }
+  } catch (err) {
+    host.innerHTML = '';
+    empty.hidden = false;
+    empty.textContent = 'Не удалось загрузить сводку: ' + err.message;
+  }
+}
+
+function renderDailyFilters(data) {
+  document.getElementById('daily-from').value = data.period.from;
+  document.getElementById('daily-to').value = data.period.to;
+
+  /* Список товаров — по обороту, а не по алфавиту: человек помнит товар
+     по деньгам, а не по месту в списке. */
+  const select = document.getElementById('daily-nm');
+  const chosen = daily.nm ? String(daily.nm) : '';
+  select.innerHTML = '';
+  const all = document.createElement('option');
+  all.value = '';
+  all.textContent = 'Весь кабинет';
+  select.appendChild(all);
+  (data.articles || []).forEach((a) => {
+    const option = document.createElement('option');
+    option.value = String(a.nm_id);
+    const name = a.name ? `${a.name} · ` : '';
+    option.textContent = `${name}${a.nm_id} — ${money(a.spend)}`;
+    select.appendChild(option);
+  });
+  select.value = chosen;
+
+  const title = document.getElementById('daily-title');
+  const sub = document.getElementById('daily-sub');
+  if (daily.nm) {
+    title.textContent = data.nm_name
+      ? `Сводка по дням · ${data.nm_name}`
+      : `Сводка по дням · артикул ${daily.nm}`;
+    sub.textContent = `Артикул ${daily.nm}. Показатели по строкам, дни по колонкам.`;
+  } else {
+    title.textContent = 'Сводка по дням · весь кабинет';
+    sub.textContent = 'Все кампании вместе. Показатели по строкам, дни по колонкам.';
+  }
+}
+
+function dailyValue(row, value) {
+  if (!value) return '—';
+  if (row.unit === '₽') return money(value, Math.abs(value) < 100 ? 2 : 0);
+  if (row.unit === '%') return pct(value, Math.abs(value) < 10 ? 2 : 1);
+  return num(value);
+}
+
+function renderDaily(data) {
+  const table = document.getElementById('daily-table');
+  table.innerHTML = '';
+
+  const head = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  headRow.appendChild(el('th', 'm-name', 'Дата'));
+  data.dates.forEach((d) => headRow.appendChild(el('th', '', dayLabel(d))));
+  headRow.appendChild(el('th', 'm-total', 'За период'));
+  head.appendChild(headRow);
+  table.appendChild(head);
+
+  const body = document.createElement('tbody');
+  data.rows.forEach((row) => {
+    const tr = document.createElement('tr');
+    if (row.is_ratio) tr.className = 'ratio';
+    tr.appendChild(el('td', 'm-name', escapeHtml(row.title)));
+    row.days.forEach((value) => {
+      const cell = el('td', value ? '' : 'm-zero', dailyValue(row, value));
+      tr.appendChild(cell);
+    });
+    tr.appendChild(el('td', 'm-total', dailyValue(row, row.total)));
+    body.appendChild(tr);
+  });
+  table.appendChild(body);
+}
+
+document.getElementById('daily-seg').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-days]');
+  if (!btn) return;
+  daily.days = Number(btn.dataset.days);
+  daily.from = daily.to = null;
+  document.querySelectorAll('#daily-seg button').forEach((b) =>
+    b.setAttribute('aria-pressed', String(b === btn)));
+  loadDaily();
+});
+
+['daily-from', 'daily-to'].forEach((id) => {
+  document.getElementById(id).addEventListener('change', () => {
+    const from = document.getElementById('daily-from').value;
+    const to = document.getElementById('daily-to').value;
+    if (!from || !to) return;
+    daily.from = from; daily.to = to;
+    document.querySelectorAll('#daily-seg button').forEach((b) =>
+      b.setAttribute('aria-pressed', 'false'));
+    loadDaily();
+  });
+});
+
+document.getElementById('daily-nm').addEventListener('change', (e) => {
+  daily.nm = e.target.value ? Number(e.target.value) : null;
+  loadDaily();
+});
