@@ -1229,6 +1229,10 @@ def cmd_data(args: argparse.Namespace) -> int:
         _print(f"Записей в журнале изменений: {here['changes']}")
         _print(f"Кампаний: {here['campaigns']} · дней статистики: {here['days']}"
                f" · заказов: {here['orders']}")
+        _print(f"Товаров с разбивкой по артикулам: {here['articles']}")
+        if here["days"] and not here["articles"]:
+            _print("  Без неё не выбрать товар в сводке и не замерить правки")
+            _print("  в журнале. Соберите статистику заново: run.py collect")
         if here.get("last_day"):
             _print(f"Последний день статистики: {here['last_day']}")
     else:

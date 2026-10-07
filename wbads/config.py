@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # поэтому версия и папка видны и в окне, и в дашборде.
 #
 # Дата сборки, а не номер: человеку она говорит больше.
-APP_VERSION = "2026-10-07"
+APP_VERSION = "2026-10-08"
 
 # Данные живут ОТДЕЛЬНО от программы — в домашней папке пользователя.
 #
@@ -454,6 +454,7 @@ def describe_database(path: Path) -> dict[str, object] | None:
         for key, sql in (
             ("changes", "SELECT COUNT(*) FROM changes"),
             ("days", "SELECT COUNT(DISTINCT date) FROM campaign_daily"),
+            ("articles", "SELECT COUNT(DISTINCT nm_id) FROM campaign_nm_daily"),
             ("campaigns", "SELECT COUNT(*) FROM campaigns"),
             ("orders", "SELECT COUNT(*) FROM orders_raw"),
         ):

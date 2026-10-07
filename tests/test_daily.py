@@ -192,3 +192,70 @@ class TestExport(DailyCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestArticleBreakdownFromWB(unittest.TestCase):
+    """Разбивка по артикулам приходит в поле «nms». В старом методе WB
+    оно называлось «nm», и при переходе на v3 это осталось незамеченным:
+    ответ приходил, дни сохранялись, а товары молча терялись. Видно было
+    только по следствиям — пустой список товаров в сводке, пустые
+    «артикулы внутри кампании» и «не с чем сравнивать» в журнале."""
+
+    # Форма ответа GET /adv/v3/fullstats — как в спецификации WB.
+    V3 = {
+        "advertId": 22161678,
+        "days": [{
+            "date": "2026-10-01T00:00:00Z",
+            "views": 784, "clicks": 75, "atbs": 2, "orders": 1, "shks": 1,
+            "sum": 378.49, "sum_price": 5000.0,
+            "apps": [
+                {"appType": 1, "views": 300, "clicks": 30, "atbs": 1,
+                 "orders": 0, "shks": 0, "sum": 150.0, "sum_price": 0.0,
+                 "nms": [{"nmId": 221725278, "name": "постер 2", "views": 300,
+                          "clicks": 30, "atbs": 1, "orders": 0, "shks": 0,
+                          "sum": 150.0, "sum_price": 0.0}]},
+                {"appType": 32, "views": 484, "clicks": 45, "atbs": 1,
+                 "orders": 1, "shks": 1, "sum": 228.49, "sum_price": 5000.0,
+                 "nms": [{"nmId": 221725278, "name": "постер 2", "views": 484,
+                          "clicks": 45, "atbs": 1, "orders": 1, "shks": 1,
+                          "sum": 228.49, "sum_price": 5000.0}]},
+            ],
+        }],
+    }
+
+    def test_articles_are_read_from_the_v3_answer(self):
+        from wbads.collector import normalize_stats
+
+        _, nm_rows = normalize_stats(self.V3, "now")
+        self.assertTrue(nm_rows, "разбивка по артикулам обязана появиться")
+        self.assertEqual(nm_rows[0]["nm_id"], 221725278)
+        self.assertEqual(nm_rows[0]["name"], "постер 2")
+
+    def test_platforms_are_summed_into_one_article(self):
+        """Один товар встречается в нескольких площадках за день."""
+        from wbads.collector import normalize_stats
+
+        _, nm_rows = normalize_stats(self.V3, "now")
+        self.assertEqual(len(nm_rows), 1)
+        self.assertEqual(nm_rows[0]["views"], 784)
+        self.assertAlmostEqual(nm_rows[0]["spend"], 378.49, places=2)
+        self.assertAlmostEqual(nm_rows[0]["revenue"], 5000.0, places=2)
+
+    def test_article_totals_match_the_day(self):
+        """Расхождение здесь означало бы, что сводка по товару и сводка
+        по кабинету показывают разные деньги за один и тот же день."""
+        from wbads.collector import normalize_stats
+
+        days, nm_rows = normalize_stats(self.V3, "now")
+        self.assertAlmostEqual(sum(r["spend"] for r in nm_rows),
+                               days[0]["spend"], places=2)
+        self.assertEqual(sum(r["views"] for r in nm_rows), days[0]["views"])
+
+    def test_old_field_name_still_works(self):
+        """У кого-то в базе могли остаться ответы старого вида."""
+        from wbads.collector import normalize_stats
+
+        old = {"advertId": 1, "days": [{"date": "2026-10-01", "apps": [
+            {"nm": [{"nmId": 555, "views": 10, "clicks": 1, "sum": 5.0}]}]}]}
+        _, nm_rows = normalize_stats(old, "now")
+        self.assertEqual(nm_rows[0]["nm_id"], 555)

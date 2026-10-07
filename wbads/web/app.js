@@ -1669,6 +1669,19 @@ async function loadDaily() {
         : 'За выбранный период данных нет. Соберите статистику из кабинета ' +
           'или выберите другой период.';
     }
+    /* Пустой список товаров выглядит как поломка выбора, хотя дело в
+       данных. Молчать нельзя: человек будет щёлкать по полю и считать,
+       что оно не работает. */
+    const noArticles = !(data.articles || []).length;
+    document.getElementById('daily-nm').disabled = noArticles;
+    const note = document.getElementById('daily-nm-note');
+    note.hidden = !noArticles;
+    if (noArticles) {
+      note.textContent = data.has_data
+        ? 'Разбивки по товарам за этот период в базе нет — WB не отдал её ' +
+          'при сборе. Соберите статистику заново.'
+        : 'Товары появятся после сбора статистики.';
+    }
   } catch (err) {
     host.innerHTML = '';
     empty.hidden = false;
