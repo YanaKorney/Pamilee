@@ -15,6 +15,8 @@ from . import db
 from .rules import BID_TYPE_NAMES, STATUS_NAMES, TYPE_NAMES, plural
 from .wb_client import (
     MAX_IDS_PER_STATS_CALL,
+    MAX_PAIRS_PER_SEARCH_CALL,
+    MAX_SEARCH_REQUESTS,
     STATS_GIVE_UP,
     WBAdvertClient,
     WBError,
@@ -414,8 +416,14 @@ def collect(conn: sqlite3.Connection, token: str, days: int = 30,
         search_rows: list[dict[str, Any]] = []
         pairs = search_pairs(nm_all)
         if pairs:
+            # Сколько ждать — говорим заранее: молчащее окно на пять
+            # минут человек закрывает, решив, что программа повисла.
+            asks = min(MAX_SEARCH_REQUESTS,
+                       max(1, -(-len(pairs) // MAX_PAIRS_PER_SEARCH_CALL)))
             _log(on_progress, f"Разбивка по зонам: спрашиваю поиск "
                               f"по {len(pairs)} парам «кампания + товар».")
+            _log(on_progress, f"Это {asks} запросов по 7 секунд — "
+                              f"примерно {max(1, round(asks * 7 / 60))} мин.")
             try:
                 search_rows = normalize_search_stats(
                     client.search_stats(pairs, date_from, date_to,
@@ -424,9 +432,17 @@ def collect(conn: sqlite3.Connection, token: str, days: int = 30,
                 conn.commit()
                 _log(on_progress, f"Показы в поиске собраны: "
                                   f"{len(search_rows)} строк.")
-            except WBError as exc:
-                # Без этой разбивки сводка работает, просто без зон.
+            except Exception as exc:
+                # Без этой разбивки сводка работает, просто без зон, —
+                # и ронять из-за неё весь сбор нельзя ни по какой причине.
+                # Ловим не только отказы WB: обрыв соединения приходит
+                # сюда ошибкой самого Python, и однажды он унёс сорок
+                # минут уже собранной статистики вместе с заказами.
+                conn.rollback()
                 _log(on_progress, f"Разбивку по зонам получить не вышло: {exc}")
+                _log(on_progress, "Остальное сохранено. Зоны появятся после "
+                                  "следующего сбора.")
+                search_rows = []
 
         # Заказы нужны для общего ДРР. Категории «Статистика» может не быть —
         # тогда сбор рекламы всё равно считается успешным.

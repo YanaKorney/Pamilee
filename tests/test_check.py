@@ -1704,3 +1704,221 @@ class TestVersionIsVisible(unittest.TestCase):
         app_js = (ROOT / "wbads" / "web" / "app.js").read_text(encoding="utf-8")
         self.assertIn("версия программы", app_js)
         self.assertIn("meta.program_folder", app_js)
+
+
+class TestTruncatedAnswerIsRetried(unittest.TestCase):
+    """Ответ WB может оборваться на середине: соединение рвётся после
+    заголовков, и Python бросает IncompleteRead прямо из чтения тела.
+    Эта ветка не была перехвачена ни одной, и обрыв на сороковой минуте
+    уносил весь сбор — вместе со статистикой и заказами, которые уже
+    лежали в базе и ни при чём.
+    """
+
+    class _Response:
+        """Ответ, который рвётся или отдаётся — по заданию теста."""
+
+        def __init__(self, raises: Exception | None, body: bytes = b"{}"):
+            self.raises = raises
+            self.body = body
+
+        def read(self):
+            if self.raises:
+                raise self.raises
+            return self.body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def test_second_attempt_returns_the_data(self):
+        import http.client
+        from unittest.mock import patch as p2
+        from wbads.wb_client import WBAdvertClient
+
+        attempts = []
+
+        def open_(*args, **kwargs):
+            attempts.append(1)
+            if len(attempts) == 1:
+                return self._Response(http.client.IncompleteRead(b"x" * 7941))
+            return self._Response(None, b'{"items": [1]}')
+
+        client = WBAdvertClient("token", max_retries=3)
+        said: list[str] = []
+        with p2("urllib.request.OpenerDirector.open", open_), \
+                p2("time.sleep", lambda *_: None):
+            data = client._request("POST", "/adv/v1/normquery/stats",
+                                   payload={}, on_progress=said.append)
+
+        self.assertEqual(data, {"items": [1]})
+        self.assertEqual(len(attempts), 2, "обрыв обязан привести к повтору")
+        self.assertTrue(any("оборвался" in line for line in said),
+                        f"про повтор надо сказать вслух: {said}")
+
+    def test_persistent_truncation_is_explained_in_words(self):
+        """«IncompleteRead(7941 bytes read)» человеку не говорит ничего и
+        читается как поломка программы, хотя это обрыв связи."""
+        import http.client
+        from unittest.mock import patch as p2
+        from wbads.wb_client import WBAdvertClient, WBError
+
+        def open_(*args, **kwargs):
+            return self._Response(http.client.IncompleteRead(b"x" * 10))
+
+        client = WBAdvertClient("token", max_retries=2)
+        with p2("urllib.request.OpenerDirector.open", open_), \
+                p2("time.sleep", lambda *_: None):
+            with self.assertRaises(WBError) as caught:
+                client._request("GET", "/adv/v1/balance")
+
+        text = str(caught.exception)
+        self.assertIn("оборвалась на середине ответа", text)
+        self.assertIn("Запустите сбор ещё раз", text)
+        self.assertEqual(caught.exception.kind, "network")
+
+
+class TestSearchBatchesSurviveOneFailure(unittest.TestCase):
+    """Зоны показа собираются сороковкой запросов. Один сорвавшийся
+    запрос не причина терять остальные тридцать девять, но и сохранять
+    зоны по частям нельзя: «в поиске» вышло бы меньше настоящего."""
+
+    def client(self, answer):
+        from wbads.wb_client import WBAdvertClient
+
+        client = WBAdvertClient.__new__(WBAdvertClient)
+        client.token = "t"
+        client.base_url = "x"
+        client.timeout = 1
+        client.max_retries = 1
+        client.ca_bundle = ""
+        client.used_fallback_bundle = False
+        client._last_call = 0.0
+        client._wait_turn = lambda on_progress=None, cooldown=0: None
+        client._request = answer
+        return client
+
+    def pairs(self, count):
+        return [(1, 1000 + i) for i in range(count)]
+
+    def test_failed_batch_gets_a_second_approach(self):
+        from wbads.wb_client import WBError
+
+        calls = {"n": 0}
+
+        def answer(method, path, payload=None, on_progress=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise WBError("Сервис WB не отвечает (502)", 502)
+            return {"items": [{"advertId": 1, "nmId": 1000,
+                               "date": "2026-10-01", "views": 5}]}
+
+        said: list[str] = []
+        rows = self.client(answer).search_stats(
+            self.pairs(250), "2026-10-01", "2026-10-07",
+            on_progress=said.append)
+
+        self.assertEqual(calls["n"], 5,
+                         "три пачки плюс две половины сорвавшейся")
+        self.assertEqual(len(rows), 4, "остальные пачки обязаны сохраниться")
+        self.assertTrue(any("вернусь к ней" in line for line in said),
+                        f"про отложенную пачку надо сказать: {said}")
+
+    def test_the_second_approach_asks_in_halves(self):
+        """Обрыв мог случиться просто от размера ответа: на сотню пар он
+        вдвое больше, чем на пятьдесят."""
+        from wbads.wb_client import WBError
+
+        sizes: list[int] = []
+
+        def answer(method, path, payload=None, on_progress=None):
+            sizes.append(len(payload["items"]))
+            if len(sizes) == 1:
+                raise WBError("Сервис WB не отвечает (502)", 502)
+            return {"items": []}
+
+        self.client(answer).search_stats(self.pairs(100), "2026-10-01",
+                                         "2026-10-07")
+        self.assertEqual(sizes, [100, 50, 50])
+
+    def test_batch_failing_twice_cancels_the_zones(self):
+        """Неполные зоны хуже отсутствующих: решение принимается по
+        числу, которого нет."""
+        from wbads.wb_client import WBError
+
+        def answer(method, path, payload=None, on_progress=None):
+            raise WBError("Сервис WB не отвечает (502)", 502)
+
+        with self.assertRaises(WBError) as caught:
+            self.client(answer).search_stats(self.pairs(150), "2026-10-01",
+                                             "2026-10-07")
+        self.assertIn("по частям нельзя", str(caught.exception))
+
+    def test_campaigns_without_clusters_do_not_count_as_failures(self):
+        """400 и 404 здесь значат «кластеров нет», а не сбой."""
+        from wbads.wb_client import WBError
+
+        def answer(method, path, payload=None, on_progress=None):
+            raise WBError("нет данных", 400)
+
+        self.assertEqual(
+            self.client(answer).search_stats(self.pairs(150), "2026-10-01",
+                                             "2026-10-07"), [])
+
+
+class TestCollectionSurvivesTheZoneStep(unittest.TestCase):
+    """Зоны — дополнение к сводке. Сбой на них не имеет права уносить
+    статистику и заказы: это сорок минут работы и общий ДРР."""
+
+    def test_stats_and_orders_survive_a_crash_in_zones(self):
+        import tempfile
+        from unittest.mock import patch as p2
+        from wbads import collector, db
+
+        orders_called = {"yes": False}
+
+        def orders(self, d, on_progress=None, max_pages=12):
+            orders_called["yes"] = True
+            return []
+
+        day = {"advertId": 1, "days": [{
+            "date": "2026-10-01T00:00:00+03:00", "views": 100, "clicks": 5,
+            "ctr": 5.0, "cpc": 10.0, "sum": 50.0, "atbs": 2, "orders": 1,
+            "shks": 1, "sum_price": 500.0,
+            "apps": [{"appType": 1, "nms": [{
+                "nmId": 777, "name": "Товар", "views": 100, "clicks": 5,
+                "atbs": 2, "orders": 1, "shks": 1, "sum": 50.0,
+                "sum_price": 500.0}]}],
+        }]}
+
+        methods = {
+            "balance": lambda self: {"balance": 0.0, "bonus": 0.0, "net": 1.0},
+            "campaign_index": lambda self: [{"advertId": 1, "type": 8,
+                                             "status": 9}],
+            "campaign_details": lambda self, ids, on_progress=None: [],
+            "fullstats": lambda self, *a, **kw: [day],
+            # Обрыв соединения приходит ошибкой самого Python, а не WB.
+            "search_stats": lambda self, *a, **kw: (_ for _ in ()).throw(
+                __import__("http.client", fromlist=["x"]).IncompleteRead(b"")),
+        }
+
+        said: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = db.init_db(Path(tmp) / "c.db")
+            with p2.multiple("wbads.wb_client.WBAdvertClient", **methods), \
+                    p2.multiple("wbads.wb_client.WBStatisticsClient",
+                                orders=orders):
+                result = collector.collect(conn, "token", days=30,
+                                           on_progress=said.append)
+            days = conn.execute("SELECT COUNT(*) FROM campaign_daily").fetchone()[0]
+            articles = conn.execute(
+                "SELECT COUNT(*) FROM campaign_nm_daily").fetchone()[0]
+            conn.close()
+
+        self.assertEqual(result["rows"], 1, "статистика обязана сохраниться")
+        self.assertEqual(days, 1)
+        self.assertEqual(articles, 1)
+        self.assertTrue(orders_called["yes"], "заказы обязаны собраться")
+        self.assertTrue(any("Зоны появятся после" in line for line in said),
+                        f"человеку надо сказать, что делать: {said}")

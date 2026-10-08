@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import os
 import socket
@@ -379,6 +380,12 @@ def build_ssl_context(ca_bundle: str | None = None) -> ssl.SSLContext:
     return ssl.create_default_context()
 
 
+def _short(exc: Exception, limit: int = 90) -> str:
+    """Короткое имя сбоя для строки прогресса."""
+    text = str(exc).strip() or type(exc).__name__
+    return text[:limit]
+
+
 def _read_error_body(exc: urllib.error.HTTPError, limit: int = 400) -> str:
     """Достаёт объяснение отказа из тела ответа."""
     try:
@@ -531,8 +538,16 @@ class _BaseClient:
                 last_error = exc
                 time.sleep(delay)
                 delay *= 2
-            except (TimeoutError, json.JSONDecodeError) as exc:
+            except (TimeoutError, json.JSONDecodeError,
+                    http.client.HTTPException, OSError) as exc:
+                # Обрыв на середине ответа (IncompleteRead, сброс соединения)
+                # — это не отказ WB, а потерянный пакет. Такое лечится
+                # повтором, и не лечится только одним: падением всего сбора
+                # на сороковой минуте работы. Раньше IncompleteRead не был
+                # перехвачен ни одной ветвью и уносил весь запуск.
                 last_error = exc
+                if on_progress:
+                    on_progress(f"Ответ WB оборвался ({_short(exc)}) — повторяю")
                 time.sleep(delay)
                 delay *= 2
         # Если последним был внятный отказ WB, его и отдаём: у лимита частоты
@@ -542,6 +557,18 @@ class _BaseClient:
             raise WBError(
                 f"{last_error}\nПовторы не помогли — WB отвечает так же.",
                 last_error.status, last_error.kind,
+            )
+        # Техническую причину оставляем, но перед ней говорим словами: имя
+        # вроде IncompleteRead человеку не объясняет ничего и выглядит как
+        # поломка программы, хотя это обрыв связи.
+        if isinstance(last_error, (http.client.HTTPException, TimeoutError)):
+            raise WBError(
+                "Связь с Wildberries оборвалась на середине ответа.\n"
+                "Повторы не помогли. Это бывает при нестабильном интернете "
+                "или когда WB перегружен.\n"
+                "Запустите сбор ещё раз — уже собранное не потеряется.\n"
+                f"Техническая причина: {last_error}",
+                kind="network",
             )
         raise WBError(
             "Не удалось связаться с Wildberries.\n"
@@ -867,7 +894,14 @@ class WBAdvertClient(_MinuteLimited):
                             f"{left} пар доберём в следующий раз.")
             chunks = chunks[:max_requests]
 
-        for index, chunk in enumerate(chunks, start=1):
+        # Пачка, которая не отдалась, получает второй подход в конце
+        # очереди: один сорвавшийся запрос из сорока не причина терять
+        # остальные тридцать девять.
+        pending = list(enumerate(chunks, start=1))
+        retried: set[int] = set()
+        failed: list[str] = []
+        while pending:
+            index, chunk = pending.pop(0)
             self._wait_turn(on_progress, cooldown=SEARCH_COOLDOWN)
             payload = {
                 "from": date_from, "to": date_to,
@@ -883,12 +917,39 @@ class WBAdvertClient(_MinuteLimited):
                     # У части кампаний поисковых кластеров нет вовсе —
                     # это не сбой, просто показывать нечего.
                     continue
-                raise
+                if index not in retried:
+                    retried.add(index)
+                    # Второй подход делаем половинами: ответ, который
+                    # оборвался, мог просто не доехать целиком, и на сотню
+                    # пар он весит вдвое больше, чем на пятьдесят.
+                    half = len(chunk) // 2
+                    parts = ([chunk[:half], chunk[half:]]
+                             if len(chunk) > 20 else [chunk])
+                    pending.extend((index, part) for part in parts if part)
+                    if on_progress:
+                        on_progress(f"Поиск: пачка {index} не отдалась, "
+                                    "вернусь к ней в конце — помельче")
+                    continue
+                failed.append(str(exc))
+                continue
             self._last_call = time.monotonic()
             items = (data or {}).get("items") or []
             result.extend(items)
             if on_progress:
                 on_progress(f"Показы в поиске: пачка {index} из {len(chunks)}")
+
+        # Неполные зоны хуже отсутствующих: «в поиске» вышло бы меньше
+        # настоящего, «прочее» — больше, и человек принял бы решение по
+        # числу, которого нет. Поэтому частичный сбор не сохраняем.
+        if failed:
+            word = _batches(len(failed))
+            raise WBError(
+                f"Поиск отдался не целиком: {len(failed)} {word} из "
+                f"{len(chunks)} не ответили даже со второго раза.\n"
+                "Зоны показа сохранять по частям нельзя — «в поиске» вышло "
+                "бы меньше настоящего. Остальные данные сохранены, зоны "
+                "доберём следующим сбором.\n"
+                f"Причина: {failed[0]}")
         return result
 
 
