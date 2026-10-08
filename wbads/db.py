@@ -63,6 +63,27 @@ CREATE TABLE IF NOT EXISTS campaign_nm_daily (
 );
 CREATE INDEX IF NOT EXISTS idx_nm_date ON campaign_nm_daily(date);
 
+-- Показы в ПОИСКЕ, по дням и артикулам.
+--
+-- Отдельного поля «зона показа» в статистике WB нет. Но есть статистика
+-- по поисковым кластерам: сумма по кластерам за день и есть показы в
+-- поиске. Всё остальное (полки, каталог, карточка) считается остатком от
+-- общего числа показов — и так и называется, без вида точного знания.
+CREATE TABLE IF NOT EXISTS campaign_nm_search_daily (
+    advert_id INTEGER NOT NULL,
+    date      TEXT    NOT NULL,
+    nm_id     INTEGER NOT NULL,
+    views     INTEGER NOT NULL DEFAULT 0,
+    clicks    INTEGER NOT NULL DEFAULT 0,
+    atbs      INTEGER NOT NULL DEFAULT 0,
+    orders    INTEGER NOT NULL DEFAULT 0,
+    shks      INTEGER NOT NULL DEFAULT 0,
+    spend     REAL    NOT NULL DEFAULT 0,
+    PRIMARY KEY (advert_id, date, nm_id)
+);
+CREATE INDEX IF NOT EXISTS idx_search_date ON campaign_nm_search_daily(date);
+CREATE INDEX IF NOT EXISTS idx_search_nm ON campaign_nm_search_daily(nm_id, date);
+
 -- Снимки баланса рекламного кабинета
 CREATE TABLE IF NOT EXISTS balance_snapshots (
     taken_at TEXT PRIMARY KEY,
@@ -194,6 +215,22 @@ def upsert_daily(conn: sqlite3.Connection, rows: Iterable[dict]) -> int:
             views=excluded.views, clicks=excluded.clicks, atbs=excluded.atbs,
             orders=excluded.orders, shks=excluded.shks, spend=excluded.spend,
             revenue=excluded.revenue, collected_at=excluded.collected_at
+    """
+    rows = list(rows)
+    conn.executemany(sql, rows)
+    return len(rows)
+
+
+def upsert_search_daily(conn: sqlite3.Connection, rows: Iterable[dict]) -> int:
+    """Показы в поиске по дням и артикулам."""
+    sql = """
+        INSERT INTO campaign_nm_search_daily
+            (advert_id, date, nm_id, views, clicks, atbs, orders, shks, spend)
+        VALUES (:advert_id, :date, :nm_id, :views, :clicks, :atbs, :orders,
+                :shks, :spend)
+        ON CONFLICT(advert_id, date, nm_id) DO UPDATE SET
+            views=excluded.views, clicks=excluded.clicks, atbs=excluded.atbs,
+            orders=excluded.orders, shks=excluded.shks, spend=excluded.spend
     """
     rows = list(rows)
     conn.executemany(sql, rows)

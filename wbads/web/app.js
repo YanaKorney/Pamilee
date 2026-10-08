@@ -1734,8 +1734,12 @@ function renderDaily(data) {
 
   const body = document.createElement('tbody');
   data.rows.forEach((row) => {
+    /* Зоны показа — подстроки «Показов»: без отступа они читаются как
+       самостоятельные показатели и сбивают сумму в голове. */
+    if (row.zone && !data.has_zones) return;
     const tr = document.createElement('tr');
-    if (row.is_ratio) tr.className = 'ratio';
+    tr.className = [row.is_ratio ? 'ratio' : '', row.zone ? 'zone' : '']
+      .filter(Boolean).join(' ');
     tr.appendChild(el('td', 'm-name', escapeHtml(row.title)));
     row.days.forEach((value) => {
       const cell = el('td', value ? '' : 'm-zero', dailyValue(row, value));
@@ -1745,6 +1749,17 @@ function renderDaily(data) {
     body.appendChild(tr);
   });
   table.appendChild(body);
+
+  /* Откуда взялись зоны — сказать обязательно. «Поиск» это отчёт WB по
+     поисковым кластерам, «прочее» — остаток. Остаток, выданный за отчёт,
+     однажды обернулся бы решением на выдуманном числе. */
+  const note = document.getElementById('daily-note');
+  note.hidden = !data.has_zones;
+  note.textContent = data.has_zones
+    ? 'Показы в поиске — данные WB по поисковым кластерам. «Прочее» — ' +
+      'разница между всеми показами и поиском: полки, каталог и карточку ' +
+      'WB отдельно не отдаёт.'
+    : '';
 }
 
 document.getElementById('daily-seg').addEventListener('click', (e) => {

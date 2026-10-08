@@ -73,6 +73,14 @@ MAX_DETAIL_REQUESTS = 60
 DETAIL_GIVE_UP = 8
 STATS_GIVE_UP = 15
 
+# Статистика по поисковым кластерам: 10 запросов в минуту с интервалом
+# 6 секунд, до 100 пар «кампания + артикул» в запросе.
+SEARCH_COOLDOWN = 7
+MAX_PAIRS_PER_SEARCH_CALL = 100
+# Потолок запросов за сбор. Пара тысяч пар — это два десятка запросов и
+# пара минут; дальше выигрыш не стоит ожидания.
+MAX_SEARCH_REQUESTS = 40
+
 # Сколько страниц заказов готовы забрать за один сбор. Каждая — минута ожидания,
 # поэтому ограничиваем: остальное доберётся следующим запуском.
 MAX_ORDER_PAGES = 12
@@ -828,6 +836,59 @@ class WBAdvertClient(_MinuteLimited):
         if without_stats and on_progress:
             on_progress(f"Без статистики за период: {without_stats} "
                         f"{_campaigns(without_stats)}.")
+        return result
+
+
+    def search_stats(self, pairs: Sequence[tuple[int, int]], date_from: str,
+                     date_to: str, on_progress: Progress | None = None,
+                     max_requests: int = MAX_SEARCH_REQUESTS
+                     ) -> list[dict[str, Any]]:
+        """Показы в ПОИСКЕ по дням — через статистику поисковых кластеров.
+
+        Отдельного поля «зона показа» в статистике WB нет. Но показы по
+        поисковым кластерам — это по определению показы в поиске, и их
+        сумма за день даёт ровно то, чего не хватает. Остальные зоны
+        (полки, каталог, карточка) остаются остатком от общего числа.
+
+        Спрашивать можно только парами «кампания + артикул», до сотни за
+        раз. Пары берутся из уже собранной статистики: у кампании, которая
+        не крутилась, спрашивать нечего.
+        """
+        result: list[dict[str, Any]] = []
+        if not pairs:
+            return result
+
+        date_from = _clamp_period(date_from, date_to)
+        chunks = list(_chunks(list(pairs), MAX_PAIRS_PER_SEARCH_CALL))
+        if len(chunks) > max_requests:
+            if on_progress:
+                left = sum(len(c) for c in chunks[max_requests:])
+                on_progress(f"Поиск: беру первые {max_requests} пачек, "
+                            f"{left} пар доберём в следующий раз.")
+            chunks = chunks[:max_requests]
+
+        for index, chunk in enumerate(chunks, start=1):
+            self._wait_turn(on_progress, cooldown=SEARCH_COOLDOWN)
+            payload = {
+                "from": date_from, "to": date_to,
+                "items": [{"advertId": advert_id, "nmId": nm_id}
+                          for advert_id, nm_id in chunk],
+            }
+            try:
+                data = self._request("POST", "/adv/v1/normquery/stats",
+                                     payload=payload, on_progress=on_progress)
+            except WBError as exc:
+                self._last_call = time.monotonic()
+                if exc.status in (400, 404):
+                    # У части кампаний поисковых кластеров нет вовсе —
+                    # это не сбой, просто показывать нечего.
+                    continue
+                raise
+            self._last_call = time.monotonic()
+            items = (data or {}).get("items") or []
+            result.extend(items)
+            if on_progress:
+                on_progress(f"Показы в поиске: пачка {index} из {len(chunks)}")
         return result
 
 

@@ -139,6 +139,62 @@ def normalize_stats(raw: dict[str, Any], now: str
     return daily, nm_daily
 
 
+def normalize_search_stats(items: Sequence[dict[str, Any]]
+                           ) -> list[dict[str, Any]]:
+    """Ответ по поисковым кластерам → показы в поиске по дням.
+
+    За один день кластеров несколько, и каждый приходит отдельной
+    строкой. Нас интересует не кластер, а их сумма: это и есть показы
+    кампании в поиске за этот день.
+    """
+    by_key: dict[tuple[int, str, int], dict[str, Any]] = {}
+    for item in items or []:
+        advert_id = _int(item.get("advertId"))
+        nm_id = _int(item.get("nmId"))
+        if not advert_id or not nm_id:
+            continue
+        for row in item.get("dailyStats") or []:
+            day = _day(row.get("date"))
+            if not day:
+                continue
+            stat = row.get("stat") or {}
+            key = (advert_id, day, nm_id)
+            acc = by_key.setdefault(key, {
+                "advert_id": advert_id, "date": day, "nm_id": nm_id,
+                "views": 0, "clicks": 0, "atbs": 0, "orders": 0,
+                "shks": 0, "spend": 0.0,
+            })
+            acc["views"] += _int(stat.get("views"))
+            acc["clicks"] += _int(stat.get("clicks"))
+            acc["atbs"] += _int(stat.get("atbs"))
+            acc["orders"] += _int(stat.get("orders"))
+            acc["shks"] += _int(stat.get("shks"))
+            acc["spend"] += _num(stat.get("spend"))
+    for row in by_key.values():
+        row["spend"] = round(row["spend"], 2)
+    return list(by_key.values())
+
+
+def search_pairs(nm_rows: Sequence[dict[str, Any]],
+                 limit: int = 4000) -> list[tuple[int, int]]:
+    """Пары «кампания + артикул», у которых были показы.
+
+    Спрашивать про пары, которые не крутились, — значит тратить минуты
+    на заведомо пустые ответы. Берём те, что уже есть в статистике, от
+    крупных к мелким: если упрёмся в потолок запросов, недоберём мелочь.
+    """
+    weight: dict[tuple[int, int], float] = {}
+    for row in nm_rows:
+        advert_id = _int(row.get("advert_id"))
+        nm_id = _int(row.get("nm_id"))
+        if not advert_id or not nm_id:
+            continue
+        key = (advert_id, nm_id)
+        weight[key] = weight.get(key, 0.0) + _num(row.get("views"))
+    ordered = sorted(weight.items(), key=lambda kv: -kv[1])
+    return [pair for pair, _ in ordered[:limit]]
+
+
 def normalize_order(raw: dict[str, Any], now: str) -> dict[str, Any] | None:
     """Строка заказа из API статистики → строка нашей таблицы.
 
@@ -351,6 +407,26 @@ def collect(conn: sqlite3.Connection, token: str, days: int = 30,
         db.upsert_daily(conn, daily_all)
         db.upsert_nm_daily(conn, nm_all)
         conn.commit()
+
+        # Показы в поиске — отдельным методом. Зоны показа WB в обычной
+        # статистике не отдаёт, но статистика по поисковым кластерам и
+        # есть поиск; остальные зоны считаются остатком.
+        search_rows: list[dict[str, Any]] = []
+        pairs = search_pairs(nm_all)
+        if pairs:
+            _log(on_progress, f"Разбивка по зонам: спрашиваю поиск "
+                              f"по {len(pairs)} парам «кампания + товар».")
+            try:
+                search_rows = normalize_search_stats(
+                    client.search_stats(pairs, date_from, date_to,
+                                        on_progress=on_progress))
+                db.upsert_search_daily(conn, search_rows)
+                conn.commit()
+                _log(on_progress, f"Показы в поиске собраны: "
+                                  f"{len(search_rows)} строк.")
+            except WBError as exc:
+                # Без этой разбивки сводка работает, просто без зон.
+                _log(on_progress, f"Разбивку по зонам получить не вышло: {exc}")
 
         # Заказы нужны для общего ДРР. Категории «Статистика» может не быть —
         # тогда сбор рекламы всё равно считается успешным.

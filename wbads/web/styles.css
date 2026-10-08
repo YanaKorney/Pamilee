@@ -694,3 +694,11 @@ table.data tr.star td:first-child { border-left: 3px solid var(--status-good); p
 .combo-list .combo-more:hover { background: transparent; }
 .combo-list .combo-empty { color: var(--text-muted); cursor: default; }
 .combo input:disabled { opacity: .55; cursor: not-allowed; }
+
+/* Зоны показа — подстроки «Показов»: без отступа они читаются как
+   самостоятельные показатели и сбивают сумму в голове. */
+.dgrid tr.zone .m-name {
+  padding-left: 30px; color: var(--text-secondary); font-weight: 400;
+}
+.dgrid tr.zone td { color: var(--text-secondary); }
+.dgrid tr.zone .m-total { color: var(--text-primary); }

@@ -303,3 +303,183 @@ class TestArticlePicker(unittest.TestCase):
     def test_keyboard_is_supported(self):
         for key in ("ArrowDown", "ArrowUp", "Enter", "Escape"):
             self.assertIn(key, self.js, f"нет обработки {key}")
+
+
+class TestZonesAddUpToTheTotal(DailyCase):
+    """Подстроки зон обязаны сходиться со строкой «Показы». Иначе таблица
+    врёт на глазах: сумма двух строк не равна строке над ними."""
+
+    def search(self, date, *, advert_id=1, nm_id=777, views=0):
+        self.conn.execute(
+            "INSERT OR REPLACE INTO campaign_nm_search_daily (advert_id, date,"
+            " nm_id, views, clicks, atbs, orders, shks, spend)"
+            " VALUES (?,?,?,?,0,0,0,0,0)", (advert_id, date, nm_id, views))
+        self.conn.commit()
+
+    def test_search_plus_other_equals_views(self):
+        self.day("2026-10-01", views=1000)
+        self.search("2026-10-01", views=400)
+        rows = self.rows(daily.daily_table(self.conn, "2026-10-01", "2026-10-01"))
+        self.assertEqual(rows["views_search"]["days"][0], 400)
+        self.assertEqual(rows["views_other"]["days"][0], 600)
+        self.assertEqual(
+            rows["views_search"]["days"][0] + rows["views_other"]["days"][0],
+            rows["views"]["days"][0])
+
+    def test_without_search_data_everything_is_other(self):
+        """Пока поиск не собран, весь остаток нельзя выдавать за полки."""
+        self.day("2026-10-01", views=1000)
+        table = daily.daily_table(self.conn, "2026-10-01", "2026-10-01")
+        self.assertFalse(table["has_zones"], "без данных поиска зон нет")
+
+    def test_search_above_total_is_clamped(self):
+        """Два метода WB считают по-своему. Показать больше ста процентов
+        или отрицательный остаток хуже, чем прижать к границе."""
+        self.day("2026-10-01", views=100)
+        self.search("2026-10-01", views=150)
+        rows = self.rows(daily.daily_table(self.conn, "2026-10-01", "2026-10-01"))
+        self.assertEqual(rows["views_search"]["days"][0], 100)
+        self.assertEqual(rows["views_other"]["days"][0], 0)
+
+    def test_zones_follow_the_chosen_article(self):
+        self.day("2026-10-01", nm_id=777, views=1000)
+        self.day("2026-10-01", nm_id=888, advert_id=2, views=5000)
+        self.search("2026-10-01", nm_id=777, views=400)
+        self.search("2026-10-01", nm_id=888, advert_id=2, views=4000)
+        mine = self.rows(daily.daily_table(self.conn, "2026-10-01",
+                                           "2026-10-01", nm_id=777))
+        self.assertEqual(mine["views_search"]["days"][0], 400)
+        self.assertEqual(mine["views_other"]["days"][0], 600)
+
+    def test_period_column_sums_the_zones(self):
+        self.day("2026-10-01", views=1000)
+        self.day("2026-10-02", views=2000)
+        self.search("2026-10-01", views=400)
+        self.search("2026-10-02", views=900)
+        rows = self.rows(daily.daily_table(self.conn, "2026-10-01", "2026-10-02"))
+        self.assertEqual(rows["views_search"]["total"], 1300)
+        self.assertEqual(rows["views_other"]["total"], 1700)
+        self.assertEqual(rows["views_search"]["total"] + rows["views_other"]["total"],
+                         rows["views"]["total"])
+
+    def test_export_skips_zones_until_search_is_collected(self):
+        self.day("2026-10-01", views=1000)
+        text = daily.to_csv(daily.daily_table(self.conn, "2026-10-01",
+                                              "2026-10-01"))
+        self.assertNotIn("прочее", text)
+
+    def test_export_carries_zones_once_collected(self):
+        self.day("2026-10-01", views=1000)
+        self.search("2026-10-01", views=400)
+        text = daily.to_csv(daily.daily_table(self.conn, "2026-10-01",
+                                              "2026-10-01"))
+        self.assertIn("в поиске", text)
+        self.assertIn("прочее", text)
+
+    def test_zone_rows_are_marked_as_sub_rows(self):
+        self.assertTrue(all(row.get("zone") for row in daily.ZONE_ROWS))
+        titles = [row["title"] for row in daily.ZONE_ROWS]
+        self.assertEqual(titles[0], "в поиске")
+        self.assertIn("прочее", titles[1])
+
+
+class TestSearchStatsCollection(unittest.TestCase):
+    """Показы в поиске собираются отдельным методом: статистика по
+    поисковым кластерам. За день кластеров несколько, и каждый приходит
+    своей строкой — нужна их сумма, а не сами кластеры."""
+
+    ANSWER = [{
+        "advertId": 123, "nmId": 777,
+        "dailyStats": [
+            {"date": "2026-10-01", "stat": {"views": 192, "clicks": 75,
+                                            "atbs": 39, "orders": 9,
+                                            "shks": 5, "spend": 108,
+                                            "normQuery": "кластер А"}},
+            {"date": "2026-10-01", "stat": {"views": 108, "clicks": 25,
+                                            "atbs": 11, "orders": 3,
+                                            "shks": 2, "spend": 42,
+                                            "normQuery": "кластер Б"}},
+            {"date": "2026-10-02", "stat": {"views": 50, "clicks": 10,
+                                            "spend": 20}},
+        ],
+    }]
+
+    def test_clusters_of_one_day_are_summed(self):
+        from wbads.collector import normalize_search_stats
+
+        rows = {r["date"]: r for r in normalize_search_stats(self.ANSWER)}
+        self.assertEqual(rows["2026-10-01"]["views"], 300)
+        self.assertEqual(rows["2026-10-01"]["clicks"], 100)
+        self.assertEqual(rows["2026-10-01"]["spend"], 150.0)
+        self.assertEqual(rows["2026-10-02"]["views"], 50)
+
+    def test_campaign_and_article_are_kept(self):
+        from wbads.collector import normalize_search_stats
+
+        row = normalize_search_stats(self.ANSWER)[0]
+        self.assertEqual(row["advert_id"], 123)
+        self.assertEqual(row["nm_id"], 777)
+
+    def test_pairs_come_from_collected_statistics(self):
+        """Спрашивать про пары, которые не крутились, — значит тратить
+        минуты на заведомо пустые ответы."""
+        from wbads.collector import search_pairs
+
+        pairs = search_pairs([
+            {"advert_id": 1, "nm_id": 10, "views": 50},
+            {"advert_id": 2, "nm_id": 20, "views": 900},
+            {"advert_id": 2, "nm_id": 20, "views": 100},
+        ])
+        self.assertEqual(pairs[0], (2, 20), "крупные — первыми")
+        self.assertEqual(len(pairs), 2, "повторы схлопываются")
+
+    def test_junk_rows_are_skipped(self):
+        from wbads.collector import normalize_search_stats, search_pairs
+
+        self.assertEqual(normalize_search_stats([{"advertId": 0, "nmId": 0}]), [])
+        self.assertEqual(search_pairs([{"advert_id": 0, "nm_id": 5}]), [])
+
+    def test_request_splits_by_hundred_pairs(self):
+        """Метод принимает не больше сотни пар за раз."""
+        from wbads.wb_client import MAX_PAIRS_PER_SEARCH_CALL, WBAdvertClient
+
+        client = WBAdvertClient.__new__(WBAdvertClient)
+        client.token = "t"
+        client.base_url = "x"
+        client.timeout = 1
+        client.max_retries = 1
+        client.ca_bundle = ""
+        client.used_fallback_bundle = False
+        client._last_call = 0.0
+        client._wait_turn = lambda on_progress=None, cooldown=0: None
+        sent = []
+
+        def request(method, path, payload=None, params=None, on_progress=None):
+            sent.append((method, path, len(payload["items"])))
+            return {"items": []}
+
+        client._request = request
+        client.search_stats([(1, i) for i in range(250)],
+                            "2026-10-01", "2026-10-07")
+        self.assertEqual([n for _, _, n in sent], [100, 100, 50])
+        self.assertEqual(sent[0][0], "POST")
+        self.assertEqual(sent[0][1], "/adv/v1/normquery/stats")
+
+    def test_campaigns_without_clusters_are_not_an_error(self):
+        """У части кампаний поисковых кластеров нет вовсе."""
+        from wbads.wb_client import WBAdvertClient, WBError
+
+        client = WBAdvertClient.__new__(WBAdvertClient)
+        client.token = "t"
+        client.base_url = "x"
+        client.timeout = 1
+        client.max_retries = 1
+        client.ca_bundle = ""
+        client.used_fallback_bundle = False
+        client._last_call = 0.0
+        client._wait_turn = lambda on_progress=None, cooldown=0: None
+        client._request = lambda *a, **kw: (_ for _ in ()).throw(
+            WBError("нет данных", 400))
+
+        self.assertEqual(client.search_stats([(1, 2)], "2026-10-01",
+                                             "2026-10-07"), [])
