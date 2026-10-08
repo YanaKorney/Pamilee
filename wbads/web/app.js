@@ -1673,7 +1673,7 @@ async function loadDaily() {
        данных. Молчать нельзя: человек будет щёлкать по полю и считать,
        что оно не работает. */
     const noArticles = !(data.articles || []).length;
-    document.getElementById('daily-nm').disabled = noArticles;
+    document.getElementById('daily-nm-input').disabled = noArticles;
     const note = document.getElementById('daily-nm-note');
     note.hidden = !noArticles;
     if (noArticles) {
@@ -1693,23 +1693,12 @@ function renderDailyFilters(data) {
   document.getElementById('daily-from').value = data.period.from;
   document.getElementById('daily-to').value = data.period.to;
 
-  /* Список товаров — по обороту, а не по алфавиту: человек помнит товар
-     по деньгам, а не по месту в списке. */
-  const select = document.getElementById('daily-nm');
-  const chosen = daily.nm ? String(daily.nm) : '';
-  select.innerHTML = '';
-  const all = document.createElement('option');
-  all.value = '';
-  all.textContent = 'Весь кабинет';
-  select.appendChild(all);
-  (data.articles || []).forEach((a) => {
-    const option = document.createElement('option');
-    option.value = String(a.nm_id);
-    const name = a.name ? `${a.name} · ` : '';
-    option.textContent = `${name}${a.nm_id} — ${money(a.spend)}`;
-    select.appendChild(option);
-  });
-  select.value = chosen;
+  /* Список артикулов — по обороту, а не по номеру: человек помнит товар
+     по деньгам. Порядок задаёт сервер, здесь только показ. */
+  combo.items = (data.articles || []).map((a) => String(a.nm_id));
+  const input = document.getElementById('daily-nm-input');
+  input.value = daily.nm ? String(daily.nm) : '';
+  document.getElementById('daily-nm-clear').hidden = !daily.nm;
 
   const title = document.getElementById('daily-title');
   const sub = document.getElementById('daily-sub');
@@ -1780,7 +1769,145 @@ document.getElementById('daily-seg').addEventListener('click', (e) => {
   });
 });
 
-document.getElementById('daily-nm').addEventListener('change', (e) => {
-  daily.nm = e.target.value ? Number(e.target.value) : null;
+/* ── поле «Товар»: ввод с поиском ─────────────────────────────────────────
+
+   Обычный <select> не умеет строки поиска, а артикулов у кабинета
+   полтысячи: пролистывать их глазами — не работа. Поэтому поле ввода и
+   выпадающий список, который фильтруется по мере набора номера. */
+
+const combo = { items: [], shown: [], active: -1, open: false };
+
+/* Больше двух сотен строк разом браузер рисует заметно, а пользы в них
+   нет: нужный артикул находится набором двух-трёх цифр. */
+const COMBO_LIMIT = 200;
+
+const comboInput = () => document.getElementById('daily-nm-input');
+const comboList = () => document.getElementById('daily-nm-list');
+
+function comboMatches(query) {
+  const text = String(query || '').trim();
+  if (!text) return combo.items;
+  return combo.items.filter((id) => id.includes(text));
+}
+
+function openCombo(query) {
+  const list = comboList();
+  combo.shown = comboMatches(query);
+  combo.open = true;
+  combo.active = -1;
+  list.innerHTML = '';
+
+  /* «Весь кабинет» — первой строкой и только когда поиск пуст: при
+     наборе цифр он в выдаче только мешает. */
+  if (!String(query || '').trim()) {
+    const all = el('li', 'combo-all', 'Весь кабинет');
+    all.setAttribute('role', 'option');
+    all.dataset.value = '';
+    list.appendChild(all);
+  }
+
+  if (!combo.shown.length) {
+    const none = el('li', 'combo-empty', 'Такого артикула за период нет');
+    none.setAttribute('role', 'presentation');
+    list.appendChild(none);
+  }
+
+  combo.shown.slice(0, COMBO_LIMIT).forEach((id) => {
+    const item = el('li', '', id);
+    item.setAttribute('role', 'option');
+    item.setAttribute('aria-selected', String(Number(id) === daily.nm));
+    item.dataset.value = id;
+    list.appendChild(item);
+  });
+
+  if (combo.shown.length > COMBO_LIMIT) {
+    const more = el('li', 'combo-more',
+      `…и ещё ${combo.shown.length - COMBO_LIMIT}. Наберите ещё цифру.`);
+    more.setAttribute('role', 'presentation');
+    list.appendChild(more);
+  }
+
+  list.hidden = false;
+  comboInput().setAttribute('aria-expanded', 'true');
+}
+
+function closeCombo() {
+  combo.open = false;
+  combo.active = -1;
+  comboList().hidden = true;
+  comboInput().setAttribute('aria-expanded', 'false');
+}
+
+function comboOptions() {
+  return Array.from(comboList().querySelectorAll('li[role="option"]'));
+}
+
+function highlight(step) {
+  const options = comboOptions();
+  if (!options.length) return;
+  combo.active = (combo.active + step + options.length) % options.length;
+  options.forEach((o, i) => o.classList.toggle('active', i === combo.active));
+  options[combo.active].scrollIntoView({ block: 'nearest' });
+}
+
+function chooseArticle(value) {
+  const next = value ? Number(value) : null;
+  closeCombo();
+  comboInput().value = value || '';
+  document.getElementById('daily-nm-clear').hidden = !value;
+  if (next === daily.nm) return;
+  daily.nm = next;
   loadDaily();
+}
+
+comboInput().addEventListener('focus', () => openCombo(comboInput().value));
+comboInput().addEventListener('input', () => openCombo(comboInput().value));
+
+comboInput().addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (!combo.open) openCombo(comboInput().value);
+    else highlight(e.key === 'ArrowDown' ? 1 : -1);
+    return;
+  }
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    const options = comboOptions();
+    if (combo.active >= 0 && options[combo.active]) {
+      chooseArticle(options[combo.active].dataset.value);
+    } else if (combo.shown.length === 1) {
+      /* Набрали номер целиком — Enter обязан его выбрать, а не закрыть
+         список молча. */
+      chooseArticle(combo.shown[0]);
+    } else if (!comboInput().value.trim()) {
+      chooseArticle('');
+    }
+    return;
+  }
+  if (e.key === 'Escape') {
+    closeCombo();
+    comboInput().value = daily.nm ? String(daily.nm) : '';
+  }
+});
+
+comboList().addEventListener('mousedown', (e) => {
+  /* mousedown, а не click: иначе поле успеет потерять фокус и список
+     закроется раньше, чем щелчок до него дойдёт. */
+  const item = e.target.closest('li[role="option"]');
+  if (!item) return;
+  e.preventDefault();
+  chooseArticle(item.dataset.value);
+});
+
+document.getElementById('daily-nm-clear').addEventListener('click', () => {
+  chooseArticle('');
+});
+
+/* Щелчок мимо закрывает список и возвращает в поле выбранный артикул:
+   брошенный набор не должен выглядеть как выбор. */
+document.addEventListener('click', (e) => {
+  if (!combo.open) return;
+  if (e.target.closest('.combo')) return;
+  closeCombo();
+  comboInput().value = daily.nm ? String(daily.nm) : '';
 });

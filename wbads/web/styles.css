@@ -648,3 +648,49 @@ table.data tr.star td:first-child { border-left: 3px solid var(--status-good); p
   line-height: 1.4;
 }
 .dfilter select:disabled { opacity: .55; cursor: not-allowed; }
+
+/* ── выбор артикула с поиском ──────────────────────────────────────────── */
+/*
+   Обычный <select> не умеет строки поиска, а артикулов у кабинета
+   полтысячи: пролистывать их глазами — не работа. Поэтому поле ввода
+   с выпадающим списком, который фильтруется по мере набора номера.
+*/
+.combo-field { position: relative; }
+.combo { position: relative; }
+.combo input {
+  border: 1px solid var(--border-strong); background: var(--surface-1);
+  color: var(--text-primary); border-radius: 8px; padding: 6px 28px 6px 9px;
+  font: inherit; font-size: 13px; width: 200px; box-sizing: border-box;
+  font-variant-numeric: tabular-nums;
+}
+.combo-clear {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  border: 0; background: transparent; color: var(--text-muted);
+  cursor: pointer; font-size: 17px; line-height: 1; padding: 2px 6px;
+  border-radius: 6px;
+}
+.combo-clear:hover { background: var(--surface-2); color: var(--text-primary); }
+
+.combo-list {
+  position: absolute; z-index: 30; top: calc(100% + 4px); left: 0;
+  min-width: 200px; max-height: 280px; overflow-y: auto;
+  margin: 0; padding: 4px; list-style: none;
+  background: var(--surface-1); border: 1px solid var(--border-strong);
+  border-radius: 8px; box-shadow: 0 6px 20px rgba(0, 0, 0, .16);
+}
+.combo-list li {
+  padding: 7px 10px; border-radius: 6px; cursor: pointer;
+  font-size: 13.5px; font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.combo-list li[aria-selected="true"], .combo-list li:hover {
+  background: var(--surface-2);
+}
+.combo-list li.active { background: var(--status-info-soft); }
+.combo-list .combo-all { font-weight: 600; }
+.combo-list .combo-more {
+  color: var(--text-muted); cursor: default; font-size: 12.5px;
+}
+.combo-list .combo-more:hover { background: transparent; }
+.combo-list .combo-empty { color: var(--text-muted); cursor: default; }
+.combo input:disabled { opacity: .55; cursor: not-allowed; }

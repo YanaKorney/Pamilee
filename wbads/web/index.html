@@ -118,8 +118,18 @@
           <input type="date" id="daily-from"></label>
         <label><span class="cap">по</span>
           <input type="date" id="daily-to"></label>
-        <label><span class="cap">Товар</span>
-          <select id="daily-nm"></select>
+        <label class="combo-field"><span class="cap">Товар</span>
+          <div class="combo">
+            <input type="text" id="daily-nm-input" role="combobox"
+                   aria-expanded="false" aria-controls="daily-nm-list"
+                   aria-autocomplete="list" autocomplete="off"
+                   placeholder="все товары"
+                   aria-label="Артикул товара, поиск по номеру">
+            <button type="button" class="combo-clear" id="daily-nm-clear"
+                    hidden aria-label="Показать весь кабинет">×</button>
+            <ul class="combo-list" id="daily-nm-list" role="listbox" hidden
+                aria-label="Артикулы"></ul>
+          </div>
           <span class="dnote" id="daily-nm-note" hidden></span>
         </label>
       </div>

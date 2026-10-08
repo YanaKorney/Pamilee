@@ -259,3 +259,47 @@ class TestArticleBreakdownFromWB(unittest.TestCase):
             {"nm": [{"nmId": 555, "views": 10, "clicks": 1, "sum": 5.0}]}]}]}
         _, nm_rows = normalize_stats(old, "now")
         self.assertEqual(nm_rows[0]["nm_id"], 555)
+
+
+class TestArticlePicker(unittest.TestCase):
+    """Артикулов у кабинета полтысячи. Обычный выпадающий список не умеет
+    строки поиска, и выбрать в нём товар можно только пролистыванием —
+    это не работа. Проверяется устройство поля: сами действия (набор,
+    стрелки, Escape) живут в браузере и проверены вручную."""
+
+    def setUp(self):
+        from wbads.config import ROOT
+
+        self.html = (ROOT / "wbads" / "web" / "index.html").read_text(
+            encoding="utf-8")
+        self.js = (ROOT / "wbads" / "web" / "app.js").read_text(encoding="utf-8")
+
+    def test_field_is_a_text_input_with_a_list(self):
+        self.assertIn('id="daily-nm-input"', self.html)
+        self.assertIn('role="combobox"', self.html)
+        self.assertIn('id="daily-nm-list"', self.html)
+        self.assertNotIn('<select id="daily-nm">', self.html,
+                         "обычный список не умеет поиска")
+
+    def test_rows_are_bare_article_numbers(self):
+        """В строке только номер: ни названия, ни расхода. Так просили."""
+        self.assertIn("combo.items = (data.articles || []).map", self.js)
+        self.assertIn("String(a.nm_id)", self.js)
+        self.assertNotIn("${name}${a.nm_id} — ${money(a.spend)}", self.js)
+
+    def test_search_filters_by_digits(self):
+        self.assertIn("combo.items.filter((id) => id.includes(text))", self.js)
+
+    def test_whole_cabinet_stays_reachable(self):
+        self.assertIn("Весь кабинет", self.js)
+        self.assertIn("combo-clear", self.html)
+
+    def test_long_list_is_capped(self):
+        """Полтысячи строк разом браузер рисует заметно, а пользы нет:
+        нужный артикул находится набором двух-трёх цифр."""
+        self.assertIn("COMBO_LIMIT", self.js)
+        self.assertIn("Наберите ещё цифру", self.js)
+
+    def test_keyboard_is_supported(self):
+        for key in ("ArrowDown", "ArrowUp", "Enter", "Escape"):
+            self.assertIn(key, self.js, f"нет обработки {key}")
