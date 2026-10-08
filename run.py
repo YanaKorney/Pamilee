@@ -269,9 +269,12 @@ def cmd_start(args: argparse.Namespace) -> int:
         incomplete = _article_breakdown_missing(conn)
 
     if last and incomplete:
-        _print("В собранных данных нет разбивки по товарам.")
-        _print("Без неё не выбрать товар в сводке по дням, не увидеть")
-        _print("артикулы внутри кампании и не замерить эффект правок.")
+        with db.session(cfg.db_path) as conn:
+            missing = _missing_parts(conn)
+        _print("Данные собраны прежней версией: в них нет "
+               + " и ".join(missing) + ".")
+        _print("Это собирается только новым сбором — обновление программы")
+        _print("само по себе старые данные не дополняет.")
         print()
         need_collect = _ask("Собрать статистику заново?")
     elif not last:
@@ -329,16 +332,34 @@ def _data_is_fresh(conn, hours: int = 20) -> bool:
     return not _article_breakdown_missing(conn)
 
 
-def _article_breakdown_missing(conn) -> bool:
-    """Статистика по дням есть, а по товарам — нет.
+def _missing_parts(conn) -> list[str]:
+    """Чего не хватает в собранных данных.
 
-    Так выглядят данные, собранные до того, как починили чтение поля
-    «nms»: дни сохранились, товары потерялись.
+    Свежесть по дате — не свежесть. Данные, собранные прежней версией,
+    приходят без того, что эта версия умеет собирать, и тогда человек
+    обновляет программу, запускает — и не видит обещанного, без единого
+    намёка на причину. Поэтому называем недостающее поимённо.
     """
     days = conn.execute("SELECT COUNT(*) FROM campaign_daily").fetchone()[0]
+    if not days:
+        return []
+
+    missing = []
     articles = conn.execute(
         "SELECT COUNT(*) FROM campaign_nm_daily").fetchone()[0]
-    return bool(days) and not articles
+    if not articles:
+        missing.append("разбивки по товарам")
+    elif not conn.execute(
+            "SELECT COUNT(*) FROM campaign_nm_search_daily").fetchone()[0]:
+        # Зоны собираются отдельным методом и только с версии 2026-10-11.
+        # Проверяем после товаров: без них зон не бывает в принципе.
+        missing.append("показов по зонам (поиск и прочее)")
+    return missing
+
+
+def _article_breakdown_missing(conn) -> bool:
+    """Данные собраны не полностью — чего-то из нынешнего в них нет."""
+    return bool(_missing_parts(conn))
 
 
 def _start_demo(cfg) -> int:

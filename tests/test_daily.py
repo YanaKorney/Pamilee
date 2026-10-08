@@ -483,3 +483,45 @@ class TestSearchStatsCollection(unittest.TestCase):
 
         self.assertEqual(client.search_stats([(1, 2)], "2026-10-01",
                                              "2026-10-07"), [])
+
+
+class TestCollectionIsReachableWithoutTheTerminal(unittest.TestCase):
+    """Обновление программы не дополняет старые данные: зоны показа WB
+    отдаёт отдельным запросом, и строки «в поиске» и «прочее» пустуют,
+    пока сбор не прошёл заново. Человек, который работает двойным кликом,
+    должен узнать об этом из таблицы и запустить сбор тем же кликом —
+    иначе он смотрит на пустые строки и считает, что программа врёт.
+    """
+
+    def setUp(self):
+        from wbads.config import ROOT
+
+        self.root = ROOT
+        self.js = (ROOT / "wbads" / "web" / "app.js").read_text(encoding="utf-8")
+
+    def test_table_says_the_rows_are_not_collected_yet(self):
+        self.assertIn("ещё не собраны", self.js)
+        self.assertIn("SBOR-Windows.bat", self.js)
+
+    def test_launchers_exist_for_both_systems(self):
+        for name in ("SBOR-Windows.bat", "SBOR-Mac.command"):
+            self.assertTrue((self.root / name).exists(), f"нет файла {name}")
+
+    def test_launchers_run_the_collection(self):
+        for name in ("SBOR-Windows.bat", "SBOR-Mac.command"):
+            text = (self.root / name).read_text(encoding="utf-8")
+            self.assertIn("run.py collect", text, f"{name} не запускает сбор")
+
+    def test_windows_launcher_stays_ascii_with_crlf(self):
+        """cmd.exe читает .bat в кодировке системы, а не в UTF-8: русская
+        буква в самом файле превращает команду в мусор. Перевод строки
+        тоже обязан быть виндовым."""
+        raw = (self.root / "SBOR-Windows.bat").read_bytes()
+        raw.decode("ascii")
+        self.assertNotIn(b"\n", raw.replace(b"\r\n", b""))
+
+    def test_mac_launcher_is_executable(self):
+        import os
+
+        self.assertTrue(os.access(self.root / "SBOR-Mac.command", os.X_OK),
+                        "без права на запуск двойной клик откроет редактор")

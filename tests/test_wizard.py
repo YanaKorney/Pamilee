@@ -405,7 +405,7 @@ class TestFreshnessMeansUsable(unittest.TestCase):
         db.finish_collect(self.conn, log_id, now, 1, 1)
         self.conn.commit()
 
-    def add_day(self, *, with_articles: bool):
+    def add_day(self, *, with_articles: bool, with_zones: bool = True):
         self.conn.execute(
             "INSERT OR REPLACE INTO campaign_daily (advert_id, date, views,"
             " clicks, atbs, orders, shks, spend, revenue, collected_at)"
@@ -416,7 +416,26 @@ class TestFreshnessMeansUsable(unittest.TestCase):
                 " nm_id, name, views, clicks, atbs, orders, shks, spend,"
                 " revenue) VALUES (1,'2026-10-01',777,'Товар',100,5,1,1,1,"
                 "50.0,500.0)")
+        if with_articles and with_zones:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO campaign_nm_search_daily (advert_id,"
+                " date, nm_id, views, clicks, atbs, orders, shks, spend)"
+                " VALUES (1,'2026-10-01',777,40,2,0,0,0,20.0)")
         self.conn.commit()
+
+    def test_days_without_zones_are_not_fresh(self):
+        """Зоны показа собираются только с версии 2026-10-11. Данные,
+        собранные раньше, свежи по дате и неполны по содержимому."""
+        self.add_day(with_articles=True, with_zones=False)
+        self.assertEqual(cli._missing_parts(self.conn),
+                         ["показов по зонам (поиск и прочее)"])
+        self.assertFalse(cli._data_is_fresh(self.conn))
+
+    def test_missing_articles_are_named_before_zones(self):
+        """Без товаров зон не бывает в принципе — называть оба незачем."""
+        self.add_day(with_articles=False)
+        self.assertEqual(cli._missing_parts(self.conn),
+                         ["разбивки по товарам"])
 
     def test_days_without_articles_are_not_fresh(self):
         self.add_day(with_articles=False)
