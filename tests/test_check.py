@@ -1922,3 +1922,55 @@ class TestCollectionSurvivesTheZoneStep(unittest.TestCase):
         self.assertTrue(orders_called["yes"], "заказы обязаны собраться")
         self.assertTrue(any("Зоны появятся после" in line for line in said),
                         f"человеку надо сказать, что делать: {said}")
+
+
+class TestAnotherCopyIsNoticed(unittest.TestCase):
+    """Самая частая путаница при обновлении: прежнее окно программы
+    осталось открытым, новое молча уехало на другой порт, а человек
+    смотрит в старую вкладку браузера. Снаружи это выглядит ровно как
+    «обновил, а ничего не изменилось», и молчать об этом нельзя.
+    """
+
+    def test_other_folder_is_named_with_its_version(self):
+        from wbads.api import conflict_lines
+
+        text = "\n".join(conflict_lines(
+            {"version": "2026-01-01", "program_folder": r"C:\старая папка"},
+            8000, 8010))
+        self.assertIn("ИЗ ДРУГОЙ ПАПКИ", text)
+        self.assertIn("2026-01-01", text)
+        self.assertIn(r"C:\старая папка", text)
+        self.assertIn("8010", text)
+        self.assertIn("Закройте прежнее", text)
+
+    def test_same_folder_is_just_a_second_window(self):
+        """Пугать нечем: программа та же, адрес другой."""
+        from wbads.api import ROOT, conflict_lines
+
+        text = "\n".join(conflict_lines(
+            {"version": "2026-10-14", "program_folder": str(ROOT)}, 8000, 8010))
+        self.assertIn("из этой же папки", text)
+        self.assertNotIn("ДРУГОЙ ПАПКИ", text)
+
+    def test_foreign_program_on_the_port(self):
+        from wbads.api import conflict_lines
+
+        self.assertEqual(conflict_lines(None, 8000, 8010),
+                         ["Порт 8000 занят другой программой — "
+                          "открываю на 8010."])
+
+    def test_nothing_to_say_when_the_port_was_free(self):
+        from wbads.api import conflict_lines
+
+        self.assertEqual(conflict_lines(None, 8000, 8000), [])
+        self.assertEqual(conflict_lines({"version": "x"}, 8000, 8000), [])
+
+    def test_free_port_has_no_instance(self):
+        """Проверка не должна зависать и не должна врать про занятость."""
+        import socket
+        from wbads.api import running_instance
+
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            free = s.getsockname()[1]
+        self.assertIsNone(running_instance(free, timeout=0.3))

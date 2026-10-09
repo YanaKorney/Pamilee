@@ -765,6 +765,59 @@ def _bind_server(config: Config, handler: type,
     )
 
 
+def running_instance(port: int, timeout: float = 0.8) -> dict[str, Any] | None:
+    """Кто уже занял порт — наш же дашборд или кто-то посторонний.
+
+    Нужно для самой частой путаницы при обновлении: прежнее окно
+    программы осталось открытым, новое молча уехало на другой порт, а
+    человек смотрит в старую вкладку браузера и видит старую программу.
+    Снаружи это выглядит так, будто обновление не поставилось.
+    """
+    import urllib.request
+
+    # Без прокси: дашборд свой же, 127.0.0.1, и системный прокси здесь
+    # только мешает — через него запрос уходит в никуда.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(f"http://127.0.0.1:{port}/api/meta",
+                         timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8") or "{}")
+    except Exception:
+        return None
+    return data if isinstance(data, dict) and data.get("version") else None
+
+
+def conflict_lines(busy: dict[str, Any] | None, old_port: int,
+                   new_port: int) -> list[str]:
+    """Что сказать человеку, когда порт занят и мы уехали на другой."""
+    if new_port == old_port:
+        return []
+    if not busy:
+        return [f"Порт {old_port} занят другой программой — "
+                f"открываю на {new_port}."]
+
+    if str(busy.get("program_folder") or "") == str(ROOT):
+        # Та же папка — значит просто второе окно той же программы.
+        # Пугать тут нечем, но сказать надо: адрес у него другой.
+        return [
+            f"На порту {old_port} уже открыт дашборд из этой же папки —",
+            "видимо, прежнее окно программы осталось запущенным.",
+            f"Это окно открылось на порту {new_port}; чтобы не путаться,",
+            "лишнее чёрное окно можно закрыть.",
+        ]
+
+    return [
+        f"На порту {old_port} уже работает дашборд ИЗ ДРУГОЙ ПАПКИ:",
+        f"  версия {busy.get('version')}, папка {busy.get('program_folder')}",
+        f"Эта копия (версия {APP_VERSION}) открылась на порту {new_port}.",
+        "",
+        "Старая вкладка браузера показывает старую программу — именно так",
+        "выглядит «обновил, а ничего не изменилось». Закройте прежнее чёрное",
+        "окно программы и работайте в том окне браузера, которое откроется",
+        "сейчас.",
+    ]
+
+
 def serve(config: Config, open_browser: bool = True, network: bool = False,
           access_code: str = "") -> None:
     """Поднимает дашборд: только для этого компьютера или для всей сети.
@@ -777,6 +830,7 @@ def serve(config: Config, open_browser: bool = True, network: bool = False,
     handler = type("BoundHandler", (DashboardHandler,),
                    {"config": config, "access_code": access_code})
     host = "0.0.0.0" if network else "127.0.0.1"
+    busy = running_instance(config.port)
     try:
         server, port = _bind_server(config, handler, host)
     except OSError as exc:
@@ -794,8 +848,11 @@ def serve(config: Config, open_browser: bool = True, network: bool = False,
         return
 
     url = f"http://127.0.0.1:{port}"
-    if port != config.port:
-        print(f"\n  Порт {config.port} занят системой — открываю на {port}.")
+    lines = conflict_lines(busy, config.port, port)
+    if lines:
+        print()
+        for line in lines:
+            print(f"  {line}" if line else "")
 
     # Версия и папка — первое, что надо знать, когда «обновил, а нового
     # не видно». Папок с программой у человека несколько.
