@@ -1,4 +1,4 @@
-"""Сводка по дням: показатели по строкам, дни по колонкам.
+"""Сводки по товарам и по кампаниям: показатели по строкам, дни по колонкам.
 
 Главная опасность этой таблицы — колонка «За период». Половина строк в
 ней это отношения (ДРР, CPC, CTR, конверсии), и ни складывать их по
@@ -283,12 +283,12 @@ class TestArticlePicker(unittest.TestCase):
 
     def test_rows_are_bare_article_numbers(self):
         """В строке только номер: ни названия, ни расхода. Так просили."""
-        self.assertIn("combo.items = (data.articles || []).map", self.js)
+        self.assertIn("setItems((data.articles || []).map", self.js)
         self.assertIn("String(a.nm_id)", self.js)
         self.assertNotIn("${name}${a.nm_id} — ${money(a.spend)}", self.js)
 
     def test_search_filters_by_digits(self):
-        self.assertIn("combo.items.filter((id) => id.includes(text))", self.js)
+        self.assertIn("c.items.filter((id) => id.includes(text))", self.js)
 
     def test_whole_cabinet_stays_reachable(self):
         self.assertIn("Весь кабинет", self.js)
@@ -525,3 +525,171 @@ class TestCollectionIsReachableWithoutTheTerminal(unittest.TestCase):
 
         self.assertTrue(os.access(self.root / "SBOR-Mac.command", os.X_OK),
                         "без права на запуск двойной клик откроет редактор")
+
+
+class TestCampaignSummary(DailyCase):
+    """Один товар почти всегда крутится в нескольких кампаниях сразу.
+    В общей сумме пропадает именно то, по чему принимают решение: ручная
+    на поиске может кормить, пока автоматическая на рекомендациях жжёт.
+    Поэтому по таблице на кампанию.
+    """
+
+    def campaign(self, advert_id, name, type_name, status_name="Идут показы"):
+        self.conn.execute(
+            "INSERT OR REPLACE INTO campaigns (advert_id, name, type,"
+            " type_name, status, status_name, daily_budget, updated_at)"
+            " VALUES (?,?,9,?,9,?,0,'now')",
+            (advert_id, name, type_name, status_name))
+        self.conn.commit()
+
+    def setUp(self):
+        super().setUp()
+        self.campaign(1, "Поиск руками", "Аукцион, ручная ставка")
+        self.campaign(2, "Рекомендации", "Аукцион, единая ставка")
+        self.day("2026-10-01", advert_id=1, spend=100.0, revenue=2000.0,
+                 views=500)
+        self.day("2026-10-01", advert_id=2, spend=400.0, revenue=500.0,
+                 views=900)
+
+    def table(self):
+        return daily.campaign_tables(self.conn, "2026-10-01", "2026-10-01", 777)
+
+    def test_one_table_per_campaign(self):
+        blocks = self.table()["campaigns"]
+        self.assertEqual([b["advert_id"] for b in blocks], [2, 1],
+                         "порядок задаёт расход: крупная кампания сверху")
+
+    def test_rows_match_the_article_summary(self):
+        """Строки те же и в том же порядке — человек не переучивается."""
+        article = daily.daily_table(self.conn, "2026-10-01", "2026-10-01", 777)
+        block = self.table()["campaigns"][0]
+        self.assertEqual([r["key"] for r in block["rows"]],
+                         [r["key"] for r in article["rows"]])
+
+    def test_numbers_belong_to_their_own_campaign(self):
+        blocks = {b["advert_id"]: self.rows(b) for b in self.table()["campaigns"]}
+        self.assertEqual(blocks[1]["spend"]["total"], 100.0)
+        self.assertEqual(blocks[2]["spend"]["total"], 400.0)
+        # ДРР считается внутри кампании, а не делением на общую выручку.
+        self.assertEqual(blocks[1]["drr"]["total"], 5.0)
+        self.assertEqual(blocks[2]["drr"]["total"], 80.0)
+
+    def test_campaign_type_comes_along(self):
+        """Тип кампании важнее номера: «ручная» и «единая» — разные работы."""
+        blocks = {b["advert_id"]: b for b in self.table()["campaigns"]}
+        self.assertEqual(blocks[1]["type_name"], "Аукцион, ручная ставка")
+        self.assertEqual(blocks[2]["name"], "Рекомендации")
+        self.assertEqual(blocks[1]["status_name"], "Идут показы")
+
+    def test_campaign_without_a_card_is_named_by_number(self):
+        """Карточка кампании отдаётся не всегда, а строка без названия
+        читается как пропажа данных."""
+        self.day("2026-10-01", advert_id=3)
+        blocks = {b["advert_id"]: b for b in self.table()["campaigns"]}
+        self.assertEqual(blocks[3]["name"], "Кампания 3")
+
+    def test_zones_are_counted_per_campaign(self):
+        self.conn.execute(
+            "INSERT OR REPLACE INTO campaign_nm_search_daily (advert_id, date,"
+            " nm_id, views, clicks, atbs, orders, shks, spend)"
+            " VALUES (1,'2026-10-01',777,200,0,0,0,0,0)")
+        self.conn.commit()
+        blocks = {b["advert_id"]: b for b in self.table()["campaigns"]}
+        self.assertTrue(blocks[1]["has_zones"])
+        self.assertEqual(self.rows(blocks[1])["views_search"]["total"], 200.0)
+        self.assertEqual(self.rows(blocks[1])["views_other"]["total"], 300.0)
+        # У второй кампании поиск не спрашивали — выдумывать нечего.
+        self.assertFalse(blocks[2]["has_zones"])
+
+    def test_csv_separates_the_tables(self):
+        """Слитые в один блок таблицы читаются как одна кампания с
+        удвоенными числами."""
+        text = daily.campaigns_to_csv(self.table(), "Артикул 777")
+        self.assertIn("Артикул 777", text)
+        self.assertIn("Кампания 2 · Рекомендации", text)
+        self.assertIn("Кампания 1 · Поиск руками", text)
+        self.assertEqual(text.count("Дата;"), 2, "шапка на каждую таблицу")
+
+
+class TestCampaignSummaryApi(DailyCase):
+    """Вкладка не должна встречать человека пустотой: артикул, который
+    тратит больше всех, выбирается сам."""
+
+    def setUp(self):
+        super().setUp()
+        self.day("2026-10-01", advert_id=1, nm_id=111, spend=50.0)
+        self.day("2026-10-01", advert_id=2, nm_id=222, spend=900.0)
+
+    def call(self, query):
+        from wbads import api
+        from wbads.config import Config
+
+        cfg = Config(db_path=Path(self.tmp.name) / "t.db", token="t")
+        return api.handle_campaign_daily(self.conn, cfg, query)
+
+    def test_biggest_spender_is_chosen_by_default(self):
+        data = self.call({"from": ["2026-10-01"], "to": ["2026-10-01"]})
+        self.assertEqual(data["nm_id"], 222)
+        self.assertEqual([b["advert_id"] for b in data["campaigns"]], [2])
+
+    def test_chosen_article_wins(self):
+        data = self.call({"from": ["2026-10-01"], "to": ["2026-10-01"],
+                          "nm_id": ["111"]})
+        self.assertEqual(data["nm_id"], 111)
+        self.assertEqual([b["advert_id"] for b in data["campaigns"]], [1])
+
+    def test_picker_lists_the_articles(self):
+        data = self.call({"from": ["2026-10-01"], "to": ["2026-10-01"]})
+        self.assertEqual([a["nm_id"] for a in data["articles"]], [222, 111])
+
+    def test_empty_base_is_not_an_error(self):
+        other = db.init_db(Path(self.tmp.name) / "empty.db")
+        self.addCleanup(other.close)
+        from wbads import api
+        from wbads.config import Config
+        data = api.handle_campaign_daily(
+            other, Config(db_path=Path(self.tmp.name) / "empty.db", token="t"),
+            {"from": ["2026-10-01"], "to": ["2026-10-01"]})
+        self.assertIsNone(data["nm_id"])
+        self.assertEqual(data["campaigns"], [])
+        self.assertFalse(data["has_data"])
+
+
+class TestTabsNameWhatTheyShow(unittest.TestCase):
+    """«Сводка по дням» не отвечала на вопрос, по чему сводка. Теперь их
+    две: по товарам и по кампаниям, — и названия обязаны их различать."""
+
+    def setUp(self):
+        from wbads.config import ROOT
+
+        self.html = (ROOT / "wbads" / "web" / "index.html").read_text(
+            encoding="utf-8")
+        self.js = (ROOT / "wbads" / "web" / "app.js").read_text(encoding="utf-8")
+
+    def test_both_tabs_exist(self):
+        self.assertIn("Сводка по товарам", self.html)
+        self.assertIn("Сводка по кампаниям", self.html)
+        self.assertNotIn("Сводка по дням", self.html)
+        self.assertNotIn("Сводка по дням", self.js)
+
+    def test_campaign_tab_has_its_own_picker_and_period(self):
+        for ident in ('id="camps-nm-input"', 'id="camps-seg"',
+                      'id="camps-from"', 'id="camps-list"',
+                      'id="camps-export"'):
+            self.assertIn(ident, self.html, f"нет {ident}")
+
+    def test_campaign_tab_is_loaded_when_opened(self):
+        self.assertIn("if (view === 'camps') loadCamps();", self.js)
+        self.assertIn("/api/campaign-daily?", self.js)
+
+    def test_both_pickers_share_one_behaviour(self):
+        """Две копии обработчика клавиш — верный способ однажды починить
+        одну и забыть другую."""
+        self.assertEqual(self.js.count("function makeCombo"), 1)
+        self.assertIn("const dailyCombo = makeCombo", self.js)
+        self.assertIn("const campsCombo = makeCombo", self.js)
+
+    def test_campaign_picker_has_no_whole_cabinet_row(self):
+        """Кампании показываются по одному товару: «весь кабинет» здесь
+        означал бы таблицу на каждую из пятисот кампаний."""
+        self.assertIn("allLabel: ''", self.js)

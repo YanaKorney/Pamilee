@@ -1065,8 +1065,10 @@ function switchView(view) {
     b.setAttribute('aria-selected', String(b.dataset.view === view)));
   document.getElementById('view-analytics').hidden = view !== 'analytics';
   document.getElementById('view-daily').hidden = view !== 'daily';
+  document.getElementById('view-camps').hidden = view !== 'camps';
   document.getElementById('view-journal').hidden = view !== 'journal';
   if (view === 'daily') loadDaily();
+  if (view === 'camps') loadCamps();
   /* Период, цель ДРР и выгрузка относятся к аналитике. В журнале своё окно
      сравнения, и две пары настроек периода рядом только путают. */
   /* У сводки и журнала свои периоды, две пары настроек рядом путают. */
@@ -1673,7 +1675,7 @@ async function loadDaily() {
        данных. Молчать нельзя: человек будет щёлкать по полю и считать,
        что оно не работает. */
     const noArticles = !(data.articles || []).length;
-    document.getElementById('daily-nm-input').disabled = noArticles;
+    dailyCombo.disable(noArticles);
     const note = document.getElementById('daily-nm-note');
     note.hidden = !noArticles;
     if (noArticles) {
@@ -1695,20 +1697,18 @@ function renderDailyFilters(data) {
 
   /* Список артикулов — по обороту, а не по номеру: человек помнит товар
      по деньгам. Порядок задаёт сервер, здесь только показ. */
-  combo.items = (data.articles || []).map((a) => String(a.nm_id));
-  const input = document.getElementById('daily-nm-input');
-  input.value = daily.nm ? String(daily.nm) : '';
-  document.getElementById('daily-nm-clear').hidden = !daily.nm;
+  dailyCombo.setItems((data.articles || []).map((a) => String(a.nm_id)));
+  dailyCombo.sync(daily.nm);
 
   const title = document.getElementById('daily-title');
   const sub = document.getElementById('daily-sub');
   if (daily.nm) {
     title.textContent = data.nm_name
-      ? `Сводка по дням · ${data.nm_name}`
-      : `Сводка по дням · артикул ${daily.nm}`;
+      ? `Сводка по товарам · ${data.nm_name}`
+      : `Сводка по товарам · артикул ${daily.nm}`;
     sub.textContent = `Артикул ${daily.nm}. Показатели по строкам, дни по колонкам.`;
   } else {
-    title.textContent = 'Сводка по дням · весь кабинет';
+    title.textContent = 'Сводка по товарам · весь кабинет';
     sub.textContent = 'Все кампании вместе. Показатели по строкам, дни по колонкам.';
   }
 }
@@ -1721,7 +1721,13 @@ function dailyValue(row, value) {
 }
 
 function renderDaily(data) {
-  const table = document.getElementById('daily-table');
+  fillDailyTable(document.getElementById('daily-table'), data);
+  renderDailyNote(data);
+}
+
+/* Одна и та же таблица в двух сводках: по товарам и по каждой кампании
+   товара. Разводить две копии — значит однажды поправить одну. */
+function fillDailyTable(table, data) {
   table.innerHTML = '';
 
   const head = document.createElement('thead');
@@ -1749,10 +1755,12 @@ function renderDaily(data) {
     body.appendChild(tr);
   });
   table.appendChild(body);
+}
 
-  /* Откуда взялись зоны — сказать обязательно. «Поиск» это отчёт WB по
-     поисковым кластерам, «прочее» — остаток. Остаток, выданный за отчёт,
-     однажды обернулся бы решением на выдуманном числе. */
+/* Откуда взялись зоны — сказать обязательно. «Поиск» это отчёт WB по
+   поисковым кластерам, «прочее» — остаток. Остаток, выданный за отчёт,
+   однажды обернулся бы решением на выдуманном числе. */
+function renderDailyNote(data) {
   const note = document.getElementById('daily-note');
   note.hidden = false;
   if (data.has_zones) {
@@ -1773,167 +1781,336 @@ function renderDaily(data) {
   }
 }
 
-document.getElementById('daily-seg').addEventListener('click', (e) => {
-  const btn = e.target.closest('button[data-days]');
-  if (!btn) return;
-  daily.days = Number(btn.dataset.days);
-  daily.from = daily.to = null;
-  document.querySelectorAll('#daily-seg button').forEach((b) =>
-    b.setAttribute('aria-pressed', String(b === btn)));
-  loadDaily();
-});
+/* Выбор периода устроен одинаково у обеих сводок, и разводить два
+   почти одинаковых обработчика — верный способ однажды починить один
+   и забыть другой. */
+function bindPeriod(prefix, state, reload) {
+  const buttons = () =>
+    document.querySelectorAll(`#${prefix}-seg button`);
 
-['daily-from', 'daily-to'].forEach((id) => {
-  document.getElementById(id).addEventListener('change', () => {
-    const from = document.getElementById('daily-from').value;
-    const to = document.getElementById('daily-to').value;
-    if (!from || !to) return;
-    daily.from = from; daily.to = to;
-    document.querySelectorAll('#daily-seg button').forEach((b) =>
-      b.setAttribute('aria-pressed', 'false'));
-    loadDaily();
+  document.getElementById(`${prefix}-seg`).addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-days]');
+    if (!btn) return;
+    state.days = Number(btn.dataset.days);
+    state.from = state.to = null;
+    buttons().forEach((b) => b.setAttribute('aria-pressed', String(b === btn)));
+    reload();
   });
-});
+
+  [`${prefix}-from`, `${prefix}-to`].forEach((id) => {
+    document.getElementById(id).addEventListener('change', () => {
+      const from = document.getElementById(`${prefix}-from`).value;
+      const to = document.getElementById(`${prefix}-to`).value;
+      if (!from || !to) return;
+      state.from = from; state.to = to;
+      buttons().forEach((b) => b.setAttribute('aria-pressed', 'false'));
+      reload();
+    });
+  });
+}
+
+bindPeriod('daily', daily, loadDaily);
+
+
+/* ── сводка по кампаниям ──────────────────────────────────────────────────
+
+   Один товар почти всегда крутится в нескольких кампаниях сразу, и в
+   общей сумме пропадает именно то, по чему принимают решение: ручная на
+   поиске может кормить, пока автоматическая на рекомендациях жжёт.
+   Поэтому здесь по таблице на кампанию, от крупной к мелкой. */
+
+const camps = { days: 7, from: null, to: null, nm: null, data: null };
+
+function campsQuery() {
+  const p = new URLSearchParams();
+  if (camps.from && camps.to) { p.set('from', camps.from); p.set('to', camps.to); }
+  else p.set('days', String(camps.days));
+  if (camps.nm) p.set('nm_id', String(camps.nm));
+  return p.toString();
+}
+
+async function loadCamps() {
+  const host = document.getElementById('camps-list');
+  const empty = document.getElementById('camps-empty');
+  try {
+    const res = await fetch('/api/campaign-daily?' + campsQuery());
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    camps.data = data;
+    /* Артикул выбирает сервер, если человек его не выбирал: пустая
+       вкладка с подписью «выберите товар» — лишний щелчок на ровном
+       месте. Но запомнить выбор надо, иначе смена периода его сбросит. */
+    camps.nm = data.nm_id || null;
+    document.getElementById('camps-export').href =
+      '/api/campaign-daily.csv?' + campsQuery();
+    renderCampsFilters(data);
+    renderCamps(data);
+    const count = (data.campaigns || []).length;
+    empty.hidden = count > 0;
+    if (!count) {
+      empty.textContent = data.nm_id
+        ? 'У этого товара за выбранный период кампаний с открутками не было.'
+        : 'Разбивки по товарам в базе нет — соберите статистику из кабинета.';
+    }
+  } catch (err) {
+    host.innerHTML = '';
+    empty.hidden = false;
+    empty.textContent = 'Не удалось загрузить сводку: ' + err.message;
+  }
+}
+
+function renderCampsFilters(data) {
+  document.getElementById('camps-from').value = data.period.from;
+  document.getElementById('camps-to').value = data.period.to;
+
+  campsCombo.setItems((data.articles || []).map((a) => String(a.nm_id)));
+  campsCombo.sync(camps.nm);
+
+  const noArticles = !(data.articles || []).length;
+  campsCombo.disable(noArticles);
+  const note = document.getElementById('camps-nm-note');
+  note.hidden = !noArticles;
+  if (noArticles) {
+    note.textContent = 'Товары появятся после сбора статистики.';
+  }
+
+  const title = document.getElementById('camps-title');
+  const sub = document.getElementById('camps-sub');
+  const count = (data.campaigns || []).length;
+  if (data.nm_id) {
+    title.textContent = data.nm_name
+      ? `Сводка по кампаниям · ${data.nm_name}`
+      : `Сводка по кампаниям · артикул ${data.nm_id}`;
+    sub.textContent = `Артикул ${data.nm_id}: ${count} ` +
+      `${plural(count, 'кампания', 'кампании', 'кампаний')} за период, `
+      + 'от крупной по расходу к мелкой.';
+  } else {
+    title.textContent = 'Сводка по кампаниям';
+    sub.textContent = 'Выберите товар — покажу каждую его кампанию отдельно.';
+  }
+}
+
+function renderCamps(data) {
+  const host = document.getElementById('camps-list');
+  host.innerHTML = '';
+
+  (data.campaigns || []).forEach((block) => {
+    const box = el('section', 'camp-block');
+
+    const head = el('div', 'camp-block-head');
+    head.appendChild(el('h3', '', escapeHtml(block.name)));
+    /* Тип кампании важнее номера: «Аукцион, ручная ставка» и
+       «Автоматическая» — это разные работы, и строка должна отвечать
+       на вопрос «какая это кампания» без похода в кабинет. */
+    const marks = [block.type_name, block.status_name, `№ ${block.advert_id}`]
+      .filter(Boolean);
+    head.appendChild(el('p', 'camp-block-meta', marks.join(' · ')));
+    box.appendChild(head);
+
+    const scroll = el('div', 'dgrid-scroll');
+    const table = document.createElement('table');
+    table.className = 'dgrid';
+    fillDailyTable(table, block);
+    scroll.appendChild(table);
+    box.appendChild(scroll);
+
+    if (!block.has_data) {
+      box.appendChild(el('p', 'dgrid-note',
+        'За период у этой кампании открутки по товару не было.'));
+    }
+    host.appendChild(box);
+  });
+
+  /* Зоны объясняем один раз внизу, а не под каждой таблицей: строка
+     «прочее» — это остаток, а не отчёт WB, и человек обязан это знать.
+     Повторять одно и то же у каждой кампании — значит приучить
+     пролистывать примечания. */
+  if ((data.campaigns || []).some((b) => b.has_zones)) {
+    host.appendChild(el('p', 'dgrid-note',
+      'Показы в поиске — данные WB по поисковым кластерам. «Прочее» — ' +
+      'разница между всеми показами и поиском: полки, каталог и карточку ' +
+      'WB отдельно не отдаёт. У кампаний без этих строк поиск при сборе ' +
+      'не спрашивали.'));
+  }
+}
+
+bindPeriod('camps', camps, loadCamps);
+
+
 
 /* ── поле «Товар»: ввод с поиском ─────────────────────────────────────────
 
    Обычный <select> не умеет строки поиска, а артикулов у кабинета
    полтысячи: пролистывать их глазами — не работа. Поэтому поле ввода и
-   выпадающий список, который фильтруется по мере набора номера. */
+   выпадающий список, который фильтруется по мере набора номера.
 
-const combo = { items: [], shown: [], active: -1, open: false };
+   Полей таких два — в сводке по товарам и в сводке по кампаниям, — и
+   поведение у них обязано совпадать до клавиши: человек не помнит, в
+   какой вкладке Enter работает иначе. Поэтому одна фабрика на оба. */
 
 /* Больше двух сотен строк разом браузер рисует заметно, а пользы в них
    нет: нужный артикул находится набором двух-трёх цифр. */
 const COMBO_LIMIT = 200;
 
-const comboInput = () => document.getElementById('daily-nm-input');
-const comboList = () => document.getElementById('daily-nm-list');
+function makeCombo({ inputId, listId, clearId, allLabel, selected, onPick }) {
+  const c = { items: [], shown: [], active: -1, open: false };
+  const input = () => document.getElementById(inputId);
+  const list = () => document.getElementById(listId);
+  const clearBtn = () => (clearId ? document.getElementById(clearId) : null);
+  const shownValue = () => (selected() ? String(selected()) : '');
 
-function comboMatches(query) {
-  const text = String(query || '').trim();
-  if (!text) return combo.items;
-  return combo.items.filter((id) => id.includes(text));
-}
-
-function openCombo(query) {
-  const list = comboList();
-  combo.shown = comboMatches(query);
-  combo.open = true;
-  combo.active = -1;
-  list.innerHTML = '';
-
-  /* «Весь кабинет» — первой строкой и только когда поиск пуст: при
-     наборе цифр он в выдаче только мешает. */
-  if (!String(query || '').trim()) {
-    const all = el('li', 'combo-all', 'Весь кабинет');
-    all.setAttribute('role', 'option');
-    all.dataset.value = '';
-    list.appendChild(all);
+  function matches(query) {
+    const text = String(query || '').trim();
+    if (!text) return c.items;
+    return c.items.filter((id) => id.includes(text));
   }
 
-  if (!combo.shown.length) {
-    const none = el('li', 'combo-empty', 'Такого артикула за период нет');
-    none.setAttribute('role', 'presentation');
-    list.appendChild(none);
+  function open(query) {
+    const box = list();
+    c.shown = matches(query);
+    c.open = true;
+    c.active = -1;
+    box.innerHTML = '';
+
+    /* «Весь кабинет» — первой строкой и только когда поиск пуст: при
+       наборе цифр он в выдаче только мешает. В сводке по кампаниям этой
+       строки нет вовсе — кампании показываются по одному товару. */
+    if (allLabel && !String(query || '').trim()) {
+      const all = el('li', 'combo-all', allLabel);
+      all.setAttribute('role', 'option');
+      all.dataset.value = '';
+      box.appendChild(all);
+    }
+
+    if (!c.shown.length) {
+      const none = el('li', 'combo-empty', 'Такого артикула за период нет');
+      none.setAttribute('role', 'presentation');
+      box.appendChild(none);
+    }
+
+    c.shown.slice(0, COMBO_LIMIT).forEach((id) => {
+      const item = el('li', '', id);
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', String(Number(id) === selected()));
+      item.dataset.value = id;
+      box.appendChild(item);
+    });
+
+    if (c.shown.length > COMBO_LIMIT) {
+      const more = el('li', 'combo-more',
+        `…и ещё ${c.shown.length - COMBO_LIMIT}. Наберите ещё цифру.`);
+      more.setAttribute('role', 'presentation');
+      box.appendChild(more);
+    }
+
+    box.hidden = false;
+    input().setAttribute('aria-expanded', 'true');
   }
 
-  combo.shown.slice(0, COMBO_LIMIT).forEach((id) => {
-    const item = el('li', '', id);
-    item.setAttribute('role', 'option');
-    item.setAttribute('aria-selected', String(Number(id) === daily.nm));
-    item.dataset.value = id;
-    list.appendChild(item);
+  function close() {
+    c.open = false;
+    c.active = -1;
+    list().hidden = true;
+    input().setAttribute('aria-expanded', 'false');
+  }
+
+  function options() {
+    return Array.from(list().querySelectorAll('li[role="option"]'));
+  }
+
+  function highlight(step) {
+    const items = options();
+    if (!items.length) return;
+    c.active = (c.active + step + items.length) % items.length;
+    items.forEach((o, i) => o.classList.toggle('active', i === c.active));
+    items[c.active].scrollIntoView({ block: 'nearest' });
+  }
+
+  function choose(value) {
+    const next = value ? Number(value) : null;
+    close();
+    input().value = value || '';
+    if (clearBtn()) clearBtn().hidden = !value;
+    if (next === selected()) return;
+    onPick(next);
+  }
+
+  input().addEventListener('focus', () => open(input().value));
+  input().addEventListener('input', () => open(input().value));
+
+  input().addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!c.open) open(input().value);
+      else highlight(e.key === 'ArrowDown' ? 1 : -1);
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const items = options();
+      if (c.active >= 0 && items[c.active]) {
+        choose(items[c.active].dataset.value);
+      } else if (c.shown.length === 1) {
+        /* Набрали номер целиком — Enter обязан его выбрать, а не закрыть
+           список молча. */
+        choose(c.shown[0]);
+      } else if (allLabel && !input().value.trim()) {
+        choose('');
+      }
+      return;
+    }
+    if (e.key === 'Escape') {
+      close();
+      input().value = shownValue();
+    }
   });
 
-  if (combo.shown.length > COMBO_LIMIT) {
-    const more = el('li', 'combo-more',
-      `…и ещё ${combo.shown.length - COMBO_LIMIT}. Наберите ещё цифру.`);
-    more.setAttribute('role', 'presentation');
-    list.appendChild(more);
-  }
-
-  list.hidden = false;
-  comboInput().setAttribute('aria-expanded', 'true');
-}
-
-function closeCombo() {
-  combo.open = false;
-  combo.active = -1;
-  comboList().hidden = true;
-  comboInput().setAttribute('aria-expanded', 'false');
-}
-
-function comboOptions() {
-  return Array.from(comboList().querySelectorAll('li[role="option"]'));
-}
-
-function highlight(step) {
-  const options = comboOptions();
-  if (!options.length) return;
-  combo.active = (combo.active + step + options.length) % options.length;
-  options.forEach((o, i) => o.classList.toggle('active', i === combo.active));
-  options[combo.active].scrollIntoView({ block: 'nearest' });
-}
-
-function chooseArticle(value) {
-  const next = value ? Number(value) : null;
-  closeCombo();
-  comboInput().value = value || '';
-  document.getElementById('daily-nm-clear').hidden = !value;
-  if (next === daily.nm) return;
-  daily.nm = next;
-  loadDaily();
-}
-
-comboInput().addEventListener('focus', () => openCombo(comboInput().value));
-comboInput().addEventListener('input', () => openCombo(comboInput().value));
-
-comboInput().addEventListener('keydown', (e) => {
-  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+  list().addEventListener('mousedown', (e) => {
+    /* mousedown, а не click: иначе поле успеет потерять фокус и список
+       закроется раньше, чем щелчок до него дойдёт. */
+    const item = e.target.closest('li[role="option"]');
+    if (!item) return;
     e.preventDefault();
-    if (!combo.open) openCombo(comboInput().value);
-    else highlight(e.key === 'ArrowDown' ? 1 : -1);
-    return;
+    choose(item.dataset.value);
+  });
+
+  if (clearBtn()) {
+    clearBtn().addEventListener('click', () => choose(''));
   }
-  if (e.key === 'Enter') {
-    e.preventDefault();
-    const options = comboOptions();
-    if (combo.active >= 0 && options[combo.active]) {
-      chooseArticle(options[combo.active].dataset.value);
-    } else if (combo.shown.length === 1) {
-      /* Набрали номер целиком — Enter обязан его выбрать, а не закрыть
-         список молча. */
-      chooseArticle(combo.shown[0]);
-    } else if (!comboInput().value.trim()) {
-      chooseArticle('');
-    }
-    return;
-  }
-  if (e.key === 'Escape') {
-    closeCombo();
-    comboInput().value = daily.nm ? String(daily.nm) : '';
-  }
+
+  /* Щелчок мимо закрывает список и возвращает в поле выбранный артикул:
+     брошенный набор не должен выглядеть как выбор. */
+  document.addEventListener('click', (e) => {
+    if (!c.open) return;
+    if (e.target.closest('.combo') === input().closest('.combo')) return;
+    close();
+    input().value = shownValue();
+  });
+
+  return {
+    setItems(items) { c.items = items; },
+    sync(value) {
+      input().value = value ? String(value) : '';
+      if (clearBtn()) clearBtn().hidden = !value;
+    },
+    disable(flag) { input().disabled = flag; },
+  };
+}
+
+const dailyCombo = makeCombo({
+  inputId: 'daily-nm-input',
+  listId: 'daily-nm-list',
+  clearId: 'daily-nm-clear',
+  allLabel: 'Весь кабинет',
+  selected: () => daily.nm,
+  onPick: (nm) => { daily.nm = nm; loadDaily(); },
 });
 
-comboList().addEventListener('mousedown', (e) => {
-  /* mousedown, а не click: иначе поле успеет потерять фокус и список
-     закроется раньше, чем щелчок до него дойдёт. */
-  const item = e.target.closest('li[role="option"]');
-  if (!item) return;
-  e.preventDefault();
-  chooseArticle(item.dataset.value);
-});
-
-document.getElementById('daily-nm-clear').addEventListener('click', () => {
-  chooseArticle('');
-});
-
-/* Щелчок мимо закрывает список и возвращает в поле выбранный артикул:
-   брошенный набор не должен выглядеть как выбор. */
-document.addEventListener('click', (e) => {
-  if (!combo.open) return;
-  if (e.target.closest('.combo')) return;
-  closeCombo();
-  comboInput().value = daily.nm ? String(daily.nm) : '';
+const campsCombo = makeCombo({
+  inputId: 'camps-nm-input',
+  listId: 'camps-nm-list',
+  clearId: '',
+  allLabel: '',
+  selected: () => camps.nm,
+  onPick: (nm) => { camps.nm = nm; loadCamps(); },
 });

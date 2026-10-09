@@ -39,7 +39,8 @@
 
   <nav class="tabs" id="tabs" role="tablist" aria-label="Разделы">
     <button role="tab" data-view="analytics" aria-selected="true">Аналитика</button>
-    <button role="tab" data-view="daily" aria-selected="false">Сводка по дням</button>
+    <button role="tab" data-view="daily" aria-selected="false">Сводка по товарам</button>
+    <button role="tab" data-view="camps" aria-selected="false">Сводка по кампаниям</button>
     <button role="tab" data-view="journal" aria-selected="false">Журнал изменений</button>
   </nav>
 
@@ -101,7 +102,7 @@
     <section class="card">
       <div class="dhead">
         <div>
-          <h2 id="daily-title">Сводка по дням</h2>
+          <h2 id="daily-title">Сводка по товарам</h2>
           <p class="hint" id="daily-sub">Показатели по строкам, дни по колонкам.</p>
         </div>
         <a class="btn" id="daily-export" href="/api/daily.csv" download>
@@ -142,6 +143,49 @@
     </section>
 
   </div><!-- /view-daily -->
+
+  <div id="view-camps" hidden>
+
+    <section class="card">
+      <div class="dhead">
+        <div>
+          <h2 id="camps-title">Сводка по кампаниям</h2>
+          <p class="hint" id="camps-sub">Отдельная таблица на каждую
+            кампанию товара.</p>
+        </div>
+        <a class="btn" id="camps-export" href="/api/campaign-daily.csv" download>
+          Выгрузить в CSV</a>
+      </div>
+
+      <div class="dfilter">
+        <div class="seg" id="camps-seg" role="group" aria-label="Период">
+          <button data-days="7" aria-pressed="true">7 дней</button>
+          <button data-days="14" aria-pressed="false">14 дней</button>
+          <button data-days="30" aria-pressed="false">30 дней</button>
+        </div>
+        <label><span class="cap">с</span>
+          <input type="date" id="camps-from"></label>
+        <label><span class="cap">по</span>
+          <input type="date" id="camps-to"></label>
+        <label class="combo-field"><span class="cap">Товар</span>
+          <div class="combo">
+            <input type="text" id="camps-nm-input" role="combobox"
+                   aria-expanded="false" aria-controls="camps-nm-list"
+                   aria-autocomplete="list" autocomplete="off"
+                   placeholder="артикул"
+                   aria-label="Артикул товара, поиск по номеру">
+            <ul class="combo-list" id="camps-nm-list" role="listbox" hidden
+                aria-label="Артикулы"></ul>
+          </div>
+          <span class="dnote" id="camps-nm-note" hidden></span>
+        </label>
+      </div>
+
+      <div id="camps-list"></div>
+      <p class="jempty" id="camps-empty" hidden></p>
+    </section>
+
+  </div><!-- /view-camps -->
 
   <div id="view-journal" hidden>
 

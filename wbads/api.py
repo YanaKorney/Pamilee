@@ -241,7 +241,7 @@ def _sorted_changes(items: list[dict[str, Any]], order: str) -> list[dict[str, A
 
 def handle_daily(conn: sqlite3.Connection, cfg: Config,
                  query: dict[str, list[str]]) -> dict[str, Any]:
-    """Сводка по дням: по всему кабинету или по одному артикулу."""
+    """Сводка по товарам: по всему кабинету или по одному артикулу."""
     date_from, date_to = _period(conn, query)
     nm_raw = (query.get("nm_id") or [""])[0]
     nm_id = int(nm_raw) if nm_raw.isdigit() else None
@@ -269,6 +269,60 @@ def handle_daily_csv(conn: sqlite3.Connection, cfg: Config,
         title = "Весь кабинет"
         filename = f"reklama-{date_from}_{date_to}.csv"
     return daily.to_csv(table, f"{title} · {date_from} — {date_to}"), filename
+
+
+def handle_campaign_daily(conn: sqlite3.Connection, cfg: Config,
+                          query: dict[str, list[str]]) -> dict[str, Any]:
+    """Сводка по кампаниям одного артикула: по таблице на кампанию."""
+    date_from, date_to = _period(conn, query)
+    names = _article_names(conn)
+    articles = daily.articles(conn, date_from, date_to, names)
+    nm_id = _chosen_article(query, articles)
+
+    if nm_id is None:
+        # Без артикула показывать нечего, и это не ошибка: так выглядит
+        # кабинет, в котором разбивки по товарам ещё нет.
+        return {"period": {"from": date_from, "to": date_to,
+                           "days": len(daily.daterange(date_from, date_to))},
+                "nm_id": None, "dates": [], "campaigns": [],
+                "has_data": False, "articles": articles, "nm_name": ""}
+
+    table = daily.campaign_tables(conn, date_from, date_to, nm_id)
+    table["articles"] = articles
+    table["nm_name"] = names.get(nm_id, "")
+    return table
+
+
+def handle_campaign_daily_csv(conn: sqlite3.Connection, cfg: Config,
+                              query: dict[str, list[str]]) -> tuple[str, str]:
+    """Те же таблицы файлом — одна под другой, с шапкой на каждую."""
+    date_from, date_to = _period(conn, query)
+    names = _article_names(conn)
+    articles = daily.articles(conn, date_from, date_to, names)
+    nm_id = _chosen_article(query, articles)
+    if nm_id is None:
+        return "", f"reklama-kampanii-{date_from}_{date_to}.csv"
+
+    data = daily.campaign_tables(conn, date_from, date_to, nm_id)
+    name = names.get(nm_id, "")
+    title = (f"Кампании артикула {nm_id}" + (f" · {name}" if name else "")
+             + f" · {date_from} — {date_to}")
+    return (daily.campaigns_to_csv(data, title),
+            f"reklama-kampanii-{nm_id}-{date_from}_{date_to}.csv")
+
+
+def _chosen_article(query: dict[str, list[str]],
+                    articles: list[dict[str, Any]]) -> int | None:
+    """Выбранный артикул, а если не выбран — самый крупный по расходу.
+
+    Пустая вкладка с подписью «выберите товар» — это лишний щелчок на
+    ровном месте: в девяти случаях из десяти смотрят как раз тот товар,
+    который больше всех тратит.
+    """
+    raw = (query.get("nm_id") or [""])[0]
+    if raw.isdigit():
+        return int(raw)
+    return int(articles[0]["nm_id"]) if articles else None
 
 
 def handle_articles(conn: sqlite3.Connection, cfg: Config,
@@ -315,6 +369,7 @@ ROUTES: dict[str, Callable] = {
     "/api/campaign": handle_campaign,
     "/api/meta": handle_meta,
     "/api/daily": handle_daily,
+    "/api/campaign-daily": handle_campaign_daily,
     "/api/changes": handle_changes,
     "/api/articles": handle_articles,
 }
@@ -565,10 +620,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         try:
             if route in ("/api/export.csv", "/api/changes.csv",
-                         "/api/daily.csv"):
+                         "/api/daily.csv", "/api/campaign-daily.csv"):
                 maker = {"/api/changes.csv": handle_changes_csv,
-                         "/api/daily.csv": handle_daily_csv}.get(
-                             route, handle_export)
+                         "/api/daily.csv": handle_daily_csv,
+                         "/api/campaign-daily.csv": handle_campaign_daily_csv,
+                         }.get(route, handle_export)
                 with db.session(self.config.db_path) as conn:
                     content, filename = maker(conn, self.config, query)
                 body = content.encode("utf-8-sig")  # BOM — чтобы Excel не ломал кириллицу

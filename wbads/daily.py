@@ -1,4 +1,4 @@
-"""Сводка по дням в виде таблицы «показатели × дни».
+"""Сводки в виде таблицы «показатели × дни».
 
 Форма взята из таблицы, которую менеджер ведёт руками: строки — показатели,
 колонки — дни. Привычный для аналитики вид — наоборот, строка на день, и
@@ -6,9 +6,11 @@
 определённым движением глаза, и менять его ради чужой нормы — значит
 заставлять переучиваться там, где учиться нечему.
 
-Считается либо по всему кабинету, либо по одному артикулу. Артикул —
-естественная единица работы: правки делают в кампании, а смотрят на товар,
-и один товар часто крутится сразу в нескольких кампаниях.
+Две сводки из одного кода. «По товарам» — весь кабинет или один артикул:
+правки делают в кампании, а смотрят на товар. «По кампаниям» — тот же
+артикул, но по таблице на каждую его кампанию: ручная на поиске и
+автоматическая на рекомендациях живут по-разному, и в общей сумме это
+различие пропадает ровно там, где по нему принимают решение.
 """
 
 from __future__ import annotations
@@ -33,13 +35,6 @@ ZONE_ROWS: list[dict[str, Any]] = [
 ]
 
 ROWS: list[dict[str, Any]] = [
-    {"key": "views_search", "title": "в поиске", "unit": "шт", "zone": True},
-    {"key": "views_shelves", "title": "в рекомендательных полках",
-     "unit": "шт", "zone": True},
-    {"key": "views_catalog", "title": "в каталоге", "unit": "шт", "zone": True},
-]
-
-ROWS: list[dict[str, Any]] = [
     {"key": "views", "title": "Показы", "unit": "шт"},
     *ZONE_ROWS,
     {"key": "clicks", "title": "Клики", "unit": "шт"},
@@ -61,17 +56,21 @@ SUMMABLE = {"views", "clicks", "atbs", "orders", "shks", "spend", "revenue",
 
 
 def _search_by_day(conn: sqlite3.Connection, date_from: str, date_to: str,
-                   nm_id: int | None) -> dict[str, float]:
+                   nm_id: int | None, advert_id: int | None = None
+                   ) -> dict[str, float]:
     """Показы в поиске по дням — из статистики поисковых кластеров."""
     params: list[Any] = [date_from, date_to]
-    nm_clause = ""
+    where = ""
     if nm_id is not None:
-        nm_clause = " AND nm_id = ?"
+        where += " AND nm_id = ?"
         params.append(nm_id)
+    if advert_id is not None:
+        where += " AND advert_id = ?"
+        params.append(advert_id)
     return {str(row["date"])[:10]: float(row["views"] or 0)
             for row in conn.execute(
                 "SELECT date, SUM(views) AS views FROM campaign_nm_search_daily"
-                " WHERE date BETWEEN ? AND ?" + nm_clause + " GROUP BY date",
+                " WHERE date BETWEEN ? AND ?" + where + " GROUP BY date",
                 params)}
 
 
@@ -99,10 +98,73 @@ def daily_table(conn: sqlite3.Connection, date_from: str, date_to: str,
     Среднее от дневных ДРР — это не ДРР периода: день с расходом 10 ₽ весит
     в нём столько же, сколько день с расходом 10 000 ₽.
     """
-    totals_by_day = _by_day(conn, date_from, date_to, nm_id)
-    search_by_day = _search_by_day(conn, date_from, date_to, nm_id)
-    days = daterange(date_from, date_to)
+    table = _table(_by_day(conn, date_from, date_to, nm_id),
+                   _search_by_day(conn, date_from, date_to, nm_id),
+                   daterange(date_from, date_to))
+    return {"period": {"from": date_from, "to": date_to,
+                       "days": len(table["dates"])},
+            "nm_id": nm_id, **table}
 
+
+def campaign_tables(conn: sqlite3.Connection, date_from: str, date_to: str,
+                    nm_id: int) -> dict[str, Any]:
+    """Те же таблицы, но по одной на каждую кампанию этого артикула.
+
+    Один товар почти всегда крутится сразу в нескольких кампаниях, и
+    складывать их в одну таблицу — значит прятать именно то, по чему
+    принимается решение: ручная на поиске может кормить, пока
+    автоматическая на рекомендациях жжёт. Поэтому по таблице на кампанию,
+    от крупной к мелкой — порядок задаёт расход, а не номер.
+    """
+    days = daterange(date_from, date_to)
+    blocks: list[dict[str, Any]] = []
+    for camp in _campaigns_of(conn, date_from, date_to, nm_id):
+        advert_id = camp["advert_id"]
+        blocks.append({
+            **camp,
+            **_table(_by_day(conn, date_from, date_to, nm_id,
+                             advert_id=advert_id),
+                     _search_by_day(conn, date_from, date_to, nm_id,
+                                    advert_id=advert_id),
+                     days),
+        })
+    return {
+        "period": {"from": date_from, "to": date_to, "days": len(days)},
+        "nm_id": nm_id,
+        "dates": days,
+        "campaigns": blocks,
+        "has_data": any(block["has_data"] for block in blocks),
+    }
+
+
+def _campaigns_of(conn: sqlite3.Connection, date_from: str, date_to: str,
+                  nm_id: int) -> list[dict[str, Any]]:
+    """Кампании, в которых этот артикул крутился за период."""
+    rows = conn.execute(
+        "SELECT d.advert_id AS advert_id, SUM(d.spend) AS spend,"
+        " SUM(d.views) AS views, MAX(c.name) AS name,"
+        " MAX(c.type_name) AS type_name, MAX(c.status_name) AS status_name"
+        " FROM campaign_nm_daily d"
+        " LEFT JOIN campaigns c ON c.advert_id = d.advert_id"
+        " WHERE d.nm_id = ? AND d.date BETWEEN ? AND ?"
+        " GROUP BY d.advert_id ORDER BY SUM(d.spend) DESC, d.advert_id",
+        (nm_id, date_from, date_to),
+    ).fetchall()
+
+    return [{
+        "advert_id": int(row["advert_id"]),
+        # Без карточки кампании названия нет — опознаём по номеру, как
+        # и везде: пустая строка на месте названия читается как пропажа.
+        "name": str(row["name"] or "") or f"Кампания {int(row['advert_id'])}",
+        "type_name": str(row["type_name"] or ""),
+        "status_name": str(row["status_name"] or ""),
+    } for row in rows]
+
+
+def _table(totals_by_day: dict[str, dict[str, float]],
+           search_by_day: dict[str, float],
+           days: Sequence[str]) -> dict[str, Any]:
+    """Собирает строки таблицы из дневных сумм. Общее для обеих сводок."""
     zone_keys = [row["key"] for row in ZONE_ROWS]
     period_totals = {key: 0.0 for key in RAW_KEYS}
     zone_totals = {key: 0.0 for key in zone_keys}
@@ -135,9 +197,7 @@ def daily_table(conn: sqlite3.Connection, date_from: str, date_to: str,
         })
 
     return {
-        "period": {"from": date_from, "to": date_to, "days": len(days)},
-        "nm_id": nm_id,
-        "dates": days,
+        "dates": list(days),
         "rows": rows,
         "has_data": any(period_totals[key] for key in RAW_KEYS),
         # Зоны показываем, только если статистика поиска вообще собрана.
@@ -149,17 +209,21 @@ def daily_table(conn: sqlite3.Connection, date_from: str, date_to: str,
 
 
 def _by_day(conn: sqlite3.Connection, date_from: str, date_to: str,
-            nm_id: int | None) -> dict[str, dict[str, float]]:
-    """Сырые суммы по дням: по кабинету или по одному артикулу."""
+            nm_id: int | None, advert_id: int | None = None
+            ) -> dict[str, dict[str, float]]:
+    """Сырые суммы по дням: по кабинету, по артикулу или по его кампании."""
+    sums = ", ".join(f"SUM({k}) AS {k}" for k in RAW_KEYS)
     if nm_id is None:
-        sql = ("SELECT date, " + ", ".join(f"SUM({k}) AS {k}" for k in RAW_KEYS)
-               + " FROM campaign_daily WHERE date BETWEEN ? AND ? GROUP BY date")
+        sql = (f"SELECT date, {sums} FROM campaign_daily"
+               " WHERE date BETWEEN ? AND ? GROUP BY date")
         params: list[Any] = [date_from, date_to]
     else:
-        sql = ("SELECT date, " + ", ".join(f"SUM({k}) AS {k}" for k in RAW_KEYS)
-               + " FROM campaign_nm_daily WHERE nm_id = ?"
-                 " AND date BETWEEN ? AND ? GROUP BY date")
+        where = " AND advert_id = ?" if advert_id is not None else ""
+        sql = (f"SELECT date, {sums} FROM campaign_nm_daily WHERE nm_id = ?"
+               " AND date BETWEEN ? AND ?" + where + " GROUP BY date")
         params = [nm_id, date_from, date_to]
+        if advert_id is not None:
+            params.append(advert_id)
 
     return {str(row["date"])[:10]: {key: float(row[key] or 0) for key in RAW_KEYS}
             for row in conn.execute(sql, params)}
@@ -196,17 +260,52 @@ def articles(conn: sqlite3.Connection, date_from: str, date_to: str,
 
 def to_csv(table: dict[str, Any], title: str = "") -> str:
     """Та же таблица файлом — её открывают в Excel и доделывают руками."""
-    import csv
     import io
 
     buffer = io.StringIO()
-    writer = csv.writer(buffer, delimiter=";")
+    writer = _writer(buffer)
+    if title:
+        writer.writerow([title])
+    _write_table(writer, table)
+    return buffer.getvalue()
 
+
+def campaigns_to_csv(data: dict[str, Any], title: str = "") -> str:
+    """Сводка по кампаниям файлом: таблицы одна под другой.
+
+    Разделять их пустой строкой и шапкой обязательно — слитые в один
+    блок, они читаются как одна кампания с удвоенными числами.
+    """
+    import io
+
+    buffer = io.StringIO()
+    writer = _writer(buffer)
+    if title:
+        writer.writerow([title])
+    for block in data.get("campaigns") or []:
+        writer.writerow([])
+        writer.writerow([_campaign_label(block)])
+        _write_table(writer, block)
+    return buffer.getvalue()
+
+
+def _campaign_label(block: dict[str, Any]) -> str:
+    parts = [str(block.get("name") or ""), str(block.get("type_name") or ""),
+             str(block.get("status_name") or "")]
+    head = f"Кампания {block.get('advert_id')}"
+    return " · ".join([head] + [p for p in parts if p])
+
+
+def _writer(buffer: Any) -> Any:
+    import csv
+
+    return csv.writer(buffer, delimiter=";")
+
+
+def _write_table(writer: Any, table: dict[str, Any]) -> None:
     def dec(value: float, digits: int = 2) -> str:
         return f"{value:.{digits}f}".replace(".", ",")
 
-    if title:
-        writer.writerow([title])
     writer.writerow(["Дата"] + [_day_label(d) for d in table["dates"]]
                     + ["За период"])
     for row in table["rows"]:
@@ -218,7 +317,6 @@ def to_csv(table: dict[str, Any], title: str = "") -> str:
         writer.writerow([row["title"]]
                         + [dec(v, digits) for v in row["days"]]
                         + [dec(row["total"], digits)])
-    return buffer.getvalue()
 
 
 def _day_label(iso: str) -> str:
