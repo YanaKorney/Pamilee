@@ -693,3 +693,43 @@ class TestTabsNameWhatTheyShow(unittest.TestCase):
         """Кампании показываются по одному товару: «весь кабинет» здесь
         означал бы таблицу на каждую из пятисот кампаний."""
         self.assertIn("allLabel: ''", self.js)
+
+
+class TestOnlyThisArticlesCampaigns(DailyCase):
+    """«Выбрал артикул — покажи кампании только этого артикула». Чужая
+    кампания в списке — это предложение полезть править не тот бюджет.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # Товар 777 крутится в кампании 1; кампания 2 — чужая, про 888.
+        self.day("2026-10-01", advert_id=1, nm_id=777)
+        self.day("2026-10-01", advert_id=2, nm_id=888)
+
+    def test_foreign_campaigns_stay_out(self):
+        data = daily.campaign_tables(self.conn, "2026-10-01", "2026-10-01", 777)
+        self.assertEqual([b["advert_id"] for b in data["campaigns"]], [1])
+
+    def test_campaign_where_the_article_never_ran_is_hidden(self):
+        """У кампании строки по товару есть, а чисел в них нет: WB
+        присылает и такие. Таблица из прочерков читается как «эта
+        кампания тоже про этот товар»."""
+        self.conn.execute(
+            "INSERT OR REPLACE INTO campaign_nm_daily (advert_id, date, nm_id,"
+            " name, views, clicks, atbs, orders, shks, spend, revenue)"
+            " VALUES (3,'2026-10-01',777,'Товар',0,0,0,0,0,0,0)")
+        self.conn.commit()
+        data = daily.campaign_tables(self.conn, "2026-10-01", "2026-10-01", 777)
+        self.assertEqual([b["advert_id"] for b in data["campaigns"]], [1])
+        # Но и замалчивать нельзя: человек помнит, что кампаний больше.
+        self.assertEqual([q["advert_id"] for q in data["quiet"]], [3])
+
+    def test_a_quiet_period_does_not_hide_the_campaign_forever(self):
+        """Кампания молчала выбранную неделю, но работала раньше —
+        в своём периоде она обязана быть."""
+        self.day("2026-09-20", advert_id=4, nm_id=777)
+        narrow = daily.campaign_tables(self.conn, "2026-10-01", "2026-10-01",
+                                       777)
+        wide = daily.campaign_tables(self.conn, "2026-09-20", "2026-10-01", 777)
+        self.assertNotIn(4, [b["advert_id"] for b in narrow["campaigns"]])
+        self.assertIn(4, [b["advert_id"] for b in wide["campaigns"]])

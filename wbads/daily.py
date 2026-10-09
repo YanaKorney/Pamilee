@@ -118,21 +118,30 @@ def campaign_tables(conn: sqlite3.Connection, date_from: str, date_to: str,
     """
     days = daterange(date_from, date_to)
     blocks: list[dict[str, Any]] = []
+    quiet: list[dict[str, Any]] = []
     for camp in _campaigns_of(conn, date_from, date_to, nm_id):
         advert_id = camp["advert_id"]
-        blocks.append({
+        block = {
             **camp,
             **_table(_by_day(conn, date_from, date_to, nm_id,
                              advert_id=advert_id),
                      _search_by_day(conn, date_from, date_to, nm_id,
                                     advert_id=advert_id),
                      days),
-        })
+        }
+        # Кампания, в которой товар за период не показался ни разу, — это
+        # таблица из прочерков. Она занимает экран и читается как «вот эта
+        # кампания тоже про этот товар», хотя сказать ей нечего. Такие
+        # прячем, но не замалчиваем: их число остаётся на виду.
+        (blocks if block["has_data"] else quiet).append(block)
+
     return {
         "period": {"from": date_from, "to": date_to, "days": len(days)},
         "nm_id": nm_id,
         "dates": days,
         "campaigns": blocks,
+        "quiet": [{"advert_id": b["advert_id"], "name": b["name"]}
+                  for b in quiet],
         "has_data": any(block["has_data"] for block in blocks),
     }
 
