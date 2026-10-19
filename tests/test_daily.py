@@ -689,10 +689,23 @@ class TestTabsNameWhatTheyShow(unittest.TestCase):
         self.assertIn("const dailyCombo = makeCombo", self.js)
         self.assertIn("const campsCombo = makeCombo", self.js)
 
-    def test_campaign_picker_has_no_whole_cabinet_row(self):
-        """Кампании показываются по одному товару: «весь кабинет» здесь
-        означал бы таблицу на каждую из пятисот кампаний."""
-        self.assertIn("allLabel: ''", self.js)
+    def test_campaign_picker_offers_all_campaigns(self):
+        """Отчёт по кабинету целиком — отдельная строка списка, а не
+        отсутствие выбора: «ничего не выбрано» означает «самый дорогой
+        товар», и перепутать эти два состояния нельзя."""
+        self.assertIn("allLabel: 'Все кампании'", self.js)
+        self.assertIn("p.set('nm_id', 'all')", self.js)
+
+    def test_export_button_gives_excel(self):
+        self.assertIn('/api/campaign-daily.xlsx', self.html)
+        self.assertIn('/api/campaign-daily.xlsx?', self.js)
+        self.assertIn("Выгрузить в Excel", self.html)
+
+    def test_screen_does_not_draw_five_hundred_tables(self):
+        """Пятьсот таблиц браузер рисует заметно, а читать их всё равно
+        никто не станет — для этого есть файл."""
+        self.assertIn("CAMPS_SHOWN", self.js)
+        self.assertIn("Показаны первые", self.js)
 
 
 class TestOnlyThisArticlesCampaigns(DailyCase):
@@ -733,3 +746,178 @@ class TestOnlyThisArticlesCampaigns(DailyCase):
         wide = daily.campaign_tables(self.conn, "2026-09-20", "2026-10-01", 777)
         self.assertNotIn(4, [b["advert_id"] for b in narrow["campaigns"]])
         self.assertIn(4, [b["advert_id"] for b in wide["campaigns"]])
+
+
+class TestExcelExport(DailyCase):
+    """CSV открывается в Excel текстом: числа становятся строками,
+    разделитель зависит от настроек Windows, и половина выгрузок
+    приезжает одной колонкой. Отчёт, который просили «в эксель», должен
+    быть книгой Excel, а числа в нём — числами.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.conn.execute(
+            "INSERT OR REPLACE INTO campaigns (advert_id, name, type,"
+            " type_name, status, status_name, daily_budget, updated_at)"
+            " VALUES (1,'Поиск руками',9,'Аукцион, ручная ставка',9,"
+            "'Идут показы',0,'now')")
+        self.day("2026-10-01", advert_id=1, nm_id=777, spend=100.0,
+                 revenue=2000.0, views=500, clicks=25, orders=2)
+        self.conn.commit()
+
+    def book(self, data, title="Отчёт"):
+        import tempfile
+
+        from wbads import xlsx_read
+
+        raw = daily.campaigns_to_xlsx(data, title)
+        path = Path(tempfile.mkdtemp()) / "report.xlsx"
+        path.write_bytes(raw)
+        return path, xlsx_read
+
+    def test_two_sheets_answer_two_questions(self):
+        data = daily.campaign_tables(self.conn, "2026-10-01", "2026-10-01", 777)
+        path, reader = self.book(data)
+        self.assertEqual(reader.sheet_names(str(path)), ["Свод", "По дням"])
+
+    def test_numbers_stay_numbers(self):
+        """Строка «100,00 ₽» не складывается и не сортируется."""
+        data = daily.campaign_tables(self.conn, "2026-10-01", "2026-10-01", 777)
+        path, reader = self.book(data)
+        rows = reader.read_sheet(str(path), "Свод")
+        head = next(r for r in rows if r and r[0] == "Кампания")
+        line = rows[rows.index(head) + 1]
+        cells = dict(zip(head, line))
+        self.assertEqual(cells["Кампания"], "Поиск руками")
+        self.assertEqual(cells["Затраты, ₽"], 100)
+        self.assertEqual(cells["Показы"], 500)
+        self.assertEqual(cells["ДРР, %"], 5)
+        for key in ("Затраты, ₽", "Показы", "ДРР, %"):
+            self.assertIsInstance(cells[key], (int, float),
+                                  f"{key} приехал текстом")
+
+    def test_by_day_sheet_keeps_the_daily_table(self):
+        data = daily.campaign_tables(self.conn, "2026-10-01", "2026-10-01", 777)
+        path, reader = self.book(data)
+        rows = reader.read_sheet(str(path), "По дням")
+        titles = [r[0] for r in rows if r and r[0]]
+        self.assertIn("Показы", titles)
+        self.assertIn("ДРР", titles)
+        self.assertTrue(any(str(t).startswith("Кампания 1") for t in titles),
+                        f"нет шапки кампании: {titles}")
+
+    def test_empty_report_is_still_a_valid_book(self):
+        """Пустой период — не повод отдать битый файл."""
+        data = daily.campaign_tables(self.conn, "2026-01-01", "2026-01-01", 777)
+        path, reader = self.book(data, "Пусто")
+        self.assertEqual(reader.sheet_names(str(path)), ["Свод", "По дням"])
+
+
+class TestAllCampaignsReport(DailyCase):
+    """«Все кампании» — отчёт по кабинету целиком: по таблице на каждую
+    кампанию, числа по всем её товарам сразу."""
+
+    def setUp(self):
+        super().setUp()
+        self.day("2026-10-01", advert_id=1, nm_id=111, spend=100.0, views=500)
+        self.day("2026-10-01", advert_id=1, nm_id=222, spend=100.0, views=500)
+        self.day("2026-10-01", advert_id=2, nm_id=333, spend=900.0, views=900)
+
+    def test_every_campaign_gets_a_table(self):
+        data = daily.all_campaign_tables(self.conn, "2026-10-01", "2026-10-01")
+        self.assertEqual([b["advert_id"] for b in data["campaigns"]], [2, 1])
+        self.assertIsNone(data["nm_id"])
+        self.assertEqual(data["scope"], "all")
+
+    def test_numbers_cover_the_whole_campaign(self):
+        """Кампания 1 крутила два товара — в отчёте по кабинету она
+        стоит одной строкой с суммой по обоим."""
+        data = daily.all_campaign_tables(self.conn, "2026-10-01", "2026-10-01")
+        block = next(b for b in data["campaigns"] if b["advert_id"] == 1)
+        # В campaign_daily кампания 1 записана один раз — это её итог.
+        self.assertEqual(self.rows(block)["views"]["total"], 500.0)
+
+    def test_api_switches_to_all_campaigns(self):
+        from wbads import api
+        from wbads.config import Config
+
+        cfg = Config(db_path=Path(self.tmp.name) / "t.db", token="t")
+        data = api.handle_campaign_daily(
+            self.conn, cfg, {"from": ["2026-10-01"], "to": ["2026-10-01"],
+                             "nm_id": ["all"]})
+        self.assertEqual(data["scope"], "all")
+        self.assertEqual(len(data["campaigns"]), 2)
+        # Список артикулов остаётся: из него возвращаются к одному товару.
+        self.assertTrue(data["articles"])
+
+    def test_file_is_named_for_the_whole_cabinet(self):
+        from wbads import api
+        from wbads.config import Config
+
+        cfg = Config(db_path=Path(self.tmp.name) / "t.db", token="t")
+        body, filename = api.handle_campaign_daily_xlsx(
+            self.conn, cfg, {"from": ["2026-10-01"], "to": ["2026-10-01"],
+                             "nm_id": ["all"]})
+        self.assertIn("vse-kampanii", filename)
+        self.assertTrue(filename.endswith(".xlsx"))
+        self.assertTrue(body.startswith(b"PK"), "это должен быть zip-файл")
+
+
+class TestXlsxWriter(unittest.TestCase):
+    """Книгу Excel собирает своя функция — сторонних библиотек в
+    программе нет и не будет. Значит, за правила формата отвечаем сами:
+    битый файл Excel не чинит, он просто отказывается открывать."""
+
+    def book(self, sheets):
+        import tempfile
+
+        from wbads import xlsx_write
+
+        path = Path(tempfile.mkdtemp()) / "b.xlsx"
+        path.write_bytes(xlsx_write.book(sheets))
+        return path
+
+    def test_sheet_names_are_cleaned_and_unique(self):
+        """Excel не принимает в имени листа / \\ : * ? [ ] и повторы —
+        и ломается на них молча."""
+        from wbads import xlsx_read
+
+        path = self.book([{"name": "Свод/2026", "rows": [["a"]]},
+                          {"name": "Свод 2026", "rows": [["b"]]},
+                          {"name": "Свод 2026", "rows": [["c"]]}])
+        names = xlsx_read.sheet_names(str(path))
+        self.assertEqual(len(set(names)), 3, f"имена повторились: {names}")
+        for name in names:
+            self.assertFalse(set(name) & set(r"[]:*?/\\"))
+            self.assertLessEqual(len(name), 31)
+
+    def test_text_and_numbers_survive_the_trip(self):
+        from wbads import xlsx_read
+
+        path = self.book([{"name": "Л", "rows": [
+            ["Кавычки «ёлочки» & <знаки>", 0, -12.5],
+            [{"v": 1234.56, "style": "money"}, {"v": 25.4, "style": "pct"}],
+        ]}])
+        rows = xlsx_read.read_sheet(str(path))
+        self.assertEqual(rows[0][0], "Кавычки «ёлочки» & <знаки>")
+        self.assertEqual(rows[0][2], -12.5)
+        self.assertEqual(rows[1][0], 1234.56)
+        self.assertEqual(rows[1][1], 25.4)
+
+    def test_broken_numbers_do_not_break_the_file(self):
+        """Бесконечность и NaN в xlsx не существуют: Excel с ними не
+        откроет книгу целиком, а не одну ячейку."""
+        from wbads import xlsx_read
+
+        path = self.book([{"name": "Л", "rows": [
+            [float("inf"), float("nan"), 7]]}])
+        self.assertEqual(xlsx_read.read_sheet(str(path))[0][-1], 7)
+
+    def test_column_letters(self):
+        from wbads.xlsx_write import column_letter
+
+        self.assertEqual(column_letter(1), "A")
+        self.assertEqual(column_letter(26), "Z")
+        self.assertEqual(column_letter(27), "AA")
+        self.assertEqual(column_letter(28), "AB")

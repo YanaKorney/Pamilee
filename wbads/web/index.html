@@ -153,8 +153,8 @@
           <p class="hint" id="camps-sub">Отдельная таблица на каждую
             кампанию товара.</p>
         </div>
-        <a class="btn" id="camps-export" href="/api/campaign-daily.csv" download>
-          Выгрузить в CSV</a>
+        <a class="btn" id="camps-export" href="/api/campaign-daily.xlsx" download>
+          Выгрузить в Excel</a>
       </div>
 
       <div class="dfilter">
@@ -172,8 +172,10 @@
             <input type="text" id="camps-nm-input" role="combobox"
                    aria-expanded="false" aria-controls="camps-nm-list"
                    aria-autocomplete="list" autocomplete="off"
-                   placeholder="артикул"
+                   placeholder="все кампании"
                    aria-label="Артикул товара, поиск по номеру">
+            <button type="button" class="combo-clear" id="camps-nm-clear"
+                    hidden aria-label="Показать все кампании">×</button>
             <ul class="combo-list" id="camps-nm-list" role="listbox" hidden
                 aria-label="Артикулы"></ul>
           </div>

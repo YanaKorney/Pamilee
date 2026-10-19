@@ -273,10 +273,17 @@ def handle_daily_csv(conn: sqlite3.Connection, cfg: Config,
 
 def handle_campaign_daily(conn: sqlite3.Connection, cfg: Config,
                           query: dict[str, list[str]]) -> dict[str, Any]:
-    """Сводка по кампаниям одного артикула: по таблице на кампанию."""
+    """Сводка по кампаниям: по одному артикулу или по всему кабинету."""
     date_from, date_to = _period(conn, query)
     names = _article_names(conn)
     articles = daily.articles(conn, date_from, date_to, names)
+
+    if _wants_all(query):
+        table = daily.all_campaign_tables(conn, date_from, date_to)
+        table["articles"] = articles
+        table["nm_name"] = ""
+        return table
+
     nm_id = _chosen_article(query, articles)
 
     if nm_id is None:
@@ -296,19 +303,53 @@ def handle_campaign_daily(conn: sqlite3.Connection, cfg: Config,
 def handle_campaign_daily_csv(conn: sqlite3.Connection, cfg: Config,
                               query: dict[str, list[str]]) -> tuple[str, str]:
     """Те же таблицы файлом — одна под другой, с шапкой на каждую."""
+    data, title, stem = _campaign_report(conn, query)
+    if data is None:
+        return "", f"{stem}.csv"
+    return daily.campaigns_to_csv(data, title), f"{stem}.csv"
+
+
+def handle_campaign_daily_xlsx(conn: sqlite3.Connection, cfg: Config,
+                               query: dict[str, list[str]]) -> tuple[bytes, str]:
+    """Тот же отчёт книгой Excel: лист «Свод» и лист «По дням».
+
+    CSV открывается в Excel текстом: числа становятся строками, а
+    разделитель зависит от настроек Windows. Здесь числа лежат числами и
+    с форматом — файл можно сразу считать, а не чинить.
+    """
+    data, title, stem = _campaign_report(conn, query)
+    if data is None:
+        data = {"campaigns": [], "dates": []}
+    return daily.campaigns_to_xlsx(data, title), f"{stem}.xlsx"
+
+
+def _campaign_report(conn: sqlite3.Connection, query: dict[str, list[str]]
+                     ) -> tuple[dict[str, Any] | None, str, str]:
+    """Данные отчёта, его заголовок и имя файла без расширения."""
     date_from, date_to = _period(conn, query)
+    period = f"{date_from} — {date_to}"
+
+    if _wants_all(query):
+        data = daily.all_campaign_tables(conn, date_from, date_to)
+        return (data, f"Все кампании кабинета · {period}",
+                f"reklama-vse-kampanii-{date_from}_{date_to}")
+
     names = _article_names(conn)
     articles = daily.articles(conn, date_from, date_to, names)
     nm_id = _chosen_article(query, articles)
     if nm_id is None:
-        return "", f"reklama-kampanii-{date_from}_{date_to}.csv"
+        return None, "", f"reklama-kampanii-{date_from}_{date_to}"
 
-    data = daily.campaign_tables(conn, date_from, date_to, nm_id)
     name = names.get(nm_id, "")
     title = (f"Кампании артикула {nm_id}" + (f" · {name}" if name else "")
-             + f" · {date_from} — {date_to}")
-    return (daily.campaigns_to_csv(data, title),
-            f"reklama-kampanii-{nm_id}-{date_from}_{date_to}.csv")
+             + f" · {period}")
+    return (daily.campaign_tables(conn, date_from, date_to, nm_id), title,
+            f"reklama-kampanii-{nm_id}-{date_from}_{date_to}")
+
+
+def _wants_all(query: dict[str, list[str]]) -> bool:
+    """Выбрано «все кампании» — отчёт по кабинету, а не по товару."""
+    return (query.get("nm_id") or [""])[0].strip().lower() == "all"
 
 
 def _chosen_article(query: dict[str, list[str]],
@@ -619,6 +660,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
 
         try:
+            if route == "/api/campaign-daily.xlsx":
+                with db.session(self.config.db_path) as conn:
+                    body, filename = handle_campaign_daily_xlsx(
+                        conn, self.config, query)
+                self.send_response(200)
+                self.send_header(
+                    "Content-Type", "application/vnd.openxmlformats-"
+                    "officedocument.spreadsheetml.sheet")
+                self.send_header("Content-Disposition", _disposition(filename))
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
             if route in ("/api/export.csv", "/api/changes.csv",
                          "/api/daily.csv", "/api/campaign-daily.csv"):
                 maker = {"/api/changes.csv": handle_changes_csv,

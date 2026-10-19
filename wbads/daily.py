@@ -146,6 +146,67 @@ def campaign_tables(conn: sqlite3.Connection, date_from: str, date_to: str,
     }
 
 
+def all_campaign_tables(conn: sqlite3.Connection, date_from: str,
+                        date_to: str) -> dict[str, Any]:
+    """То же самое, но по всем кампаниям кабинета и по всем их товарам.
+
+    Нужно для выгрузки: отчёт по кабинету целиком, где каждая кампания
+    стоит отдельной таблицей. На экране столько таблиц не читают, зато в
+    Excel с ними работают — фильтруют, сортируют, считают своё.
+    """
+    days = daterange(date_from, date_to)
+    blocks: list[dict[str, Any]] = []
+    quiet: list[dict[str, Any]] = []
+    for camp in _all_campaigns(conn, date_from, date_to):
+        advert_id = camp["advert_id"]
+        block = {
+            **camp,
+            **_table(_by_advert(conn, date_from, date_to, advert_id),
+                     _search_by_day(conn, date_from, date_to, None,
+                                    advert_id=advert_id),
+                     days),
+        }
+        (blocks if block["has_data"] else quiet).append(block)
+
+    return {
+        "period": {"from": date_from, "to": date_to, "days": len(days)},
+        "nm_id": None,
+        "scope": "all",
+        "dates": days,
+        "campaigns": blocks,
+        "quiet": [{"advert_id": b["advert_id"], "name": b["name"]}
+                  for b in quiet],
+        "has_data": any(block["has_data"] for block in blocks),
+    }
+
+
+def _all_campaigns(conn: sqlite3.Connection, date_from: str,
+                   date_to: str) -> list[dict[str, Any]]:
+    """Кампании кабинета, у которых за период есть статистика."""
+    rows = conn.execute(
+        "SELECT d.advert_id AS advert_id, MAX(c.name) AS name,"
+        " MAX(c.type_name) AS type_name, MAX(c.status_name) AS status_name"
+        " FROM campaign_daily d"
+        " LEFT JOIN campaigns c ON c.advert_id = d.advert_id"
+        " WHERE d.date BETWEEN ? AND ?"
+        " GROUP BY d.advert_id ORDER BY SUM(d.spend) DESC, d.advert_id",
+        (date_from, date_to),
+    ).fetchall()
+    return [_campaign_row(row) for row in rows]
+
+
+def _campaign_row(row: Any) -> dict[str, Any]:
+    advert_id = int(row["advert_id"])
+    return {
+        "advert_id": advert_id,
+        # Без карточки кампании названия нет — опознаём по номеру, как
+        # и везде: пустая строка на месте названия читается как пропажа.
+        "name": str(row["name"] or "") or f"Кампания {advert_id}",
+        "type_name": str(row["type_name"] or ""),
+        "status_name": str(row["status_name"] or ""),
+    }
+
+
 def _campaigns_of(conn: sqlite3.Connection, date_from: str, date_to: str,
                   nm_id: int) -> list[dict[str, Any]]:
     """Кампании, в которых этот артикул крутился за период."""
@@ -160,14 +221,7 @@ def _campaigns_of(conn: sqlite3.Connection, date_from: str, date_to: str,
         (nm_id, date_from, date_to),
     ).fetchall()
 
-    return [{
-        "advert_id": int(row["advert_id"]),
-        # Без карточки кампании названия нет — опознаём по номеру, как
-        # и везде: пустая строка на месте названия читается как пропажа.
-        "name": str(row["name"] or "") or f"Кампания {int(row['advert_id'])}",
-        "type_name": str(row["type_name"] or ""),
-        "status_name": str(row["status_name"] or ""),
-    } for row in rows]
+    return [_campaign_row(row) for row in rows]
 
 
 def _table(totals_by_day: dict[str, dict[str, float]],
@@ -238,6 +292,17 @@ def _by_day(conn: sqlite3.Connection, date_from: str, date_to: str,
             for row in conn.execute(sql, params)}
 
 
+def _by_advert(conn: sqlite3.Connection, date_from: str, date_to: str,
+               advert_id: int) -> dict[str, dict[str, float]]:
+    """Сырые суммы по дням одной кампании — по всем её товарам сразу."""
+    sums = ", ".join(f"SUM({k}) AS {k}" for k in RAW_KEYS)
+    return {str(row["date"])[:10]: {key: float(row[key] or 0) for key in RAW_KEYS}
+            for row in conn.execute(
+                f"SELECT date, {sums} FROM campaign_daily WHERE advert_id = ?"
+                " AND date BETWEEN ? AND ? GROUP BY date",
+                (advert_id, date_from, date_to))}
+
+
 def articles(conn: sqlite3.Connection, date_from: str, date_to: str,
              names: dict[int, str] | None = None) -> list[dict[str, Any]]:
     """Артикулы, которые крутились за период, — от крупных к мелким.
@@ -298,9 +363,113 @@ def campaigns_to_csv(data: dict[str, Any], title: str = "") -> str:
     return buffer.getvalue()
 
 
+# Единицы показателя → формат ячейки Excel. «Шт» это количества, «₽» —
+# деньги, «%» — проценты, уже посчитанные в процентах, а не в долях.
+_XLSX_STYLE = {"шт": "int", "₽": "money", "%": "pct"}
+
+
+def campaigns_to_xlsx(data: dict[str, Any], title: str = "") -> bytes:
+    """Сводка по кампаниям книгой Excel: свод и таблицы по дням.
+
+    Два листа, потому что это два разных вопроса. «Свод» отвечает «какая
+    кампания сколько стоила» — строка на кампанию, сортируется и
+    фильтруется штатными средствами Excel. «По дням» — те же таблицы,
+    что на экране, одна под другой: по ним смотрят, когда именно всё
+    изменилось.
+    """
+    from . import xlsx_write
+
+    blocks = data.get("campaigns") or []
+    dates = data.get("dates") or []
+    return xlsx_write.book([
+        _summary_sheet(blocks, title),
+        _by_day_sheet(blocks, dates, title),
+    ])
+
+
+def _summary_sheet(blocks: Sequence[dict[str, Any]],
+                   title: str) -> dict[str, Any]:
+    columns = [
+        ("Кампания", "name", None),
+        ("Тип", "type_name", None),
+        ("Состояние", "status_name", None),
+        ("Номер", "advert_id", None),
+        ("Показы", "views", "int"),
+        ("Клики", "clicks", "int"),
+        ("Заказы, шт", "orders", "int"),
+        ("Заказы, ₽", "revenue", "money"),
+        ("Затраты, ₽", "spend", "money"),
+        ("ДРР, %", "drr", "pct"),
+        ("CPC, ₽", "cpc", "money"),
+        ("CPO, ₽", "cpo", "money"),
+        ("CTR, %", "ctr", "pct"),
+    ]
+    rows: list[list[Any]] = []
+    if title:
+        rows.append([{"v": title, "style": "title"}])
+        rows.append([])
+    head_row = len(rows) + 1
+    rows.append([{"v": head, "style": "head"} for head, _, _ in columns])
+
+    for block in blocks:
+        totals = {row["key"]: row["total"] for row in block["rows"]}
+        line: list[Any] = []
+        for _, key, style in columns:
+            value = block.get(key) if key in block else totals.get(key)
+            line.append({"v": value, "style": style} if style else value)
+        rows.append(line)
+
+    return {
+        "name": "Свод",
+        "rows": rows,
+        "widths": [38, 24, 16, 12] + [13] * (len(columns) - 4),
+        "freeze": f"A{head_row + 1}",
+    }
+
+
+def _by_day_sheet(blocks: Sequence[dict[str, Any]], dates: Sequence[str],
+                  title: str) -> dict[str, Any]:
+    rows: list[list[Any]] = []
+    if title:
+        rows.append([{"v": title, "style": "title"}])
+
+    for block in blocks:
+        rows.append([])
+        rows.append([{"v": _campaign_label(block), "style": "title"}])
+        rows.append([{"v": "Дата", "style": "head"}]
+                    + [{"v": _day_label(d), "style": "head"} for d in dates]
+                    + [{"v": "За период", "style": "head"}])
+        for row in block["rows"]:
+            # Зоны без собранного поиска показывать нельзя: «прочее»
+            # равнялось бы всем показам и читалось как утверждение.
+            if row.get("zone") and not block.get("has_zones"):
+                continue
+            style = _XLSX_STYLE.get(row["unit"], "num")
+            rows.append([row["title"]]
+                        + [{"v": v, "style": style} for v in row["days"]]
+                        + [{"v": row["total"], "style": style}])
+
+    return {
+        "name": "По дням",
+        "rows": rows,
+        "widths": [34] + [12] * (len(dates) + 1),
+        "freeze": "B1",
+    }
+
+
 def _campaign_label(block: dict[str, Any]) -> str:
-    parts = [str(block.get("name") or ""), str(block.get("type_name") or ""),
-             str(block.get("status_name") or "")]
+    """«Кампания 123 · Название · Аукцион, ручная ставка · Идут показы».
+
+    Тип не повторяем, если он уже стоит в названии: менеджеры часто
+    называют кампании по типу, и «Аукцион · Поиск · Аукцион» читается
+    как ошибка программы.
+    """
+    name = str(block.get("name") or "")
+    type_name = str(block.get("type_name") or "")
+    parts = [name]
+    if type_name and type_name.lower() not in name.lower():
+        parts.append(type_name)
+    parts.append(str(block.get("status_name") or ""))
     head = f"Кампания {block.get('advert_id')}"
     return " · ".join([head] + [p for p in parts if p])
 

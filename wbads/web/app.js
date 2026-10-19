@@ -1819,13 +1819,20 @@ bindPeriod('daily', daily, loadDaily);
    поиске может кормить, пока автоматическая на рекомендациях жжёт.
    Поэтому здесь по таблице на кампанию, от крупной к мелкой. */
 
-const camps = { days: 7, from: null, to: null, nm: null, data: null };
+const camps = { days: 7, from: null, to: null, nm: null, all: false,
+                data: null };
+
+/* Таблиц на экране может быть пятьсот — столько не читают, а рисует их
+   браузер заметно. Показываем самые дорогие, остальные уезжают в файл:
+   там с ними и работают. */
+const CAMPS_SHOWN = 25;
 
 function campsQuery() {
   const p = new URLSearchParams();
   if (camps.from && camps.to) { p.set('from', camps.from); p.set('to', camps.to); }
   else p.set('days', String(camps.days));
-  if (camps.nm) p.set('nm_id', String(camps.nm));
+  if (camps.all) p.set('nm_id', 'all');
+  else if (camps.nm) p.set('nm_id', String(camps.nm));
   return p.toString();
 }
 
@@ -1841,15 +1848,20 @@ async function loadCamps() {
        вкладка с подписью «выберите товар» — лишний щелчок на ровном
        месте. Но запомнить выбор надо, иначе смена периода его сбросит. */
     camps.nm = data.nm_id || null;
+    camps.all = data.scope === 'all';
     document.getElementById('camps-export').href =
-      '/api/campaign-daily.csv?' + campsQuery();
+      '/api/campaign-daily.xlsx?' + campsQuery();
     renderCampsFilters(data);
     renderCamps(data);
     const count = (data.campaigns || []).length;
     empty.hidden = count > 0;
     if (!count) {
       const quiet = (data.quiet || []).length;
-      if (data.nm_id && quiet) {
+      if (camps.all) {
+        empty.textContent = 'За выбранный период открутки не было ни у ' +
+          'одной кампании. Возьмите период подлиннее или соберите ' +
+          'статистику заново.';
+      } else if (data.nm_id && quiet) {
         empty.textContent = `Этот товар числится в ${quiet} ` +
           `${plural(quiet, 'кампании', 'кампаниях', 'кампаниях')}, но за ` +
           'выбранный период не показывался ни в одной. Попробуйте период ' +
@@ -1885,13 +1897,17 @@ function renderCampsFilters(data) {
   const title = document.getElementById('camps-title');
   const sub = document.getElementById('camps-sub');
   const count = (data.campaigns || []).length;
-  if (data.nm_id) {
+  const word = `${count} ${plural(count, 'кампания', 'кампании', 'кампаний')}`;
+  if (camps.all) {
+    title.textContent = 'Сводка по кампаниям · все кампании';
+    sub.textContent = `Весь кабинет: ${word} за период, от крупной по ` +
+      'расходу к мелкой. Числа по кампании целиком — по всем её товарам.';
+  } else if (data.nm_id) {
     title.textContent = data.nm_name
       ? `Сводка по кампаниям · ${data.nm_name}`
       : `Сводка по кампаниям · артикул ${data.nm_id}`;
-    sub.textContent = `Артикул ${data.nm_id}: ${count} ` +
-      `${plural(count, 'кампания', 'кампании', 'кампаний')} за период, `
-      + 'от крупной по расходу к мелкой.';
+    sub.textContent = `Артикул ${data.nm_id}: ${word} за период, ` +
+      'от крупной по расходу к мелкой.';
   } else {
     title.textContent = 'Сводка по кампаниям';
     sub.textContent = 'Выберите товар — покажу каждую его кампанию отдельно.';
@@ -1902,7 +1918,8 @@ function renderCamps(data) {
   const host = document.getElementById('camps-list');
   host.innerHTML = '';
 
-  (data.campaigns || []).forEach((block) => {
+  const all = data.campaigns || [];
+  all.slice(0, CAMPS_SHOWN).forEach((block) => {
     const box = el('section', 'camp-block');
 
     const head = el('div', 'camp-block-head');
@@ -1924,6 +1941,15 @@ function renderCamps(data) {
 
     host.appendChild(box);
   });
+
+  /* Остальные кампании не рисуем, но говорим, сколько их и где они:
+     список, который молча обрывается на двадцать пятой таблице, человек
+     считает полным. */
+  if (all.length > CAMPS_SHOWN) {
+    host.appendChild(el('p', 'dgrid-note',
+      `Показаны первые ${CAMPS_SHOWN} по расходу из ${all.length}. ` +
+      'Остальные есть в выгрузке — нажмите «Выгрузить в Excel».'));
+  }
 
   /* Зоны объясняем один раз внизу, а не под каждой таблицей: строка
      «прочее» — это остаток, а не отчёт WB, и человек обязан это знать.
@@ -2051,7 +2077,14 @@ function makeCombo({ inputId, listId, clearId, allLabel, selected, onPick }) {
     onPick(next);
   }
 
-  input().addEventListener('focus', () => open(input().value));
+  input().addEventListener('focus', () => {
+    /* Щелчок по полю с уже выбранным артикулом открывает ВЕСЬ список, а
+       не одну строку с этим же номером: иначе ни «Все кампании», ни
+       соседний товар из списка не достать, не стерев номер руками.
+       Текст при этом выделен — первая набранная цифра его заменит. */
+    input().select();
+    open('');
+  });
   input().addEventListener('input', () => open(input().value));
 
   input().addEventListener('keydown', (e) => {
@@ -2125,8 +2158,10 @@ const dailyCombo = makeCombo({
 const campsCombo = makeCombo({
   inputId: 'camps-nm-input',
   listId: 'camps-nm-list',
-  clearId: '',
-  allLabel: '',
+  clearId: 'camps-nm-clear',
+  /* «Все кампании» — отчёт по кабинету целиком: по таблице на каждую
+     кампанию, числа по всем её товарам. Его и выгружают в Excel. */
+  allLabel: 'Все кампании',
   selected: () => camps.nm,
-  onPick: (nm) => { camps.nm = nm; loadCamps(); },
+  onPick: (nm) => { camps.all = nm === null; camps.nm = nm; loadCamps(); },
 });
