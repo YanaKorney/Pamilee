@@ -1727,13 +1727,19 @@ function renderDaily(data) {
 
 /* Одна и та же таблица в двух сводках: по товарам и по каждой кампании
    товара. Разводить две копии — значит однажды поправить одну. */
-function fillDailyTable(table, data) {
+function fillDailyTable(table, data, decorateDate) {
   table.innerHTML = '';
 
   const head = document.createElement('thead');
   const headRow = document.createElement('tr');
   headRow.appendChild(el('th', 'm-name', 'Дата'));
-  data.dates.forEach((d) => headRow.appendChild(el('th', '', dayLabel(d))));
+  data.dates.forEach((d) => {
+    const th = el('th', '', dayLabel(d));
+    /* Точка под датой — там, где человек ищет день. Отдельной строкой
+       под таблицей она была бы в тридцати колонках от своего числа. */
+    if (decorateDate) decorateDate(th, d);
+    headRow.appendChild(th);
+  });
   headRow.appendChild(el('th', 'm-total', 'За период'));
   head.appendChild(headRow);
   table.appendChild(head);
@@ -1820,7 +1826,7 @@ bindPeriod('daily', daily, loadDaily);
    Поэтому здесь по таблице на кампанию, от крупной к мелкой. */
 
 const camps = { days: 7, from: null, to: null, nm: null, all: false,
-                data: null };
+                data: null, note: null, noteFocus: false, noteSaid: '' };
 
 /* Таблиц на экране может быть пятьсот — столько не читают, а рисует их
    браузер заметно. Показываем самые дорогие, остальные уезжают в файл:
@@ -1935,9 +1941,27 @@ function renderCamps(data) {
     const scroll = el('div', 'dgrid-scroll');
     const table = document.createElement('table');
     table.className = 'dgrid';
-    fillDailyTable(table, block);
+    fillDailyTable(table, block,
+                   (th, date) => th.appendChild(noteDot(block, date)));
     scroll.appendChild(table);
     box.appendChild(scroll);
+
+    /* Поле ввода — под своей таблицей, а не поверх неё: всплывающее
+       окно закрывает те самые цифры, ради которых запись и делают. */
+    if (camps.note && camps.note.advert === block.advert_id) {
+      const panel = notePanel(block, camps.note.date);
+      box.appendChild(panel);
+      /* Раскрыли поле — курсор уже в нём: иначе первый набранный символ
+         уходит в пустоту, и человек набирает текст дважды. */
+      if (camps.noteFocus) {
+        camps.noteFocus = false;
+        setTimeout(() => {
+          const area = panel.querySelector('textarea');
+          if (area) { area.focus(); area.setSelectionRange(
+            area.value.length, area.value.length); }
+        }, 0);
+      }
+    }
 
     host.appendChild(box);
   });
@@ -1977,6 +2001,137 @@ function renderCamps(data) {
 }
 
 bindPeriod('camps', camps, loadCamps);
+
+
+/* ── точки правок на датах ────────────────────────────────────────────────
+
+   Запись «что меняли» живёт в журнале изменений — том же, что на
+   третьей вкладке, с тем же замером эффекта. Здесь только второй вход в
+   него: правку вносят, глядя на цифры дня, и уходить за этим в другую
+   вкладку значит не записать её вовсе. */
+
+function campNotes(block, date) {
+  return ((block.notes || {})[date]) || [];
+}
+
+function noteDot(block, date) {
+  const notes = campNotes(block, date);
+  const open = !!camps.note && camps.note.advert === block.advert_id
+    && camps.note.date === date;
+
+  const dot = document.createElement('button');
+  dot.type = 'button';
+  dot.className = 'note-dot' + (notes.length ? ' has' : '') + (open ? ' open' : '');
+  dot.setAttribute('aria-expanded', String(open));
+  dot.setAttribute('aria-label', (notes.length ? 'Запись за ' : 'Записать, '
+    + 'что меняли ') + dayLabel(date));
+  /* Подсказка при наведении: что именно записано, без раскрытия поля. */
+  dot.title = notes.length
+    ? notes.map((n) => n.text).join(' · ')
+    : 'Записать, что меняли в этот день';
+  dot.addEventListener('click', () => toggleNote(block.advert_id, date));
+  return dot;
+}
+
+function toggleNote(advert, date) {
+  const open = camps.note && camps.note.advert === advert
+    && camps.note.date === date;
+  camps.note = open ? null : { advert, date };
+  camps.noteFocus = !open;
+  camps.noteSaid = '';
+  renderCamps(camps.data || { campaigns: [] });
+}
+
+function notePanel(block, date) {
+  const notes = campNotes(block, date);
+  const first = notes[0] || null;
+
+  const box = el('section', 'note-panel');
+  box.appendChild(el('h4', '', escapeHtml(
+    `Что меняли ${dayLabel(date)} · ${block.name}`)));
+
+  const area = document.createElement('textarea');
+  area.className = 'note-area';
+  area.rows = 2;
+  area.value = first ? first.text : '';
+  area.placeholder = 'Например: подняла ставку до 250, убрала минус-слова';
+  area.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') toggleNote(block.advert_id, date);
+  });
+  box.appendChild(area);
+
+  const bar = el('div', 'note-bar');
+  const save = el('button', 'btn primary', 'Сохранить');
+  save.type = 'button';
+  save.addEventListener('click', () => saveNote(block, date, first, area.value));
+  bar.appendChild(save);
+
+  if (first) {
+    const drop = el('button', 'btn', 'Удалить');
+    drop.type = 'button';
+    drop.addEventListener('click', () => removeNote(block, date, first));
+    bar.appendChild(drop);
+  }
+
+  const close = el('button', 'btn', 'Закрыть');
+  close.type = 'button';
+  close.addEventListener('click', () => toggleNote(block.advert_id, date));
+  bar.appendChild(close);
+
+  if (camps.noteSaid) bar.appendChild(el('span', 'note-said', camps.noteSaid));
+  box.appendChild(bar);
+
+  /* Записей за один день бывает несколько — например, перенесённых из
+     таблицы. Прятать их нельзя: человек решит, что его правка пропала. */
+  if (notes.length > 1) {
+    const rest = el('p', 'note-rest', 'Ещё записи за этот день: '
+      + notes.slice(1).map((n) => escapeHtml(n.text)).join(' · ')
+      + '. Их можно поправить во вкладке «Журнал изменений».');
+    box.appendChild(rest);
+  }
+
+  box.appendChild(el('p', 'note-hint',
+    'Запись попадёт в журнал изменений — там же сервис посчитает, '
+    + 'что после неё изменилось в метриках.'));
+  return box;
+}
+
+async function saveNote(block, date, existing, text) {
+  const value = String(text || '').trim();
+  if (!value) {
+    camps.noteSaid = 'Пустую запись сохранять нечего.';
+    renderCamps(camps.data);
+    return;
+  }
+  const url = existing ? '/api/changes/edit' : '/api/changes';
+  const body = existing
+    ? { id: existing.id, date, text: value }
+    : { date, text: value, advert_id: block.advert_id };
+  await sendNote(url, body, 'Сохранено.');
+}
+
+async function removeNote(block, date, existing) {
+  await sendNote('/api/changes/delete', { id: existing.id }, 'Удалено.');
+}
+
+async function sendNote(url, body, said) {
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    camps.noteSaid = said;
+    /* Журнал на третьей вкладке перечитывается при каждом открытии,
+       так что новая запись там появится сама. */
+    await loadCamps();
+  } catch (err) {
+    camps.noteSaid = 'Не сохранилось: ' + err.message;
+    renderCamps(camps.data || { campaigns: [] });
+  }
+}
 
 
 

@@ -921,3 +921,128 @@ class TestXlsxWriter(unittest.TestCase):
         self.assertEqual(column_letter(26), "Z")
         self.assertEqual(column_letter(27), "AA")
         self.assertEqual(column_letter(28), "AB")
+
+
+class TestCampaignNotes(DailyCase):
+    """Точка на дате — второй вход в журнал изменений, а не второй
+    журнал. Правку вносят, глядя на цифры дня, и уходить за этим в
+    другую вкладку значит не записать её вовсе.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from wbads import changes
+
+        self.changes = changes
+        self.conn.execute(
+            "INSERT OR REPLACE INTO campaigns (advert_id, name, type,"
+            " type_name, status, status_name, daily_budget, updated_at)"
+            " VALUES (1,'Поиск',9,'Аукцион',9,'Идут показы',0,'now')")
+        self.day("2026-10-01", advert_id=1, nm_id=777)
+        self.day("2026-10-02", advert_id=1, nm_id=777)
+        self.day("2026-10-01", advert_id=2, nm_id=777)
+
+    def table(self, nm_id=777):
+        return daily.campaign_tables(self.conn, "2026-10-01", "2026-10-02",
+                                     nm_id)
+
+    def blocks(self, data):
+        return {b["advert_id"]: b for b in data["campaigns"]}
+
+    def test_note_lands_on_its_day_and_its_campaign(self):
+        self.changes.add(self.conn, "2026-10-02", "Подняла ставку",
+                         advert_id=1)
+        blocks = self.blocks(self.table())
+        self.assertEqual([n["text"] for n in blocks[1]["notes"]["2026-10-02"]],
+                         ["Подняла ставку"])
+        self.assertNotIn("2026-10-01", blocks[1]["notes"])
+        self.assertEqual(blocks[2]["notes"], {}, "чужая кампания не при чём")
+
+    def test_the_same_journal_as_the_third_tab(self):
+        """Запись, сделанная точкой, обязана считаться в замере эффекта —
+        значит, она лежит в том же журнале, а не рядом с ним."""
+        change_id = self.changes.add(self.conn, "2026-10-02", "Правка",
+                                     advert_id=1)
+        rows = self.changes.listing(self.conn, advert_id=1)
+        self.assertEqual([r["id"] for r in rows], [change_id])
+        blocks = self.blocks(self.table())
+        self.assertEqual(blocks[1]["notes"]["2026-10-02"][0]["id"], change_id)
+
+    def test_several_notes_on_one_day_are_all_returned(self):
+        """Переносов из таблицы за один день бывает несколько. Показать
+        одну и спрятать остальные — значит сказать, что правка пропала."""
+        self.changes.add(self.conn, "2026-10-01", "Первая", advert_id=1)
+        self.changes.add(self.conn, "2026-10-01", "Вторая", advert_id=1)
+        blocks = self.blocks(self.table())
+        self.assertEqual([n["text"] for n in blocks[1]["notes"]["2026-10-01"]],
+                         ["Первая", "Вторая"])
+
+    def test_notes_show_in_the_whole_cabinet_report_too(self):
+        self.changes.add(self.conn, "2026-10-01", "Правка", advert_id=1)
+        data = daily.all_campaign_tables(self.conn, "2026-10-01", "2026-10-02")
+        self.assertEqual(self.blocks(data)[1]["notes"]["2026-10-01"][0]["text"],
+                         "Правка")
+
+    def test_excel_carries_what_was_changed(self):
+        """Без этой строки в файле остаётся «в среду стало хуже» без
+        ответа «после чего»."""
+        import tempfile
+
+        from wbads import xlsx_read
+
+        self.changes.add(self.conn, "2026-10-02", "Подняла ставку",
+                         advert_id=1)
+        raw = daily.campaigns_to_xlsx(self.table(), "Отчёт")
+        path = Path(tempfile.mkdtemp()) / "r.xlsx"
+        path.write_bytes(raw)
+        rows = xlsx_read.read_sheet(str(path), "По дням")
+        line = next((r for r in rows if r and r[0] == "Что меняли"), None)
+        self.assertIsNotNone(line, "в файле нет строки с правками")
+        self.assertIn("Подняла ставку", line)
+
+    def test_a_campaign_without_notes_has_no_extra_row(self):
+        import tempfile
+
+        from wbads import xlsx_read
+
+        raw = daily.campaigns_to_xlsx(self.table(), "Отчёт")
+        path = Path(tempfile.mkdtemp()) / "r.xlsx"
+        path.write_bytes(raw)
+        rows = xlsx_read.read_sheet(str(path), "По дням")
+        self.assertFalse([r for r in rows if r and r[0] == "Что меняли"])
+
+
+class TestNoteDotsInTheBrowser(unittest.TestCase):
+    """Поведение точки проверено руками в браузере; здесь — устройство:
+    что она вообще есть, что закрывается тем же нажатием и что пишет в
+    общий журнал, а не в отдельную таблицу."""
+
+    def setUp(self):
+        from wbads.config import ROOT
+
+        self.js = (ROOT / "wbads" / "web" / "app.js").read_text(encoding="utf-8")
+        self.css = (ROOT / "wbads" / "web" / "styles.css").read_text(
+            encoding="utf-8")
+
+    def test_dot_sits_under_the_date(self):
+        self.assertIn("function noteDot", self.js)
+        self.assertIn("th.appendChild(noteDot(block, date))", self.js)
+        self.assertIn(".note-dot", self.css)
+
+    def test_second_click_closes_the_field(self):
+        self.assertIn("function toggleNote", self.js)
+        self.assertIn("camps.note = open ? null : { advert, date }", self.js)
+        self.assertIn("aria-expanded", self.js)
+
+    def test_dot_shows_whether_a_note_exists(self):
+        self.assertIn("' has'", self.js)
+        self.assertIn(".note-dot.has", self.css)
+
+    def test_saving_goes_to_the_journal(self):
+        self.assertIn("'/api/changes/edit'", self.js)
+        self.assertIn("advert_id: block.advert_id", self.js)
+
+    def test_cursor_lands_in_the_field(self):
+        """Иначе первый набранный символ уходит в пустоту."""
+        self.assertIn("camps.noteFocus", self.js)
+        self.assertIn("area.focus()", self.js)

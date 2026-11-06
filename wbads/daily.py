@@ -117,12 +117,14 @@ def campaign_tables(conn: sqlite3.Connection, date_from: str, date_to: str,
     от крупной к мелкой — порядок задаёт расход, а не номер.
     """
     days = daterange(date_from, date_to)
+    notes = _notes_by_campaign(conn, date_from, date_to)
     blocks: list[dict[str, Any]] = []
     quiet: list[dict[str, Any]] = []
     for camp in _campaigns_of(conn, date_from, date_to, nm_id):
         advert_id = camp["advert_id"]
         block = {
             **camp,
+            "notes": notes.get(advert_id, {}),
             **_table(_by_day(conn, date_from, date_to, nm_id,
                              advert_id=advert_id),
                      _search_by_day(conn, date_from, date_to, nm_id,
@@ -155,12 +157,14 @@ def all_campaign_tables(conn: sqlite3.Connection, date_from: str,
     Excel с ними работают — фильтруют, сортируют, считают своё.
     """
     days = daterange(date_from, date_to)
+    notes = _notes_by_campaign(conn, date_from, date_to)
     blocks: list[dict[str, Any]] = []
     quiet: list[dict[str, Any]] = []
     for camp in _all_campaigns(conn, date_from, date_to):
         advert_id = camp["advert_id"]
         block = {
             **camp,
+            "notes": notes.get(advert_id, {}),
             **_table(_by_advert(conn, date_from, date_to, advert_id),
                      _search_by_day(conn, date_from, date_to, None,
                                     advert_id=advert_id),
@@ -193,6 +197,28 @@ def _all_campaigns(conn: sqlite3.Connection, date_from: str,
         (date_from, date_to),
     ).fetchall()
     return [_campaign_row(row) for row in rows]
+
+
+def _notes_by_campaign(conn: sqlite3.Connection, date_from: str, date_to: str
+                       ) -> dict[int, dict[str, list[dict[str, Any]]]]:
+    """Записи журнала по кампаниям: {кампания: {день: [записи]}}.
+
+    Это тот же журнал изменений, а не второй его экземпляр. Заводить
+    отдельные «комментарии к таблице» значило бы развести две истории
+    правок, которые никогда не сойдутся, — и замер эффекта считался бы
+    по одной из них.
+    """
+    out: dict[int, dict[str, list[dict[str, Any]]]] = {}
+    rows = conn.execute(
+        "SELECT id, date, advert_id, nm_id, text FROM changes"
+        " WHERE advert_id IS NOT NULL AND date BETWEEN ? AND ?"
+        " ORDER BY date, id", (date_from, date_to))
+    for row in rows:
+        day = str(row["date"])[:10]
+        out.setdefault(int(row["advert_id"]), {}).setdefault(day, []).append(
+            {"id": int(row["id"]), "text": str(row["text"] or ""),
+             "nm_id": row["nm_id"]})
+    return out
 
 
 def _campaign_row(row: Any) -> dict[str, Any]:
@@ -448,6 +474,14 @@ def _by_day_sheet(blocks: Sequence[dict[str, Any]], dates: Sequence[str],
             rows.append([row["title"]]
                         + [{"v": v, "style": style} for v in row["days"]]
                         + [{"v": row["total"], "style": style}])
+
+        # Строка «Что меняли» — ради неё цифры и смотрят: без неё в файле
+        # остаётся «в среду стало хуже» без ответа «после чего».
+        notes = block.get("notes") or {}
+        if any(notes.get(day) for day in dates):
+            rows.append(["Что меняли"] + [
+                " · ".join(n["text"] for n in notes.get(day) or [])
+                for day in dates])
 
     return {
         "name": "По дням",

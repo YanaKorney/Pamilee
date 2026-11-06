@@ -660,6 +660,50 @@ table.data tr.star td:first-child { border-left: 3px solid var(--status-good); p
   font-variant-numeric: tabular-nums;
 }
 
+/* ── точки правок на датах ────────────────────────────────────────────── */
+/*
+   Точка стоит под датой, в той же колонке: отдельной строкой под
+   таблицей она оказалась бы в тридцати колонках от своего дня. Пустая —
+   только контур, чтобы тридцать точек не рябили; с записью — заливка,
+   её видно боковым зрением.
+*/
+.note-dot {
+  display: block; margin: 4px auto 0; width: 11px; height: 11px; padding: 0;
+  border-radius: 50%; border: 1.5px solid var(--border-strong);
+  background: transparent; cursor: pointer;
+}
+.note-dot:hover { border-color: var(--series-1); }
+.note-dot.has { background: var(--series-1); border-color: var(--series-1); }
+.note-dot.open {
+  background: var(--series-1); border-color: var(--series-1);
+  box-shadow: 0 0 0 3px var(--status-info-soft);
+}
+.note-dot:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
+
+.note-panel {
+  margin-top: 12px; padding: 12px 14px; border: 1px solid var(--border);
+  border-radius: var(--radius); background: var(--surface-2);
+}
+.note-panel h4 {
+  margin: 0 0 8px; font-size: 13.5px; font-weight: 600;
+  color: var(--text-primary);
+}
+.note-area {
+  width: 100%; box-sizing: border-box; resize: vertical; font: inherit;
+  font-size: 13.5px; padding: 8px 10px; border-radius: 8px;
+  border: 1px solid var(--border-strong); background: var(--surface-1);
+  color: var(--text-primary);
+}
+.note-bar {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  margin-top: 8px;
+}
+.note-said { font-size: 12.5px; color: var(--text-secondary); }
+.note-rest, .note-hint {
+  margin: 8px 0 0; font-size: 12.5px; color: var(--text-muted);
+  line-height: 1.45;
+}
+
 /* Пустой список товаров выглядит как поломка выбора, хотя дело в данных */
 .dnote {
   font-size: 12.5px; color: var(--status-serious); max-width: 340px;
