@@ -2149,7 +2149,8 @@ async function sendNote(url, body, said) {
    нет: нужный артикул находится набором двух-трёх цифр. */
 const COMBO_LIMIT = 200;
 
-function makeCombo({ inputId, listId, clearId, allLabel, selected, onPick }) {
+function makeCombo({ inputId, listId, clearId, noteId, allLabel, selected,
+                    onPick }) {
   const c = { items: [], shown: [], active: -1, open: false };
   const input = () => document.getElementById(inputId);
   const list = () => document.getElementById(listId);
@@ -2232,6 +2233,36 @@ function makeCombo({ inputId, listId, clearId, allLabel, selected, onPick }) {
     onPick(next);
   }
 
+  /* Набранный целиком номер — это выбор, даже если по строке списка не
+     щёлкнули и Enter не нажали. Иначе человек видит свой артикул в поле,
+     а под ним — весь кабинет, и решает, что фильтр не работает. */
+  function applyTyped() {
+    const text = input().value.trim();
+    if (!text || !c.items.includes(text)) return false;
+    choose(text);
+    return true;
+  }
+
+  function leaveField() {
+    close();
+    if (applyTyped()) return;
+    /* Номер, которого нет, молча подменять на прежний нельзя: человек
+       не поймёт, почему в поле не то, что он набрал. */
+    const text = input().value.trim();
+    input().value = shownValue();
+    if (text && text !== shownValue()) said(
+      `Артикула ${text} за этот период нет — показываю прежний выбор.`);
+  }
+
+  function said(message) {
+    const note = noteId ? document.getElementById(noteId) : null;
+    if (!note) return;
+    note.hidden = false;
+    note.textContent = message;
+    clearTimeout(said.timer);
+    said.timer = setTimeout(() => { note.hidden = true; }, 6000);
+  }
+
   input().addEventListener('focus', () => {
     /* Щелчок по полю с уже выбранным артикулом открывает ВЕСЬ список, а
        не одну строку с этим же номером: иначе ни «Все кампании», ни
@@ -2241,6 +2272,12 @@ function makeCombo({ inputId, listId, clearId, allLabel, selected, onPick }) {
     open('');
   });
   input().addEventListener('input', () => open(input().value));
+
+  /* Ушли из поля мышью или по Tab — набранное применяется. */
+  input().addEventListener('blur', () => {
+    // Щелчок по строке списка успевает отработать раньше: он на mousedown.
+    setTimeout(() => { if (!c.open) return; leaveField(); }, 150);
+  });
 
   input().addEventListener('keydown', (e) => {
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
@@ -2287,8 +2324,7 @@ function makeCombo({ inputId, listId, clearId, allLabel, selected, onPick }) {
   document.addEventListener('click', (e) => {
     if (!c.open) return;
     if (e.target.closest('.combo') === input().closest('.combo')) return;
-    close();
-    input().value = shownValue();
+    leaveField();
   });
 
   return {
@@ -2305,9 +2341,16 @@ const dailyCombo = makeCombo({
   inputId: 'daily-nm-input',
   listId: 'daily-nm-list',
   clearId: 'daily-nm-clear',
+  noteId: 'daily-nm-note',
   allLabel: 'Весь кабинет',
   selected: () => daily.nm,
-  onPick: (nm) => { daily.nm = nm; loadDaily(); },
+  onPick: (nm) => {
+    daily.nm = nm;
+    /* Выбранный товар — один на обе сводки: человек выбрал артикул и
+       переходит на соседнюю вкладку за его кампаниями, а не за чужими. */
+    if (nm) { camps.nm = nm; camps.all = false; camps.note = null; }
+    loadDaily();
+  },
 });
 
 const campsCombo = makeCombo({
@@ -2316,7 +2359,14 @@ const campsCombo = makeCombo({
   clearId: 'camps-nm-clear',
   /* «Все кампании» — отчёт по кабинету целиком: по таблице на каждую
      кампанию, числа по всем её товарам. Его и выгружают в Excel. */
+  noteId: 'camps-nm-note',
   allLabel: 'Все кампании',
   selected: () => camps.nm,
-  onPick: (nm) => { camps.all = nm === null; camps.nm = nm; loadCamps(); },
+  onPick: (nm) => {
+    camps.all = nm === null;
+    camps.nm = nm;
+    camps.note = null;
+    if (nm) daily.nm = nm;
+    loadCamps();
+  },
 });

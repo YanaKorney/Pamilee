@@ -1046,3 +1046,31 @@ class TestNoteDotsInTheBrowser(unittest.TestCase):
         """Иначе первый набранный символ уходит в пустоту."""
         self.assertIn("camps.noteFocus", self.js)
         self.assertIn("area.focus()", self.js)
+
+
+class TestTypedArticleCounts(unittest.TestCase):
+    """Человек набирает номер в поле и смотрит вниз. Если набранное
+    применяется только по Enter или щелчку по строке, то в поле стоит
+    артикул, а под ним — весь кабинет, и это читается как «фильтр не
+    работает»."""
+
+    def setUp(self):
+        from wbads.config import ROOT
+
+        self.js = (ROOT / "wbads" / "web" / "app.js").read_text(encoding="utf-8")
+
+    def test_typed_number_applies_when_leaving_the_field(self):
+        self.assertIn("function applyTyped", self.js)
+        self.assertIn("c.items.includes(text)", self.js)
+        self.assertIn("addEventListener('blur'", self.js)
+
+    def test_unknown_number_is_explained_not_swallowed(self):
+        """Молча вернуть прежний номер — значит соврать о том, что
+        человек только что набрал."""
+        self.assertIn("за этот период нет", self.js)
+
+    def test_choice_is_shared_between_both_summaries(self):
+        """Выбрал артикул в сводке по товарам, перешёл в сводку по
+        кампаниям — там его кампании, а не чужие."""
+        self.assertIn("if (nm) { camps.nm = nm; camps.all = false;", self.js)
+        self.assertIn("if (nm) daily.nm = nm;", self.js)
