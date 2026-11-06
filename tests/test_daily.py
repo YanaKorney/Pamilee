@@ -1118,3 +1118,88 @@ class TestNoteFieldOpensAtItsDot(unittest.TestCase):
         appended = self.js.index("host.appendChild(box);")
         self.assertLess(appended, placement,
                         "замер идёт раньше, чем блок попал в страницу")
+
+
+class TestOnlyCampaignsWhereTheArticleRan(DailyCase):
+    """WB присылает строки по каждой кампании, к которой товар просто
+    привязан, — с нулями, с одной отложенной корзиной или с заказом по
+    клику недельной давности. В сводке это выглядело как «вот ещё
+    двадцать кампаний вашего товара» и звало править чужой бюджет.
+    """
+
+    def row(self, advert_id, date="2026-11-01", **values):
+        fields = {"views": 0, "clicks": 0, "atbs": 0, "orders": 0, "shks": 0,
+                  "spend": 0.0, "revenue": 0.0}
+        fields.update(values)
+        self.conn.execute(
+            "INSERT OR REPLACE INTO campaign_nm_daily (advert_id, date, nm_id,"
+            " name, views, clicks, atbs, orders, shks, spend, revenue)"
+            " VALUES (?,?,777,'Товар',?,?,?,?,?,?,?)",
+            (advert_id, date, fields["views"], fields["clicks"],
+             fields["atbs"], fields["orders"], fields["shks"],
+             fields["spend"], fields["revenue"]))
+        self.conn.commit()
+
+    def shown(self):
+        data = daily.campaign_tables(self.conn, "2026-11-01", "2026-11-01", 777)
+        return ([b["advert_id"] for b in data["campaigns"]],
+                {q["advert_id"]: q for q in data["quiet"]})
+
+    def test_campaign_with_impressions_stays(self):
+        self.row(1, views=8651, clicks=1462, spend=29505.76, orders=203,
+                 revenue=106014.0)
+        shown, quiet = self.shown()
+        self.assertEqual(shown, [1])
+        self.assertFalse(quiet)
+
+    def test_ten_impressions_are_enough(self):
+        """Кампания на паузе с десятью показами — это всё ещё её кампания."""
+        self.row(2, views=10, spend=1.35)
+        shown, _ = self.shown()
+        self.assertEqual(shown, [2])
+
+    def test_carts_without_impressions_do_not_count_as_running(self):
+        """Корзина приезжает по клику недельной давности. Раньше такая
+        строка проходила как «есть данные»: корзин не видно ни в одной
+        строке таблицы, и кампания выглядела пустой."""
+        self.row(3, atbs=2)
+        shown, quiet = self.shown()
+        self.assertEqual(shown, [])
+        self.assertIn(3, quiet)
+
+    def test_ordered_items_without_impressions_do_not_count_either(self):
+        self.row(4, shks=1)
+        shown, quiet = self.shown()
+        self.assertEqual(shown, [])
+        self.assertIn(4, quiet)
+
+    def test_a_delayed_order_is_hidden_but_named(self):
+        """Заказ без показов человек помнит и будет искать глазами."""
+        self.row(5, orders=3, revenue=1580.0)
+        shown, quiet = self.shown()
+        self.assertEqual(shown, [])
+        self.assertEqual(quiet[5]["orders"], 3)
+
+    def test_the_real_report_shape(self):
+        """Ровно случай из выгрузки: три кампании товара, пять с
+        отложенными заказами и шестнадцать пустых."""
+        self.row(1, views=8651, clicks=1462, spend=29505.76)
+        self.row(2, views=10, spend=1.35)
+        self.row(3, views=4, spend=0.72)
+        for advert in range(10, 15):
+            self.row(advert, orders=1, revenue=500.0)
+        for advert in range(20, 36):
+            self.row(advert, atbs=1)
+        shown, quiet = self.shown()
+        self.assertEqual(shown, [1, 2, 3])
+        self.assertEqual(len(quiet), 21)
+        self.assertEqual(sum(1 for q in quiet.values() if q["orders"]), 5)
+
+
+class TestQuietNoteMentionsOrders(unittest.TestCase):
+    def test_note_says_what_hidden_means(self):
+        from wbads.config import ROOT
+
+        js = (ROOT / "wbads" / "web" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("ни показов, ни кликов, ни расхода", js)
+        self.assertIn("заказы без показов", js)

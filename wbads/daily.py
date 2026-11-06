@@ -135,15 +135,14 @@ def campaign_tables(conn: sqlite3.Connection, date_from: str, date_to: str,
         # таблица из прочерков. Она занимает экран и читается как «вот эта
         # кампания тоже про этот товар», хотя сказать ей нечего. Такие
         # прячем, но не замалчиваем: их число остаётся на виду.
-        (blocks if block["has_data"] else quiet).append(block)
+        (blocks if _ran(block) else quiet).append(block)
 
     return {
         "period": {"from": date_from, "to": date_to, "days": len(days)},
         "nm_id": nm_id,
         "dates": days,
         "campaigns": blocks,
-        "quiet": [{"advert_id": b["advert_id"], "name": b["name"]}
-                  for b in quiet],
+        "quiet": [_quiet_entry(b) for b in quiet],
         "has_data": any(block["has_data"] for block in blocks),
     }
 
@@ -170,7 +169,7 @@ def all_campaign_tables(conn: sqlite3.Connection, date_from: str,
                                     advert_id=advert_id),
                      days),
         }
-        (blocks if block["has_data"] else quiet).append(block)
+        (blocks if _ran(block) else quiet).append(block)
 
     return {
         "period": {"from": date_from, "to": date_to, "days": len(days)},
@@ -178,8 +177,7 @@ def all_campaign_tables(conn: sqlite3.Connection, date_from: str,
         "scope": "all",
         "dates": days,
         "campaigns": blocks,
-        "quiet": [{"advert_id": b["advert_id"], "name": b["name"]}
-                  for b in quiet],
+        "quiet": [_quiet_entry(b) for b in quiet],
         "has_data": any(block["has_data"] for block in blocks),
     }
 
@@ -387,6 +385,31 @@ def campaigns_to_csv(data: dict[str, Any], title: str = "") -> str:
         writer.writerow([_campaign_label(block)])
         _write_table(writer, block)
     return buffer.getvalue()
+
+
+# По чему решаем, что товар в кампании крутился. Не по «хоть что-то
+# ненулевое»: WB присылает строки и с одними отложенными корзинами или
+# заказами — по кликам недельной давности, а то и по чужой кампании, к
+# которой товар просто привязан. Такая таблица состоит из нулей и
+# читается как «вот ещё одна кампания этого товара», то есть зовёт
+# править чужой бюджет. Крутился — значит были показы, клики или расход.
+RUN_KEYS = ("views", "clicks", "spend")
+
+
+def _ran(block: dict[str, Any]) -> bool:
+    totals = {row["key"]: row["total"] for row in block["rows"]}
+    return any(totals.get(key) for key in RUN_KEYS)
+
+
+def _quiet_entry(block: dict[str, Any]) -> dict[str, Any]:
+    """Скрытая кампания: номер, название и были ли по ней заказы.
+
+    Заказы без показов прятать молча нельзя: человек помнит, что заказ
+    был, и станет искать его глазами.
+    """
+    totals = {row["key"]: row["total"] for row in block["rows"]}
+    return {"advert_id": block["advert_id"], "name": block["name"],
+            "orders": float(totals.get("orders") or 0)}
 
 
 # Единицы показателя → формат ячейки Excel. «Шт» это количества, «₽» —
