@@ -1074,3 +1074,47 @@ class TestTypedArticleCounts(unittest.TestCase):
         кампаниям — там его кампании, а не чужие."""
         self.assertIn("if (nm) { camps.nm = nm; camps.all = false;", self.js)
         self.assertIn("if (nm) daily.nm = nm;", self.js)
+
+
+class TestNoteFieldOpensAtItsDot(unittest.TestCase):
+    """Поле внизу блока оказывалось в тридцати колонках от нужного дня:
+    чтобы понять, к какой дате оно относится, приходилось сверяться с
+    заголовком. Оно должно стоять под своей точкой."""
+
+    def setUp(self):
+        from wbads.config import ROOT
+
+        self.js = (ROOT / "wbads" / "web" / "app.js").read_text(encoding="utf-8")
+        self.css = (ROOT / "wbads" / "web" / "styles.css").read_text(
+            encoding="utf-8")
+
+    def test_panel_is_placed_against_the_dot(self):
+        self.assertIn("function placeNotePanel", self.js)
+        self.assertIn("dot.dataset.date = date", self.js)
+        self.assertIn("position: absolute", self.css.split(".note-panel")[1])
+
+    def test_panel_has_a_caret_pointing_at_the_dot(self):
+        self.assertIn("--caret", self.js)
+        self.assertIn(".note-panel::before", self.css)
+
+    def test_panel_follows_a_sideways_scroll(self):
+        """Оторвавшись от даты, поле начинает врать о том, к какому дню
+        относится запись."""
+        self.assertIn("scroll.addEventListener('scroll', place", self.js)
+        self.assertIn("window.addEventListener('resize', place)", self.js)
+
+    def test_listeners_do_not_pile_up(self):
+        self.assertIn("camps.unplace", self.js)
+        self.assertIn("removeEventListener('scroll', place)", self.js)
+
+    def test_sideways_position_survives_a_save(self):
+        """После сохранения таблица не отматывается к началу месяца."""
+        self.assertIn("scrolled[block.advert_id]", self.js)
+
+    def test_measured_only_after_the_block_is_in_the_page(self):
+        """У узла вне документа координаты нулевые — поле уехало бы в
+        левый верхний угол."""
+        placement = self.js.index("placeNotePanel(box, panel")
+        appended = self.js.index("host.appendChild(box);")
+        self.assertLess(appended, placement,
+                        "замер идёт раньше, чем блок попал в страницу")

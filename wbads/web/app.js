@@ -1826,7 +1826,8 @@ bindPeriod('daily', daily, loadDaily);
    Поэтому здесь по таблице на кампанию, от крупной к мелкой. */
 
 const camps = { days: 7, from: null, to: null, nm: null, all: false,
-                data: null, note: null, noteFocus: false, noteSaid: '' };
+                data: null, note: null, noteFocus: false, noteSaid: '',
+                unplace: null };
 
 /* Таблиц на экране может быть пятьсот — столько не читают, а рисует их
    браузер заметно. Показываем самые дорогие, остальные уезжают в файл:
@@ -1922,11 +1923,24 @@ function renderCampsFilters(data) {
 
 function renderCamps(data) {
   const host = document.getElementById('camps-list');
+  /* Слушатели прошлого поля уходят вместе с ним: иначе они копятся
+     на каждую перерисовку и держат выброшенные узлы. */
+  if (camps.unplace) { camps.unplace(); camps.unplace = null; }
+
+  /* Куда таблицы были прокручены вбок — запоминаем: после сохранения
+     записи человек должен увидеть тот же участок дней, а не начало
+     месяца. */
+  const scrolled = {};
+  host.querySelectorAll('.camp-block').forEach((old) => {
+    const inner = old.querySelector('.dgrid-scroll');
+    if (inner && inner.scrollLeft) scrolled[old.dataset.advert] = inner.scrollLeft;
+  });
   host.innerHTML = '';
 
   const all = data.campaigns || [];
   all.slice(0, CAMPS_SHOWN).forEach((block) => {
     const box = el('section', 'camp-block');
+    box.dataset.advert = String(block.advert_id);
 
     const head = el('div', 'camp-block-head');
     head.appendChild(el('h3', '', escapeHtml(block.name)));
@@ -1946,24 +1960,32 @@ function renderCamps(data) {
     scroll.appendChild(table);
     box.appendChild(scroll);
 
-    /* Поле ввода — под своей таблицей, а не поверх неё: всплывающее
-       окно закрывает те самые цифры, ради которых запись и делают. */
-    if (camps.note && camps.note.advert === block.advert_id) {
-      const panel = notePanel(block, camps.note.date);
-      box.appendChild(panel);
+    /* Поле ввода встаёт прямо под своей точкой: внизу блока, в тридцати
+       колонках от нужного дня, его приходилось искать глазами и сверять,
+       к какой дате оно относится. */
+    const panel = camps.note && camps.note.advert === block.advert_id
+      ? notePanel(block, camps.note.date) : null;
+    if (panel) box.appendChild(panel);
+
+    host.appendChild(box);
+    if (scrolled[block.advert_id]) scroll.scrollLeft = scrolled[block.advert_id];
+
+    /* Размеры считаются только когда блок уже в странице: у узла вне
+       документа все координаты нулевые, и поле уезжает в левый верхний
+       угол. */
+    if (panel) {
+      placeNotePanel(box, panel, camps.note.date);
       /* Раскрыли поле — курсор уже в нём: иначе первый набранный символ
          уходит в пустоту, и человек набирает текст дважды. */
       if (camps.noteFocus) {
         camps.noteFocus = false;
-        setTimeout(() => {
-          const area = panel.querySelector('textarea');
-          if (area) { area.focus(); area.setSelectionRange(
-            area.value.length, area.value.length); }
-        }, 0);
+        const area = panel.querySelector('textarea');
+        if (area) {
+          area.focus();
+          area.setSelectionRange(area.value.length, area.value.length);
+        }
       }
     }
-
-    host.appendChild(box);
   });
 
   /* Остальные кампании не рисуем, но говорим, сколько их и где они:
@@ -2010,6 +2032,47 @@ bindPeriod('camps', camps, loadCamps);
    него: правку вносят, глядя на цифры дня, и уходить за этим в другую
    вкладку значит не записать её вовсе. */
 
+/* Поле держится под своей точкой и едет вместе с таблицей, когда её
+   прокручивают вбок: оторвавшись от даты, оно начинает врать о том, к
+   какому дню относится запись. */
+function placeNotePanel(box, panel, date) {
+  const dot = box.querySelector(`.note-dot[data-date="${date}"]`);
+  const scroll = box.querySelector('.dgrid-scroll');
+  if (!dot) return;
+
+  /* Таблица шире экрана, и после перерисовки она снова в начале: точка,
+     по которой только что щёлкнули, может оказаться за краем. Тогда поле
+     прижимается к границе и стоит далеко от своего дня. */
+  if (scroll) {
+    const view = scroll.getBoundingClientRect();
+    const spot = dot.getBoundingClientRect();
+    if (spot.left < view.left + 8 || spot.right > view.right - 8) {
+      scroll.scrollLeft += (spot.left + spot.width / 2)
+        - (view.left + view.width / 2);
+    }
+  }
+
+  const place = () => {
+    const base = box.getBoundingClientRect();
+    const spot = dot.getBoundingClientRect();
+    const width = panel.offsetWidth || 360;
+    const centre = spot.left - base.left + spot.width / 2;
+    const left = Math.max(0, Math.min(centre - width / 2, base.width - width));
+    panel.style.left = `${Math.round(left)}px`;
+    panel.style.top = `${Math.round(spot.bottom - base.top + 10)}px`;
+    /* Уголок смотрит на точку даже когда само поле упёрлось в край. */
+    panel.style.setProperty('--caret', `${Math.round(centre - left)}px`);
+  };
+
+  place();
+  if (scroll) scroll.addEventListener('scroll', place, { passive: true });
+  window.addEventListener('resize', place);
+  camps.unplace = () => {
+    if (scroll) scroll.removeEventListener('scroll', place);
+    window.removeEventListener('resize', place);
+  };
+}
+
 function campNotes(block, date) {
   return ((block.notes || {})[date]) || [];
 }
@@ -2029,6 +2092,7 @@ function noteDot(block, date) {
   dot.title = notes.length
     ? notes.map((n) => n.text).join(' · ')
     : 'Записать, что меняли в этот день';
+  dot.dataset.date = date;
   dot.addEventListener('click', () => toggleNote(block.advert_id, date));
   return dot;
 }
