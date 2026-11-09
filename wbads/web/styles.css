@@ -19,6 +19,13 @@
   --series-1: #2a78d6;
   --series-2: #eb6834;
   --heat-rgb: 42, 120, 214;
+  /* Заливка «хуже / лучше». Красная сторона взята плотнее зелёной:
+     так пары различаются ещё и светлотой, а не одним тоном, и не
+     сливаются при дальтонизме — проверено симуляцией. */
+  --heat-good-rgb: 12, 163, 12;
+  --heat-bad-rgb: 208, 59, 59;
+  --ga1: .09; --ga2: .17; --ga3: .26;
+  --ba1: .20; --ba2: .40; --ba3: .62;
   --grid:     #e6e4df;
 
   /* Статусы — зарезервированы, в сериях не используются */
@@ -52,6 +59,12 @@
     --series-1: #3987e5;
     --series-2: #d95926;
     --heat-rgb: 57, 135, 229;
+    /* В тёмной теме наоборот: зелёный светлее подложки сильнее,
+       красный — мягче, иначе обе заливки одинаково тёмные. */
+    --heat-good-rgb: 120, 220, 120;
+    --heat-bad-rgb: 208, 59, 59;
+    --ga1: .16; --ga2: .30; --ga3: .45;
+    --ba1: .14; --ba2: .22; --ba3: .30;
     --grid:     #2b2b28;
 
     --status-good-soft:     #12210f;
@@ -678,6 +691,25 @@ table.data tr.star td:first-child { border-left: 3px solid var(--status-good); p
 .dgrid.dyn .heat-3 { --heat-a: .24; }
 .dgrid.dyn .heat-4 { --heat-a: .36; }
 .dgrid.dyn .heat-5 { --heat-a: .50; }
+
+/* Зелёный — лучше обычного для этой строки, красный — хуже. Сторона
+   зависит от показателя: у ДРР хорошо вниз, у выручки вверх. Число в
+   ячейке видно всегда, поэтому цвет здесь не единственный носитель
+   смысла, а подсказка, куда смотреть. */
+.dgrid.dyn .heat-good-1 { background: rgba(var(--heat-good-rgb), var(--ga1)); }
+.dgrid.dyn .heat-good-2 { background: rgba(var(--heat-good-rgb), var(--ga2)); }
+.dgrid.dyn .heat-good-3 { background: rgba(var(--heat-good-rgb), var(--ga3)); }
+.dgrid.dyn .heat-bad-1 { background: rgba(var(--heat-bad-rgb), var(--ba1)); }
+.dgrid.dyn .heat-bad-2 { background: rgba(var(--heat-bad-rgb), var(--ba2)); }
+.dgrid.dyn .heat-bad-3 { background: rgba(var(--heat-bad-rgb), var(--ba3)); }
+/* Образцы цвета в пояснении под таблицей: правила заливки живут внутри
+   .dgrid, а подпись стоит снаружи — значит, нужен свой набор. */
+.heat-chip {
+  display: inline-block; padding: 0 6px; border-radius: 5px;
+  color: var(--text-primary);
+}
+.heat-chip.heat-good-3 { background: rgba(var(--heat-good-rgb), var(--ga3)); }
+.heat-chip.heat-bad-3 { background: rgba(var(--heat-bad-rgb), var(--ba3)); }
 
 /* Шапка группы: без неё двадцать строк читаются как один список, в
    котором «CTR» и «Средний чек» стоят рядом без причины. */

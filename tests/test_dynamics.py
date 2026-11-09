@@ -248,13 +248,30 @@ class TestTabStructure(unittest.TestCase):
         self.assertIn('id="dyn-heat"', self.html)
         self.assertIn("dyn.heat", self.js)
 
-    def test_heat_is_one_hue_by_magnitude(self):
-        """Заливка — это «сколько», а не «хорошо»: смысл одним цветом не
-        передают, и зелёно-красная шкала сказала бы то, чего мы не
-        проверяли."""
-        self.assertIn("--heat-rgb", self.css)
+    def test_heat_is_green_and_red_by_direction(self):
+        """Зелёный — лучше обычного для строки, красный — хуже. Сторона
+        берётся из самого показателя, иначе у ДРР и у выручки рост
+        покрасился бы одинаково."""
+        self.assertIn("--heat-good-rgb", self.css)
+        self.assertIn("--heat-bad-rgb", self.css)
+        self.assertIn(".dgrid.dyn .heat-bad-3", self.css)
+        self.assertIn("(row.good === 'up') === up", self.js)
+
+    def test_rows_without_a_good_side_stay_one_hue(self):
+        """У расхода «больше» не значит «хуже»: красить его красным —
+        значит сказать то, чего мы не проверяли."""
+        self.assertIn("if (!row.good) {", self.js)
         self.assertIn(".dgrid.dyn .heat-5", self.css)
-        self.assertNotIn("heat-good", self.css)
+
+    def test_colour_is_measured_from_the_median(self):
+        """Среднее сдвигает один выброс — а выбросы мы и ищем."""
+        self.assertIn("function median", self.js)
+        self.assertIn("const middle = median(values)", self.js)
+
+    def test_legend_says_what_the_colours_mean(self):
+        self.assertIn("лучше обычного", self.js)
+        self.assertIn("heat-chip", self.js)
+        self.assertIn(".heat-chip", self.css)
 
     def test_trend_shows_shape_and_number(self):
         self.assertIn("sparkline(row.days", self.js)

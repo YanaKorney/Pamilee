@@ -2515,23 +2515,49 @@ function renderDynFilters(data) {
     + 'Нажмите на строку — откроется график.';
 }
 
-/* Заливка — одна краска, от меньшего к большему внутри строки: это
-   «сколько», а не «хорошо или плохо». Хорошо или плохо говорит колонка
-   «Тренд», и там рядом со знаком, а не одним цветом. */
-const HEAT_STEPS = 5;
+/* Заливка показывает, где день выбился из обычного для этой строки:
+   зелёный — в хорошую сторону, красный — в плохую. Какая сторона
+   хорошая, знает сам показатель: у ДРР и цены клика хорошо вниз, у
+   выручки и конверсий — вверх. У расхода хорошей стороны нет, и такие
+   строки красятся одной краской по величине: «больше» у расхода не
+   значит «хуже», это зависит от того, что он принёс.
+
+   Отсчёт идёт от медианы строки, а не от нуля и не от среднего:
+   медиану не сдвигает один выброс, а именно выбросы мы и ищем. */
+const HEAT_STEPS = 3;
+const PLAIN_STEPS = 5;
 
 function heatClass(row, value) {
-  if (!dyn.heat || row.is_ratio === undefined) return '';
-  /* Шкала — от минимума строки к её максимуму, а не от нуля: показы
-     гуляют между 130 и 176 тысячами, и от нуля вся строка красится
-     одинаково, то есть не показывает ничего. */
+  if (!dyn.heat || !row.has_data || !value) return '';
   const values = row.days.filter((v) => typeof v === 'number');
+  if (!values.length) return '';
   const max = Math.max(...values);
   const min = Math.min(...values);
-  if (!row.has_data || !values.length || max === min) return '';
-  const share = (value - min) / (max - min);
-  const step = Math.min(HEAT_STEPS, Math.max(1, Math.ceil(share * HEAT_STEPS)));
-  return value ? `heat heat-${step}` : '';
+  if (max === min) return '';
+
+  if (!row.good) {
+    const share = (value - min) / (max - min);
+    const step = Math.min(PLAIN_STEPS,
+                          Math.max(1, Math.ceil(share * PLAIN_STEPS)));
+    return `heat heat-${step}`;
+  }
+
+  const middle = median(values);
+  const spread = Math.max(max - middle, middle - min);
+  if (!spread) return '';
+  const away = (value - middle) / spread;
+  const step = Math.min(HEAT_STEPS, Math.ceil(Math.abs(away) * HEAT_STEPS));
+  if (!step) return '';
+  const up = away > 0;
+  const good = (row.good === 'up') === up;
+  return `heat heat-${good ? 'good' : 'bad'}-${step}`;
+}
+
+function median(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  const half = Math.floor(sorted.length / 2);
+  return sorted.length % 2
+    ? sorted[half] : (sorted[half - 1] + sorted[half]) / 2;
 }
 
 function dynValue(row, value) {
@@ -2570,10 +2596,13 @@ function renderDyn(data) {
 
   const legend = document.getElementById('dyn-legend');
   legend.hidden = !dyn.heat;
-  legend.textContent = 'Заливка показывает величину внутри строки: чем '
-    + 'темнее, тем больше. Это «сколько», а не «хорошо»: хорошо или плохо '
-    + 'сказано в колонке «Тренд» — там учтено, в какую сторону для этого '
-    + 'показателя лучше.';
+  legend.innerHTML = 'Заливка сравнивает день с обычным для этой строки: '
+    + '<span class="heat-chip heat-good-3">зелёный</span> — лучше обычного, '
+    + '<span class="heat-chip heat-bad-3">красный</span> — хуже, и чем '
+    + 'гуще, тем сильнее отличие. Сторона зависит от показателя: у ДРР и '
+    + 'цены клика хорошо вниз, у выручки и конверсий — вверх. Расход '
+    + 'залит одной краской по величине: тратить больше само по себе ни '
+    + 'плохо, ни хорошо.';
 
   renderDynChart();
 }
