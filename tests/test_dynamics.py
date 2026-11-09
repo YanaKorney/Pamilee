@@ -283,9 +283,40 @@ class TestTabStructure(unittest.TestCase):
         self.assertIn("signed(row.delta_pct)", self.js)
 
     def test_row_opens_a_chart_with_the_previous_period(self):
-        self.assertIn("function toggleDynChart", self.js)
-        self.assertIn("'Этот период'", self.js)
+        """Один показатель — свои единицы и прошлый период второй линией."""
+        self.assertIn("function toggleDynMetric", self.js)
         self.assertIn("Прошлый период", self.js)
+        self.assertIn("if (!indexed) {", self.js)
+
+    def test_several_metrics_share_one_chart(self):
+        """Ради этого вкладку и смотрят: видно ли, что одно поехало
+        вслед за другим."""
+        self.assertIn("dyn.picked", self.js)
+        self.assertIn("function dynChips", self.js)
+        self.assertIn("aria-pressed", self.js)
+
+    def test_different_scales_are_indexed_not_double_axed(self):
+        """Вторая ось — самый частый способ соврать графиком: показы в
+        сотнях тысяч превратили бы ДРР в прямую у нуля."""
+        self.assertIn("const indexed = rows.length > 1", self.js)
+        self.assertIn("(v / base) * 100", self.js)
+        self.assertIn("100% — среднее значение", self.js)
+
+    def test_tooltip_keeps_the_real_numbers(self):
+        """Процент от среднего — не та цифра, по которой принимают
+        решение."""
+        self.assertIn("tipValues: row.days", self.js)
+        self.assertIn("s.tipValues || s.values", self.js)
+
+    def test_colour_follows_the_metric_not_its_place(self):
+        """Снял одну линию — остальные не перекрашиваются."""
+        self.assertIn("function takeSlot", self.js)
+        self.assertIn("dyn.slots[key]", self.js)
+
+    def test_lines_are_capped(self):
+        """Больше шести линий не различить ни по цвету, ни глазом."""
+        self.assertIn("DYN_MAX_LINES = 6", self.js)
+        self.assertIn("--series-6", self.css)
 
     def test_chart_has_a_legend_for_two_series(self):
         self.assertIn("legend-item", self.js)

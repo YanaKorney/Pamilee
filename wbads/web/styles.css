@@ -18,6 +18,14 @@
   /* Категориальные слоты: 1 — выручка, 2 — расход */
   --series-1: #2a78d6;
   --series-2: #eb6834;
+  /* Слоты 3–6 — для графика на несколько показателей сразу. Порядок
+     задан палитрой и не меняется: он и есть механизм различимости при
+     дальтонизме, а цвет закреплён за показателем, а не за его местом
+     в списке. */
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
   --heat-rgb: 42, 120, 214;
   /* Заливка «хуже / лучше». Красная сторона взята плотнее зелёной:
      так пары различаются ещё и светлотой, а не одним тоном, и не
@@ -58,6 +66,10 @@
 
     --series-1: #3987e5;
     --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+    --series-6: #008300;
     --heat-rgb: 57, 135, 229;
     /* В тёмной теме наоборот: зелёный светлее подложки сильнее,
        красный — мягче, иначе обе заливки одинаково тёмные. */
@@ -737,6 +749,33 @@ table.data tr.star td:first-child { border-left: 3px solid var(--status-good); p
 }
 .m-delta.good { color: var(--status-good); }
 .m-delta.bad { color: var(--status-critical); }
+
+/* Список показателей под графиком: вторую линию добавляют, не уходя
+   от первой и не возвращаясь к таблице. */
+.dyn-chips { margin-top: 14px; }
+.dyn-chips-hint {
+  margin: 0 0 8px; font-size: 12.5px; color: var(--text-muted);
+}
+.dyn-chip-row {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  margin-bottom: 6px;
+}
+.dyn-chip-group {
+  font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--text-muted); min-width: 108px;
+}
+.dyn-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--border-strong); background: var(--surface-1);
+  color: var(--text-secondary); border-radius: 999px;
+  padding: 4px 11px; font: inherit; font-size: 12.5px; cursor: pointer;
+}
+.dyn-chip:hover { background: var(--surface-2); }
+.dyn-chip.on {
+  border-color: var(--border-strong); background: var(--surface-2);
+  color: var(--text-primary); font-weight: 600;
+}
+.dgrid.dyn .row-dot { margin-right: 7px; vertical-align: baseline; }
 
 .dyn-chart-head {
   display: flex; align-items: center; justify-content: space-between;

@@ -265,9 +265,15 @@ function lineChart(host, spec) {
     const mark = markIndex.get(idx);
     tip.innerHTML =
       `<div class="t-date">${dayLabel(spec.dates[idx])}</div>` +
-      spec.series.map((s) =>
-        `<div class="t-row"><span><span class="swatch dot" style="background:${s.color}"></span> ${s.name}</span>` +
-        `<b>${spec.format(s.values[idx])}</b></div>`).join('') +
+      spec.series.map((s) => {
+        /* Когда линии приведены к общей базе, в подсказке обязано
+           стоять настоящее число: процент от среднего не та цифра,
+           по которой принимают решение. */
+        const shown = (s.tipValues || s.values)[idx];
+        const show = s.format || spec.format;
+        return `<div class="t-row"><span><span class="swatch dot" style="background:${s.color}"></span> ${s.name}</span>` +
+          `<b>${show(shown)}</b></div>`;
+      }).join('') +
       /* Что вы в этот день меняли — здесь и живёт смысл метки. */
       (mark ? `<div class="t-mark">${mark.texts.map(escapeHtml).join('<br>')}</div>` : '');
     tip.style.opacity = 1;
@@ -2456,7 +2462,11 @@ const campsCombo = makeCombo({
    выброс раньше, чем человек прочтёт числа. */
 
 const dyn = { days: 14, from: null, to: null, nm: null, data: null,
-              heat: true, open: '' };
+              heat: true, picked: [], slots: {} };
+
+/* Линий на одном графике — не больше шести: дальше их не различить ни
+   по цвету, ни глазом, и палитра кончается честными цветами. */
+const DYN_MAX_LINES = 6;
 
 function dynQuery() {
   const p = new URLSearchParams();
@@ -2609,19 +2619,28 @@ function renderDyn(data) {
 
 function dynRow(row, data) {
   const tr = document.createElement('tr');
+  const picked = dyn.picked.includes(row.key);
   tr.className = [row.is_ratio ? 'ratio' : '', row.zone ? 'zone' : '',
-                  dyn.open === row.key ? 'picked' : ''].filter(Boolean).join(' ');
+                  picked ? 'picked' : ''].filter(Boolean).join(' ');
   tr.tabIndex = 0;
   tr.setAttribute('role', 'button');
-  tr.setAttribute('aria-expanded', String(dyn.open === row.key));
-  tr.title = 'Открыть график';
-  const open = () => toggleDynChart(row.key);
+  tr.setAttribute('aria-pressed', String(picked));
+  tr.title = picked ? 'Убрать с графика' : 'Показать на графике';
+  const open = () => toggleDynMetric(row.key);
   tr.addEventListener('click', open);
   tr.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
   });
 
-  tr.appendChild(el('td', 'm-name', escapeHtml(row.title)));
+  const name = el('td', 'm-name', escapeHtml(row.title));
+  if (picked) {
+    /* Та же метка, что в легенде графика: иначе по четырём линиям
+       приходится гадать, какая из них какая строка. */
+    name.insertAdjacentHTML('afterbegin',
+      `<span class="swatch dot row-dot" style="background:${dynColor(row.key)}">`
+      + '</span>');
+  }
+  tr.appendChild(name);
 
   /* Форма тренда и изменение к прошлому периоду — рядом: по одной
      цифре не видно, был ли это ровный рост или качели. */
@@ -2653,64 +2672,164 @@ function dynDelta(row) {
     + `${signed(row.delta_pct)}</span>`;
 }
 
-function toggleDynChart(key) {
-  dyn.open = dyn.open === key ? '' : key;
+/* Цвет закреплён за показателем, пока он на графике: если при снятии
+   одной линии остальные перекрасятся, глаз придётся переучивать
+   каждый раз. Освободившийся слот достаётся следующему выбранному. */
+function dynColor(key) {
+  return cssVar(`--series-${dyn.slots[key] || 1}`);
+}
+
+function takeSlot(key) {
+  if (dyn.slots[key]) return true;
+  const busy = new Set(dyn.picked.map((k) => dyn.slots[k]));
+  for (let i = 1; i <= DYN_MAX_LINES; i++) {
+    if (!busy.has(i)) { dyn.slots[key] = i; return true; }
+  }
+  return false;
+}
+
+function toggleDynMetric(key) {
+  if (dyn.picked.includes(key)) {
+    dyn.picked = dyn.picked.filter((k) => k !== key);
+    delete dyn.slots[key];
+  } else {
+    if (dyn.picked.length >= DYN_MAX_LINES) {
+      dyn.said = `Больше ${DYN_MAX_LINES} линий на одном графике не `
+        + 'различить. Снимите лишнюю и добавьте эту.';
+      renderDyn(dyn.data);
+      return;
+    }
+    takeSlot(key);
+    dyn.picked.push(key);
+  }
+  dyn.said = '';
   renderDyn(dyn.data);
-  if (dyn.open) {
+  if (dyn.picked.length === 1) {
     document.getElementById('dyn-chart').scrollIntoView(
       { block: 'nearest', behavior: 'smooth' });
   }
 }
 
+function dynRows(data) {
+  return (data.groups || []).flatMap((g) => g.rows);
+}
+
 function renderDynChart() {
   const host = document.getElementById('dyn-chart');
   host.innerHTML = '';
-  host.hidden = !dyn.open;
-  if (!dyn.open) return;
+  host.hidden = !dyn.picked.length;
+  if (!dyn.picked.length) return;
 
   const data = dyn.data;
-  const row = (data.groups || []).flatMap((g) => g.rows)
-    .find((r) => r.key === dyn.open);
-  if (!row) { host.hidden = true; return; }
+  const all = dynRows(data);
+  const rows = dyn.picked.map((key) => all.find((r) => r.key === key))
+    .filter(Boolean);
+  if (!rows.length) { host.hidden = true; return; }
 
   const head = el('div', 'dyn-chart-head');
-  head.appendChild(el('h3', '', escapeHtml(row.title)));
+  head.appendChild(el('h3', '', rows.length === 1
+    ? escapeHtml(rows[0].title)
+    : `На графике ${rows.length} `
+      + `${plural(rows.length, 'показатель', 'показателя', 'показателей')}`));
   const close = el('button', 'btn', 'Закрыть');
   close.type = 'button';
-  close.addEventListener('click', () => toggleDynChart(row.key));
+  close.addEventListener('click', () => {
+    dyn.picked = []; dyn.slots = {}; dyn.said = '';
+    renderDyn(dyn.data);
+  });
   head.appendChild(close);
   host.appendChild(head);
 
+  /* Две и больше линий в своих единицах на одной оси — это вторая ось
+     через запятую: показы в сотнях тысяч превратят ДРР в прямую у
+     нуля. Поэтому линии приводятся к общей базе: 100% — среднее
+     значение этого показателя за период. Настоящие числа остаются в
+     подсказке и в таблице. */
+  const indexed = rows.length > 1;
+  const series = rows.map((row) => {
+    const base = average(row.days);
+    return {
+      name: row.title,
+      color: dynColor(row.key),
+      values: indexed
+        ? row.days.map((v) => (base ? (v / base) * 100 : 0))
+        : row.days,
+      tipValues: row.days,
+      format: (v) => dynValue(row, v),
+      fill: !indexed,
+    };
+  });
+  if (!indexed) {
+    series.push({
+      name: `Прошлый период (${dayLabel(data.previous.from)} — `
+            + `${dayLabel(data.previous.to)})`,
+      color: cssVar('--series-2'),
+      values: rows[0].prev_days,
+      format: (v) => dynValue(rows[0], v),
+    });
+  }
+
   const plot = el('div', 'chart');
   host.appendChild(plot);
-
-  /* Прошлый период — вторая серия того же графика и своим цветом, а не
-     пунктиром: пунктир читается как «прогноз». Длина у периодов одна,
-     поэтому дни совмещаются по порядку, а не по датам. */
   lineChart(plot, {
     dates: data.dates,
-    height: 240,
-    series: [
-      { name: 'Этот период', values: row.days, color: cssVar('--series-1'),
-        fill: true },
-      { name: `Прошлый период (${dayLabel(data.previous.from)} — `
-              + `${dayLabel(data.previous.to)})`,
-        values: row.prev_days, color: cssVar('--series-2') },
-    ],
-    format: (v) => dynValue(row, v),
-    axisFormat: (v) => (row.unit === '%' ? pct(v, 0) : num(v)),
-    ariaLabel: `${row.title} по дням, этот и прошлый период`,
+    height: 260,
+    series,
+    format: (v) => dynValue(rows[0], v),
+    axisFormat: (v) => (indexed ? pct(v, 0)
+      : (rows[0].unit === '%' ? pct(v, 0) : num(v))),
+    ariaLabel: indexed
+      ? 'Выбранные показатели по дням, в процентах к своему среднему'
+      : `${rows[0].title} по дням, этот и прошлый период`,
   });
 
   const legend = el('div', 'legend');
-  legend.innerHTML = [
-    ['Этот период', cssVar('--series-1')],
-    [`Прошлый период: ${dayLabel(data.previous.from)} — `
-     + `${dayLabel(data.previous.to)}`, cssVar('--series-2')],
-  ].map(([name, color]) =>
-    `<span class="legend-item"><span class="swatch" style="background:${color}">`
-    + `</span>${escapeHtml(name)}</span>`).join('');
+  legend.innerHTML = series.map((s) =>
+    `<span class="legend-item"><span class="swatch" style="background:${s.color}">`
+    + `</span>${escapeHtml(s.name)}</span>`).join('');
   host.appendChild(legend);
+
+  if (indexed) {
+    host.appendChild(el('p', 'dgrid-note',
+      'Линии приведены к общей базе: 100% — среднее значение этого '
+      + 'показателя за период. Иначе показы в сотнях тысяч превратили бы '
+      + 'ДРР в прямую у нуля. Настоящие числа — в подсказке при наведении '
+      + 'и в таблице выше.'));
+  }
+
+  host.appendChild(dynChips(data));
+  if (dyn.said) host.appendChild(el('p', 'dnote', escapeHtml(dyn.said)));
+}
+
+function average(values) {
+  const nums = values.filter((v) => typeof v === 'number');
+  if (!nums.length) return 0;
+  return nums.reduce((a, b) => a + b, 0) / nums.length;
+}
+
+/* Список показателей прямо под графиком: добавить вторую линию, не
+   возвращаясь к таблице и не теряя из виду первую. */
+function dynChips(data) {
+  const box = el('div', 'dyn-chips');
+  box.appendChild(el('p', 'dyn-chips-hint',
+    'Нажмите показатель, чтобы добавить его линию или убрать:'));
+
+  (data.groups || []).forEach((group) => {
+    const line = el('div', 'dyn-chip-row');
+    line.appendChild(el('span', 'dyn-chip-group', escapeHtml(group.title)));
+    group.rows.forEach((row) => {
+      const on = dyn.picked.includes(row.key);
+      const chip = el('button', 'dyn-chip' + (on ? ' on' : ''),
+        (on ? `<span class="swatch dot" style="background:${dynColor(row.key)}">`
+            + '</span>' : '') + escapeHtml(row.title));
+      chip.type = 'button';
+      chip.setAttribute('aria-pressed', String(on));
+      chip.addEventListener('click', () => toggleDynMetric(row.key));
+      line.appendChild(chip);
+    });
+    box.appendChild(line);
+  });
+  return box;
 }
 
 document.getElementById('dyn-heat').addEventListener('change', (e) => {
