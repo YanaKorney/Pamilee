@@ -324,3 +324,168 @@ class TestTabStructure(unittest.TestCase):
     def test_keyboard_reaches_the_chart(self):
         self.assertIn("tr.tabIndex = 0", self.js)
         self.assertIn("e.key === 'Enter'", self.js)
+
+
+class TestBuyouts(DynamicsCase):
+    """Заказ и выкуп — разные события, и разрыв между ними в днях как
+    раз то, ради чего выкупы смотрят: реклама привела заказ, а деньги
+    пришли (или не пришли) позже."""
+
+    def sale(self, date, *, nm_id=777, finished=1200.0, for_pay=1000.0,
+             returned=False, key=None):
+        self.conn.execute(
+            "INSERT OR REPLACE INTO sales_raw (srid, sale_id, date,"
+            " last_change, nm_id, supplier_article, brand, subject, warehouse,"
+            " region, total_price, discount_percent, price_with_disc,"
+            " finished_price, for_pay, spp, is_return, collected_at)"
+            " VALUES (?,?,?,?,?,'A','B','C','W','R',2000,20,1500,?,?,20,?,'now')",
+            (key or f"{date}-{nm_id}-{finished}-{returned}",
+             "R1" if returned else "S1", date, date, nm_id, finished, for_pay,
+             1 if returned else 0))
+        self.conn.commit()
+
+    def test_rows_appear_only_with_sales(self):
+        self.day("2026-11-01")
+        self.assertNotIn("buyouts",
+                         self.rows(dynamics.table(self.conn, "2026-11-01",
+                                                  "2026-11-01")))
+        self.sale("2026-11-01")
+        self.assertIn("buyouts",
+                      self.rows(dynamics.table(self.conn, "2026-11-01",
+                                               "2026-11-01")))
+
+    def test_money_and_count(self):
+        self.day("2026-11-01", spend=600.0)
+        self.sale("2026-11-01", finished=1200.0, for_pay=1000.0, key="a")
+        self.sale("2026-11-01", finished=800.0, for_pay=700.0, key="b")
+        rows = self.rows(dynamics.table(self.conn, "2026-11-01", "2026-11-01"))
+        self.assertEqual(rows["buyouts"]["days"], [2.0])
+        self.assertEqual(rows["buyout_revenue"]["days"], [2000.0])
+        self.assertEqual(rows["for_pay"]["days"], [1700.0])
+        self.assertEqual(rows["cps"]["days"], [300.0])
+        self.assertEqual(rows["drr_buyout"]["days"], [30.0])
+
+    def test_returns_are_their_own_row(self):
+        """Возврат приходит через недели. Вычитая его из дня, в котором
+        он приехал, мы испортили бы оба дня."""
+        self.day("2026-11-01")
+        self.sale("2026-11-01", key="s")
+        self.sale("2026-11-01", returned=True, key="r")
+        rows = self.rows(dynamics.table(self.conn, "2026-11-01", "2026-11-01"))
+        self.assertEqual(rows["buyouts"]["days"], [1.0])
+        self.assertEqual(rows["returns"]["days"], [1.0])
+
+    def test_conversion_to_buyout_uses_cabinet_orders(self):
+        self.day("2026-11-01")
+        self.order("2026-11-01", srid="o1")
+        self.order("2026-11-01", srid="o2")
+        self.sale("2026-11-01")
+        rows = self.rows(dynamics.table(self.conn, "2026-11-01", "2026-11-01"))
+        self.assertEqual(rows["cr_buyout"]["days"], [50.0])
+
+    def test_period_total_is_not_an_average_of_days(self):
+        self.day("2026-11-01", spend=100.0)
+        self.day("2026-11-02", spend=900.0)
+        self.sale("2026-11-01", finished=1000.0, key="a")
+        self.sale("2026-11-02", finished=1000.0, key="b")
+        drr = self.rows(dynamics.table(self.conn, "2026-11-01", "2026-11-02")
+                        )["drr_buyout"]
+        self.assertEqual(drr["days"], [10.0, 90.0])
+        self.assertEqual(drr["total"], 50.0)
+
+
+class TestStocks(DynamicsCase):
+    """Метод остатков отдаёт снимок «что лежит сейчас». Истории у него
+    нет, и ряд по дням набирается нашими снимками."""
+
+    def stock(self, date, *, nm_id=777, quantity=40, in_way=5, warehouse=1):
+        self.conn.execute(
+            "INSERT OR REPLACE INTO stocks_daily (date, nm_id, warehouse_id,"
+            " warehouse, region, quantity, in_way_to_client,"
+            " in_way_from_client, collected_at)"
+            " VALUES (?,?,?,'Коледино','ЦФО',?,?,0,'now')",
+            (date, nm_id, warehouse, quantity, in_way))
+        self.conn.commit()
+
+    def test_rows_appear_only_with_stocks(self):
+        self.day("2026-11-01")
+        self.assertNotIn("stock", self.rows(
+            dynamics.table(self.conn, "2026-11-01", "2026-11-01")))
+        self.stock("2026-11-01")
+        self.assertIn("stock", self.rows(
+            dynamics.table(self.conn, "2026-11-01", "2026-11-01")))
+
+    def test_warehouses_are_summed(self):
+        self.day("2026-11-01")
+        self.stock("2026-11-01", quantity=40, warehouse=1)
+        self.stock("2026-11-01", quantity=10, warehouse=2)
+        rows = self.rows(dynamics.table(self.conn, "2026-11-01", "2026-11-01"))
+        self.assertEqual(rows["stock"]["days"], [50.0])
+
+    def test_stock_is_not_summed_over_the_period(self):
+        """Остаток — состояние на день, а не событие. Сумма остатков за
+        две недели — это число, которого не существует."""
+        self.day("2026-11-01")
+        self.day("2026-11-02")
+        self.stock("2026-11-01", quantity=40)
+        self.stock("2026-11-02", quantity=30)
+        rows = self.rows(dynamics.table(self.conn, "2026-11-01", "2026-11-02"))
+        self.assertEqual(rows["stock"]["days"], [40.0, 30.0])
+        self.assertEqual(rows["stock"]["total"], 30.0, "итог — последний день")
+
+    def test_days_left_counts_from_the_week(self):
+        """По одному дню запас прыгает от двух дней до сорока и ничего
+        не говорит."""
+        for day in ("2026-11-0%d" % i for i in range(1, 8)):
+            self.day(day)
+            self.conn.execute(
+                "INSERT OR REPLACE INTO sales_raw (srid, sale_id, date,"
+                " last_change, nm_id, supplier_article, brand, subject,"
+                " warehouse, region, total_price, discount_percent,"
+                " price_with_disc, finished_price, for_pay, spp, is_return,"
+                " collected_at) VALUES (?,?,?,?,777,'A','B','C','W','R',"
+                "2000,20,1500,1200,1000,20,0,'now')",
+                (f"s{day}", "S1", day, day))
+        self.conn.commit()
+        self.stock("2026-11-07", quantity=14)
+        rows = self.rows(dynamics.table(self.conn, "2026-11-07", "2026-11-07"))
+        # Неделя, одна продажа в день → запас ровно на четырнадцать дней.
+        self.assertEqual(rows["days_left"]["days"], [14.0])
+
+    def test_no_stock_means_no_guess(self):
+        self.day("2026-11-01")
+        self.stock("2026-11-01", quantity=0)
+        rows = self.rows(dynamics.table(self.conn, "2026-11-01", "2026-11-01"))
+        self.assertEqual(rows["days_left"]["days"], [0.0])
+
+
+class TestSppComesFromWb(DynamicsCase):
+    """СПП WB отдаёт процентом в каждом заказе. Считать её разницей цен
+    можно, но в разницу попадут и другие скидки."""
+
+    def test_spp_is_taken_from_the_order(self):
+        self.day("2026-11-01")
+        self.conn.execute(
+            "INSERT OR REPLACE INTO orders_raw (srid, date, last_change,"
+            " nm_id, supplier_article, brand, subject, price_with_disc,"
+            " finished_price, total_price, spp, is_cancel, collected_at)"
+            " VALUES ('x','2026-11-01','2026-11-01',777,'A','B','C',"
+            "1500,1200,2000,17,0,'now')")
+        self.conn.commit()
+        rows = self.rows(dynamics.table(self.conn, "2026-11-01", "2026-11-01"))
+        self.assertEqual(rows["spp_pct"]["days"], [17.0])
+        self.assertEqual(rows["price_before_spp"]["days"], [1500.0])
+        self.assertEqual(rows["price_with_spp"]["days"], [1200.0])
+
+    def test_without_wb_spp_the_price_gap_is_used(self):
+        """У заказов, собранных прежней версией, поля СПП нет вовсе."""
+        self.day("2026-11-01")
+        self.conn.execute(
+            "INSERT OR REPLACE INTO orders_raw (srid, date, last_change,"
+            " nm_id, supplier_article, brand, subject, price_with_disc,"
+            " finished_price, total_price, spp, is_cancel, collected_at)"
+            " VALUES ('x','2026-11-01','2026-11-01',777,'A','B','C',"
+            "1000,800,2000,0,0,'now')")
+        self.conn.commit()
+        rows = self.rows(dynamics.table(self.conn, "2026-11-01", "2026-11-01"))
+        self.assertEqual(rows["spp_pct"]["days"], [20.0])

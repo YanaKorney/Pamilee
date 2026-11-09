@@ -74,23 +74,40 @@ class TestNothingStopsTheDiagnosis(unittest.TestCase):
             return diagnose.run_diagnostics(TOKEN)
 
     def test_every_method_is_probed_even_if_the_first_one_fails(self):
-        def always_denied(url, token, method="GET", ca_bundle="", timeout=60):
+        def always_denied(url, token, method="GET", ca_bundle="", timeout=60, payload=None):
             f = diagnose.Finding(label="", method=method, url=url, status=403)
             return f
 
         report = self.run_all(always_denied)
         self.assertEqual(len(report["findings"]), len(diagnose.PROBES),
                          "отказ первой пробы не отменяет остальные")
-        self.assertEqual(len(report["problems"]), len(diagnose.PROBES))
+        # Остатки — исключение: 403 там означает не поломку, а
+        # отсутствующую у токена категорию «Аналитика».
+        self.assertEqual(len(report["problems"]), len(diagnose.PROBES) - 1)
         text = diagnose.render(report)
         for label, *_ in diagnose.PROBES:
             self.assertIn(label, text, f"{label} обязан попасть в отчёт")
+
+    def test_stocks_denied_is_explained_not_called_a_breakage(self):
+        """Категории токена задаются при его создании и потом не
+        меняются: человеку нужно не «403», а «выпустите новый токен»."""
+        def denied(url, token, method="GET", ca_bundle="", timeout=60,
+                   payload=None):
+            return diagnose.Finding(label="", method=method, url=url,
+                                    status=403)
+
+        report = self.run_all(denied)
+        stocks = next(f for f in report["findings"]
+                      if f.label == "Остатки на складах")
+        self.assertEqual(stocks.level, "warn")
+        self.assertIn("Аналитика", stocks.note)
+        self.assertIn("выпустите новый", stocks.note)
 
     def test_a_crashing_probe_does_not_crash_the_report(self):
         """Диагностика нужна именно тогда, когда что-то сломано непредвиденно."""
         calls = {"n": 0}
 
-        def flaky(url, token, method="GET", ca_bundle="", timeout=60):
+        def flaky(url, token, method="GET", ca_bundle="", timeout=60, payload=None):
             calls["n"] += 1
             f = diagnose.Finding(label="", method=method, url=url)
             if calls["n"] == 1:
@@ -107,7 +124,7 @@ class TestNothingStopsTheDiagnosis(unittest.TestCase):
         self.assertIn("нежданное", diagnose.render(report))
 
     def test_report_survives_a_broken_token(self):
-        def ok(url, token, method="GET", ca_bundle="", timeout=60):
+        def ok(url, token, method="GET", ca_bundle="", timeout=60, payload=None):
             f = diagnose.Finding(label="", method=method, url=url, status=200)
             f.records, f.shape, f.parsed = 1, "объект", {}
             return f
@@ -163,7 +180,7 @@ class TestRetiredAddressesAreChecked(unittest.TestCase):
     как норму, иначе отчёт пугает там, где всё в порядке."""
 
     def test_dead_address_is_a_tick(self):
-        def by_url(url, token, method="GET", ca_bundle="", timeout=60):
+        def by_url(url, token, method="GET", ca_bundle="", timeout=60, payload=None):
             f = diagnose.Finding(label="", method=method, url=url)
             f.status = 404 if method == "POST" else 200
             if method == "GET":
@@ -181,7 +198,7 @@ class TestRetiredAddressesAreChecked(unittest.TestCase):
             self.assertIn("как и ожидалось", finding.note)
 
     def test_unreachable_address_is_not_read_as_a_revival(self):
-        def nothing(url, token, method="GET", ca_bundle="", timeout=60):
+        def nothing(url, token, method="GET", ca_bundle="", timeout=60, payload=None):
             f = diagnose.Finding(label="", method=method, url=url)
             f.error = "нет связи"
             return f
@@ -268,7 +285,7 @@ class TestReportIsSelfContained(unittest.TestCase):
     def test_saved_file_has_everything_needed(self):
         import tempfile
 
-        def ok(url, token, method="GET", ca_bundle="", timeout=60):
+        def ok(url, token, method="GET", ca_bundle="", timeout=60, payload=None):
             f = diagnose.Finding(label="", method=method, url=url, status=200)
             f.records, f.shape, f.parsed = 2, "список из 2 записей", []
             f.headers = {"X-RateLimit-Remaining": "2"}
@@ -293,7 +310,7 @@ class TestReportIsSelfContained(unittest.TestCase):
         """Файл отправляют по почте — значение токена в нём недопустимо."""
         secret = "eyJhbGciOiJFUzI1NiJ9.eyJzIjo0MjE0fQ.подпись-секрет"
 
-        def ok(url, token, method="GET", ca_bundle="", timeout=60):
+        def ok(url, token, method="GET", ca_bundle="", timeout=60, payload=None):
             f = diagnose.Finding(label="", method=method, url=url, status=200)
             f.records, f.parsed = 1, {}
             return f

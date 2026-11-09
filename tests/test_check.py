@@ -26,21 +26,30 @@ FULL_ACCESS = {
     "fullstats": lambda self, ids, a, b, on_progress=None: [{"advertId": ids[0], "days": []}],
 }
 
-# Заказы живут в отдельном клиенте: их подменяем отдельно, иначе тест
-# полезет в сеть за настоящими данными.
-ORDERS_OK = {"orders": lambda self, d, on_progress=None, max_pages=1: [{"srid": "x"}]}
+# Заказы и выкупы живут в отдельном клиенте: их подменяем отдельно,
+# иначе тест полезет в сеть за настоящими данными.
+ORDERS_OK = {
+    "orders": lambda self, d, on_progress=None, max_pages=1: [{"srid": "x"}],
+    "sales": lambda self, d, on_progress=None, max_pages=1: [{"srid": "x"}],
+}
+
+# Остатки — третий клиент и третья категория токена.
+STOCKS_OK = {"stocks": lambda self, on_progress=None, max_pages=1: [
+    {"nmId": 777, "quantity": 5}]}
 
 
 def denied(*args, **kwargs):
     raise WBError("Доступ запрещён (403).", 403)
 
 
-def run_check(overrides: dict, orders: dict | None = None) -> tuple[int, str]:
+def run_check(overrides: dict, orders: dict | None = None,
+              stocks: dict | None = None) -> tuple[int, str]:
     methods = {**FULL_ACCESS, **overrides}
     buffer = io.StringIO()
     with patch.dict("os.environ", {"WB_API_TOKEN": "test-token"}), \
             patch.multiple("wbads.wb_client.WBAdvertClient", **methods), \
             patch.multiple("wbads.wb_client.WBStatisticsClient", **{**ORDERS_OK, **(orders or {})}), \
+            patch.multiple("wbads.wb_client.WBAnalyticsClient", **{**STOCKS_OK, **(stocks or {})}), \
             redirect_stdout(buffer):
         code = cli.cmd_check(Namespace())
     return code, buffer.getvalue()
@@ -51,7 +60,8 @@ class TestCheck(unittest.TestCase):
         code, out = run_check({})
         self.assertEqual(code, 0)
         self.assertIn("считаются оба ДРР", out)
-        self.assertEqual(out.count("✓"), 5)  # четыре метода рекламы плюс заказы
+        # четыре метода рекламы, заказы, выкупы и остатки
+        self.assertEqual(out.count("✓"), 7)
         self.assertNotIn("✗", out)
 
     def test_names_every_endpoint_it_needs(self):
@@ -304,7 +314,10 @@ class TestCardsAreOptional(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             conn = db.init_db(Path(tmp) / "c.db")
             with p2.multiple("wbads.wb_client.WBAdvertClient", **methods), \
+                    p2.multiple("wbads.wb_client.WBAnalyticsClient",
+                                stocks=lambda self, **kw: []), \
                     p2.multiple("wbads.wb_client.WBStatisticsClient",
+                                sales=lambda self, *a, **kw: [],
                                 orders=lambda self, d, on_progress=None, max_pages=12: []):
                 result = collector.collect(conn, "token", days=30)
             self.assertEqual(result["campaigns"], 5, "кампании обязаны сохраниться")
@@ -819,7 +832,10 @@ class TestBrokenMethodIsNotWaitedOut(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             conn = db.init_db(Path(tmp) / "c.db")
             with p2.multiple("wbads.wb_client.WBAdvertClient", **methods), \
+                    p2.multiple("wbads.wb_client.WBAnalyticsClient",
+                                stocks=lambda self, **kw: []), \
                     p2.multiple("wbads.wb_client.WBStatisticsClient",
+                                sales=lambda self, *a, **kw: [],
                                 orders=lambda self, d, on_progress=None, max_pages=12: []):
                 collector.collect(conn, "token", days=30)
             conn.close()
@@ -850,7 +866,10 @@ class TestBrokenMethodIsNotWaitedOut(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             conn = db.init_db(Path(tmp) / "c.db")
             with p2.multiple("wbads.wb_client.WBAdvertClient", **methods), \
+                    p2.multiple("wbads.wb_client.WBAnalyticsClient",
+                                stocks=lambda self, **kw: []), \
                     p2.multiple("wbads.wb_client.WBStatisticsClient",
+                                sales=lambda self, *a, **kw: [],
                                 orders=lambda self, d, on_progress=None, max_pages=12: []):
                 collector.collect(conn, "token", days=30)
             conn.close()
@@ -1098,7 +1117,9 @@ class TestRateLimitDoesNotKillTheCollection(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             conn = db.init_db(Path(tmp) / "c.db")
             with p2.multiple("wbads.wb_client.WBAdvertClient", **methods), \
-                    p2.multiple("wbads.wb_client.WBStatisticsClient", orders=orders):
+                    p2.multiple("wbads.wb_client.WBAnalyticsClient",
+                                stocks=lambda self, **kw: []), \
+                    p2.multiple("wbads.wb_client.WBStatisticsClient", sales=lambda self, *a, **kw: [], orders=orders):
                 result = collector.collect(conn, "token", days=30)
             conn.close()
         self.assertEqual(result["campaigns"], 5, "кампании обязаны сохраниться")
@@ -1907,7 +1928,10 @@ class TestCollectionSurvivesTheZoneStep(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             conn = db.init_db(Path(tmp) / "c.db")
             with p2.multiple("wbads.wb_client.WBAdvertClient", **methods), \
+                    p2.multiple("wbads.wb_client.WBAnalyticsClient",
+                                stocks=lambda self, **kw: []), \
                     p2.multiple("wbads.wb_client.WBStatisticsClient",
+                                sales=lambda self, *a, **kw: [],
                                 orders=orders):
                 result = collector.collect(conn, "token", days=30,
                                            on_progress=said.append)
@@ -1974,3 +1998,61 @@ class TestAnotherCopyIsNoticed(unittest.TestCase):
             s.bind(("127.0.0.1", 0))
             free = s.getsockname()[1]
         self.assertIsNone(running_instance(free, timeout=0.3))
+
+
+class TestStocksNeedTheirOwnCategory(unittest.TestCase):
+    """Остатки живут в категории «Аналитика». Её у прежних токенов нет,
+    и это не поломка сбора: категории задаются при создании токена и
+    потом не меняются, поэтому человеку нужен не код 403, а инструкция.
+    """
+
+    def test_check_explains_the_missing_category(self):
+        code, out = run_check({}, stocks={"stocks": denied})
+        self.assertEqual(code, 0, "отказ остатков не валит проверку")
+        self.assertIn("Остатки собираться не будут", out)
+        self.assertIn("«Продвижение», «Статистика» и «Аналитика»", out)
+
+    def test_everything_else_still_passes(self):
+        _, out = run_check({}, stocks={"stocks": denied})
+        self.assertIn("считаются оба ДРР", out)
+
+    def test_collection_survives_denied_stocks(self):
+        """Сорок минут собранной статистики не должны пропадать из-за
+        категории токена."""
+        import tempfile
+        from unittest.mock import patch as p2
+        from wbads import collector, db
+
+        day = {"advertId": 1, "days": [{
+            "date": "2026-11-01T00:00:00+03:00", "views": 100, "clicks": 5,
+            "ctr": 5.0, "cpc": 10.0, "sum": 50.0, "atbs": 2, "orders": 1,
+            "shks": 1, "sum_price": 500.0,
+            "apps": [{"appType": 1, "nms": [{
+                "nmId": 777, "name": "Товар", "views": 100, "clicks": 5,
+                "atbs": 2, "orders": 1, "shks": 1, "sum": 50.0,
+                "sum_price": 500.0}]}],
+        }]}
+        methods = {
+            "balance": lambda self: {"balance": 0.0, "bonus": 0.0, "net": 1.0},
+            "campaign_index": lambda self: [{"advertId": 1, "type": 8,
+                                             "status": 9}],
+            "campaign_details": lambda self, ids, on_progress=None: [],
+            "fullstats": lambda self, *a, **kw: [day],
+            "search_stats": lambda self, *a, **kw: [],
+        }
+        said: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = db.init_db(Path(tmp) / "c.db")
+            with p2.multiple("wbads.wb_client.WBAdvertClient", **methods), \
+                    p2.multiple("wbads.wb_client.WBAnalyticsClient",
+                                stocks=denied), \
+                    p2.multiple("wbads.wb_client.WBStatisticsClient",
+                                orders=lambda self, *a, **kw: [],
+                                sales=lambda self, *a, **kw: []):
+                result = collector.collect(conn, "token", days=30,
+                                           on_progress=said.append)
+            conn.close()
+
+        self.assertEqual(result["rows"], 1, "статистика обязана сохраниться")
+        self.assertTrue(any("категории «Аналитика»" in line for line in said),
+                        f"человеку надо сказать, в чём дело: {said}")

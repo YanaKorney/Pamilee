@@ -43,6 +43,7 @@ from typing import Any, Callable, Iterable, Sequence
 
 ADVERT_URL = "https://advert-api.wildberries.ru"
 STATISTICS_URL = "https://statistics-api.wildberries.ru"
+ANALYTICS_URL = "https://seller-analytics-api.wildberries.ru"
 
 # Дольше этого не ждём, даже если WB просит: человек не должен сидеть
 # перед замершим окном.
@@ -85,6 +86,13 @@ MAX_SEARCH_REQUESTS = 40
 # Сколько страниц заказов готовы забрать за один сбор. Каждая — минута ожидания,
 # поэтому ограничиваем: остальное доберётся следующим запуском.
 MAX_ORDER_PAGES = 12
+
+# Остатки: метод из категории «Аналитика», три запроса в минуту с
+# интервалом в двадцать секунд. Страница вмещает очень много строк, так
+# что обычному кабинету хватает одной-двух.
+STOCKS_COOLDOWN = 21
+STOCKS_PAGE = 20000
+MAX_STOCK_PAGES = 8
 
 Progress = Callable[[str], None]
 
@@ -1006,6 +1014,104 @@ class WBStatisticsClient(_MinuteLimited):
                             "остальное доберётся при следующем запуске.")
 
         return collected
+
+
+    def sales(self, date_from: str, on_progress: Progress | None = None,
+              max_pages: int = MAX_ORDER_PAGES) -> list[dict[str, Any]]:
+        """Выкупы и возвраты, изменённые начиная с date_from.
+
+        Метод-близнец заказов: тот же сдвиг по lastChangeDate, тот же
+        предел страниц. Отличие одно и важное — здесь событие «товар
+        выкупили», а не «товар заказали», и между ними дни.
+        """
+        collected: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        cursor = _to_rfc3339(date_from)
+
+        for page in range(max_pages):
+            self._wait_turn(on_progress)
+            data = self._request("GET", "/api/v1/supplier/sales",
+                                 params={"dateFrom": cursor, "flag": "0"})
+            self._last_call = time.monotonic()
+
+            rows = data if isinstance(data, list) else []
+            fresh = [r for r in rows if _sale_key(r) not in seen]
+            for row in fresh:
+                seen.add(_sale_key(row))
+            collected.extend(fresh)
+
+            if on_progress:
+                on_progress(f"Выкупы: страница {page + 1}, "
+                            f"всего строк {len(collected)}")
+
+            if len(rows) < 1000 or not fresh:
+                break
+
+            next_cursor = max((str(r.get("lastChangeDate") or "") for r in rows),
+                              default="")
+            if not next_cursor or next_cursor == cursor:
+                break
+            cursor = next_cursor
+        else:
+            if on_progress:
+                on_progress("Достигнут предел страниц за один сбор — "
+                            "остальное доберётся при следующем запуске.")
+
+        return collected
+
+
+class WBAnalyticsClient(_MinuteLimited):
+    """Остатки на складах WB. Категория «Аналитика».
+
+    Это отдельная категория токена, и она задаётся при его создании:
+    у токена, выпущенного под «Продвижение» и «Статистику», остатков не
+    будет, сколько ни проси. Поэтому отказ здесь — не сбой сбора, а
+    повод сказать человеку, какой токен нужен.
+    """
+
+    base_url = ANALYTICS_URL
+    scope = "Аналитика"
+
+    def stocks(self, on_progress: Progress | None = None,
+               max_pages: int = MAX_STOCK_PAGES) -> list[dict[str, Any]]:
+        """Остатки на складах WB: строка на размер товара на складе.
+
+        Это снимок «что лежит сейчас» — истории у метода нет, и просить
+        у него вчерашний день бесполезно.
+        """
+        collected: list[dict[str, Any]] = []
+        offset = 0
+
+        for page in range(max_pages):
+            self._wait_turn(on_progress, cooldown=STOCKS_COOLDOWN)
+            data = self._request(
+                "POST", "/api/analytics/v1/stocks-report/wb-warehouses",
+                payload={"limit": STOCKS_PAGE, "offset": offset},
+                on_progress=on_progress)
+            self._last_call = time.monotonic()
+
+            items = (((data or {}).get("data") or {}).get("items")) or []
+            collected.extend(items)
+            if on_progress:
+                on_progress(f"Остатки: строк {len(collected)}")
+            if len(items) < STOCKS_PAGE:
+                break
+            offset += len(items)
+        else:
+            if on_progress:
+                on_progress("Остатки: взял первые страницы, остальное "
+                            "доберётся следующим сбором.")
+        return collected
+
+def _sale_key(raw: dict[str, Any]) -> str:
+    """Устойчивый ключ строки выкупа.
+
+    srid у продажи и у её возврата один и тот же, поэтому в ключ идёт и
+    saleID: иначе возврат затирал бы выкуп, и день терял обе строки.
+    """
+    srid = str(raw.get("srid") or "").strip()
+    sale = str(raw.get("saleID") or raw.get("saleId") or "").strip()
+    return f"{sale}:{srid}" if (sale or srid) else ""
 
 
 def _to_rfc3339(value: str) -> str:

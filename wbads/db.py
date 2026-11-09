@@ -148,6 +148,53 @@ CREATE TABLE IF NOT EXISTS orders_raw (
 CREATE INDEX IF NOT EXISTS idx_orders_date ON orders_raw(date);
 CREATE INDEX IF NOT EXISTS idx_orders_nm ON orders_raw(date, nm_id);
 
+-- Выкупы кабинета — построчно, как и заказы: возврат, приехавший
+-- позже, исправляет уже собранный день по своему ключу.
+-- Заказ и выкуп — разные события: заказ может не выкупиться, а выкуп
+-- случается через дни после заказа. Складывать их в одну таблицу
+-- значило бы потерять ровно то, ради чего выкупы и смотрят.
+CREATE TABLE IF NOT EXISTS sales_raw (
+    srid             TEXT    PRIMARY KEY,
+    sale_id          TEXT,                  -- S… продажа, R… возврат
+    date             TEXT    NOT NULL,      -- дата продажи, YYYY-MM-DD
+    last_change      TEXT,
+    nm_id            INTEGER NOT NULL,
+    supplier_article TEXT,
+    brand            TEXT,
+    subject          TEXT,
+    warehouse        TEXT,
+    region           TEXT,
+    total_price      REAL    DEFAULT 0,     -- цена до скидки продавца
+    discount_percent REAL    DEFAULT 0,
+    price_with_disc  REAL    DEFAULT 0,     -- после скидки продавца
+    finished_price   REAL    DEFAULT 0,     -- что заплатил покупатель (с СПП)
+    for_pay          REAL    DEFAULT 0,     -- к перечислению продавцу
+    spp              REAL    DEFAULT 0,     -- скидка постоянного покупателя, %
+    is_return        INTEGER DEFAULT 0,
+    collected_at     TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sales_date ON sales_raw(date);
+CREATE INDEX IF NOT EXISTS idx_sales_nm ON sales_raw(date, nm_id);
+
+-- Остатки на складах WB. Снимок, а не история: метод отдаёт то, что
+-- лежит на складах сейчас, и прошлых дней у него нет. История
+-- набирается нашими снимками — по одному на день сбора, и раньше
+-- первого сбора её взять неоткуда.
+CREATE TABLE IF NOT EXISTS stocks_daily (
+    date             TEXT    NOT NULL,      -- день снимка, YYYY-MM-DD
+    nm_id            INTEGER NOT NULL,
+    warehouse_id     INTEGER NOT NULL DEFAULT 0,
+    warehouse        TEXT    DEFAULT '',
+    region           TEXT    DEFAULT '',
+    quantity         INTEGER NOT NULL DEFAULT 0,
+    in_way_to_client INTEGER NOT NULL DEFAULT 0,
+    in_way_from_client INTEGER NOT NULL DEFAULT 0,
+    collected_at     TEXT    NOT NULL,
+    PRIMARY KEY (date, nm_id, warehouse_id)
+);
+CREATE INDEX IF NOT EXISTS idx_stocks_date ON stocks_daily(date);
+CREATE INDEX IF NOT EXISTS idx_stocks_nm ON stocks_daily(nm_id, date);
+
 -- Пороги и настройки, изменённые из дашборда
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
@@ -166,11 +213,29 @@ def connect(db_path: Path | str) -> sqlite3.Connection:
     return conn
 
 
+# Колонки, добавленные к уже существующим таблицам позже. Новые
+# таблицы появляются сами (CREATE TABLE IF NOT EXISTS), а колонка в
+# старой базе — нет: без этого обновление программы ломало бы базу,
+# собранную прежней версией.
+LATER_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("orders_raw", "spp", "REAL DEFAULT 0"),
+)
+
+
 def init_db(db_path: Path | str) -> sqlite3.Connection:
     conn = connect(db_path)
     conn.executescript(SCHEMA)
+    _add_later_columns(conn)
     conn.commit()
     return conn
+
+
+def _add_later_columns(conn: sqlite3.Connection) -> None:
+    for table, column, kind in LATER_COLUMNS:
+        have = {row["name"] for row in conn.execute(
+            f"PRAGMA table_info({table})")}
+        if column not in have:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
 
 
 @contextmanager
@@ -422,3 +487,117 @@ def latest_balance(conn: sqlite3.Connection) -> sqlite3.Row | None:
     return conn.execute(
         "SELECT * FROM balance_snapshots ORDER BY taken_at DESC LIMIT 1"
     ).fetchone()
+
+
+def upsert_sales(conn: sqlite3.Connection, rows: Iterable[dict]) -> int:
+    """Выкупы и возвраты — построчно, по своему ключу."""
+    sql = """
+        INSERT INTO sales_raw (srid, sale_id, date, last_change, nm_id,
+                               supplier_article, brand, subject, warehouse,
+                               region, total_price, discount_percent,
+                               price_with_disc, finished_price, for_pay, spp,
+                               is_return, collected_at)
+        VALUES (:srid, :sale_id, :date, :last_change, :nm_id,
+                :supplier_article, :brand, :subject, :warehouse,
+                :region, :total_price, :discount_percent,
+                :price_with_disc, :finished_price, :for_pay, :spp,
+                :is_return, :collected_at)
+        ON CONFLICT(srid) DO UPDATE SET
+            sale_id=excluded.sale_id, date=excluded.date,
+            last_change=excluded.last_change, nm_id=excluded.nm_id,
+            price_with_disc=excluded.price_with_disc,
+            finished_price=excluded.finished_price, for_pay=excluded.for_pay,
+            spp=excluded.spp, is_return=excluded.is_return,
+            collected_at=excluded.collected_at
+    """
+    rows = list(rows)
+    conn.executemany(sql, rows)
+    return len(rows)
+
+
+def upsert_stocks(conn: sqlite3.Connection, rows: Iterable[dict]) -> int:
+    """Снимок остатков за день. Повторный сбор в тот же день заменяет его."""
+    sql = """
+        INSERT INTO stocks_daily (date, nm_id, warehouse_id, warehouse, region,
+                                  quantity, in_way_to_client,
+                                  in_way_from_client, collected_at)
+        VALUES (:date, :nm_id, :warehouse_id, :warehouse, :region,
+                :quantity, :in_way_to_client, :in_way_from_client,
+                :collected_at)
+        ON CONFLICT(date, nm_id, warehouse_id) DO UPDATE SET
+            warehouse=excluded.warehouse, region=excluded.region,
+            quantity=excluded.quantity,
+            in_way_to_client=excluded.in_way_to_client,
+            in_way_from_client=excluded.in_way_from_client,
+            collected_at=excluded.collected_at
+    """
+    rows = list(rows)
+    conn.executemany(sql, rows)
+    return len(rows)
+
+
+def has_sales(conn: sqlite3.Connection) -> bool:
+    return conn.execute("SELECT 1 FROM sales_raw LIMIT 1").fetchone() is not None
+
+
+def has_stocks(conn: sqlite3.Connection) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM stocks_daily LIMIT 1").fetchone() is not None
+
+
+def sales_by_day(conn: sqlite3.Connection, date_from: str, date_to: str
+                 ) -> list[sqlite3.Row]:
+    """Выкупы по дням и артикулам: штуки, выручка и к перечислению.
+
+    Возвраты считаются отдельной строкой, а не вычитаются из выкупов:
+    возврат приходит через недели, и вычитая его из дня, в котором он
+    приехал, мы испортили бы оба дня.
+    """
+    return list(conn.execute("""
+        SELECT date, nm_id,
+               SUM(CASE WHEN is_return = 0 THEN 1 ELSE 0 END)   AS sales,
+               SUM(CASE WHEN is_return = 0 THEN finished_price ELSE 0 END)
+                                                                AS revenue,
+               SUM(CASE WHEN is_return = 0 THEN for_pay ELSE 0 END)
+                                                                AS for_pay,
+               SUM(CASE WHEN is_return = 1 THEN 1 ELSE 0 END)   AS returns
+        FROM sales_raw
+        WHERE date BETWEEN ? AND ?
+        GROUP BY date, nm_id
+    """, (date_from, date_to)))
+
+
+def stocks_by_day(conn: sqlite3.Connection, date_from: str, date_to: str
+                  ) -> list[sqlite3.Row]:
+    """Остатки по дням и артикулам — сумма по всем складам WB."""
+    return list(conn.execute("""
+        SELECT date, nm_id,
+               SUM(quantity)           AS quantity,
+               SUM(in_way_to_client)   AS in_way_to_client,
+               SUM(in_way_from_client) AS in_way_from_client
+        FROM stocks_daily
+        WHERE date BETWEEN ? AND ?
+        GROUP BY date, nm_id
+    """, (date_from, date_to)))
+
+
+def prices_by_day(conn: sqlite3.Connection, date_from: str, date_to: str
+                  ) -> list[sqlite3.Row]:
+    """Средние цены заказов по дням: до СПП, с СПП и число заказов.
+
+    СПП — скидка постоянного покупателя — отдельным методом WB не
+    отдаётся. Зато в каждом заказе есть и цена после скидки продавца
+    (price_with_disc), и то, что покупатель заплатил на самом деле
+    (finished_price). Разница между ними и есть СПП, причём ровно та,
+    что видел покупатель в тот день.
+    """
+    return list(conn.execute("""
+        SELECT date, nm_id,
+               COUNT(*)              AS orders,
+               SUM(price_with_disc)  AS before_spp,
+               SUM(finished_price)   AS with_spp,
+               SUM(spp)              AS spp_sum
+        FROM orders_raw
+        WHERE date BETWEEN ? AND ? AND is_cancel = 0
+        GROUP BY date, nm_id
+    """, (date_from, date_to)))

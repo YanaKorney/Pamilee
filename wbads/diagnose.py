@@ -37,6 +37,7 @@ from .rules import plural
 from .wb_client import (
     ADVERT_URL,
     MAX_STATS_DAYS,
+    ANALYTICS_URL,
     STATISTICS_URL,
     build_ssl_context,
     certifi_bundle,
@@ -56,6 +57,9 @@ PROBES = [
     ("Карточки кампаний", ADVERT_URL, "GET", "/api/advert/v2/adverts", "ids", True),
     ("Статистика по дням", ADVERT_URL, "GET", "/adv/v3/fullstats", "stats", True),
     ("Заказы кабинета", STATISTICS_URL, "GET", "/api/v1/supplier/orders", "orders", True),
+    ("Выкупы кабинета", STATISTICS_URL, "GET", "/api/v1/supplier/sales", "orders", True),
+    ("Остатки на складах", ANALYTICS_URL, "POST",
+     "/api/analytics/v1/stocks-report/wb-warehouses", "stocks", True),
 ]
 
 # Адреса, которые WB отключил. Проверяем их намеренно: если старый молчит,
@@ -142,7 +146,8 @@ def count_records(value: Any) -> int | None:
 
 
 def raw_request(url: str, token: str, method: str = "GET",
-                ca_bundle: str = "", timeout: int = 60) -> Finding:
+                ca_bundle: str = "", timeout: int = 60,
+                payload: Any | None = None) -> Finding:
     """Один запрос без повторов — так видно настоящий ответ WB.
 
     Повторы здесь только мешали бы: диагностике нужен первый ответ, с его
@@ -154,10 +159,15 @@ def raw_request(url: str, token: str, method: str = "GET",
         "Accept": "application/json",
         "User-Agent": "wbads-analytics/1.1",
     }
+    body_bytes = None
+    if payload is not None:
+        body_bytes = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
     context = build_ssl_context(ca_bundle)
     started = time.monotonic()
     try:
-        req = urllib.request.Request(url, headers=headers, method=method)
+        req = urllib.request.Request(url, data=body_bytes, headers=headers,
+                                     method=method)
         opener = urllib.request.build_opener(
             urllib.request.HTTPSHandler(context=context))
         with opener.open(req, timeout=timeout) as resp:
@@ -290,9 +300,19 @@ def run_diagnostics(token: str, ca_bundle: str = "",
     for label, base, method, path, kind, expect_data in PROBES:
         say(f"Проверяю: {label}…")
         url = base + path + _query_for(kind, live_ids)
-        finding = raw_request(url, token, method, ca_bundle)
+        # Остатки спрашиваются телом запроса, а не адресом.
+        payload = {"limit": 1, "offset": 0} if kind == "stocks" else None
+        finding = raw_request(url, token, method, ca_bundle, payload=payload)
         finding.label = label
         _grade(finding, expect_data)
+        if kind == "stocks" and finding.status in (401, 403):
+            # Это не поломка, а отсутствующая категория токена: сказать
+            # надо так, чтобы человек понял, что делать.
+            finding.level = "warn"
+            finding.note = ("нет категории «Аналитика» у токена — остатки "
+                            "собираться не будут. Категории задаются при "
+                            "создании токена: выпустите новый с "
+                            "«Продвижением», «Статистикой» и «Аналитикой».")
         report["findings"].append(finding)
 
         # Номера для следующих проб берём из ответа списка кампаний:

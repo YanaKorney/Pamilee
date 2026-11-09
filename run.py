@@ -54,6 +54,7 @@ from wbads.config import (
 from wbads.rules import money, pct, plural, signed_pct
 from wbads.wb_client import (
     WBAdvertClient,
+    WBAnalyticsClient,
     WBError,
     WBStatisticsClient,
     certifi_bundle,
@@ -354,6 +355,12 @@ def _missing_parts(conn) -> list[str]:
         # Зоны собираются отдельным методом и только с версии 2026-10-11.
         # Проверяем после товаров: без них зон не бывает в принципе.
         missing.append("показов по зонам (поиск и прочее)")
+    elif (db.has_orders(conn) and not db.has_sales(conn)):
+        # Выкупы собираются с версии 2026-11-13 тем же токеном, что и
+        # заказы: если заказы есть, а выкупов нет — данные старые.
+        # Про остатки здесь молчим: им нужна третья категория токена,
+        # и звать на сбор того, у кого её нет, значит звать впустую.
+        missing.append("выкупов (их показывает сводка по дням)")
     return missing
 
 
@@ -408,6 +415,12 @@ def cmd_collect(args: argparse.Namespace) -> int:
             _print(f"Ошибка: {exc}")
             return 1
     _print(f"Сохранено: {result['rows']} дней статистики по {result['campaigns']} кампаниям.")
+    if result.get("sales"):
+        _print(f"Выкупов кабинета: {result['sales']} — считаются конверсия "
+               "в выкуп и ДРР от выкупов.")
+    if result.get("stocks"):
+        _print(f"Остатки собраны по {result['stocks']} товарам — "
+               "в сводке по дням появятся строки «Остатки».")
     if result.get("orders"):
         _print(f"Заказов кабинета: {result['orders']} — общий ДРР будет считаться.")
     else:
@@ -701,6 +714,28 @@ def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
                       lambda: stats_client.orders(date.today().isoformat(), max_pages=1))
     if orders_ok is None:
         failures.remove("Заказы кабинета")
+    sales_ok = probe("Выкупы кабинета", "GET  /api/v1/supplier/sales",
+                     lambda: stats_client.sales(date.today().isoformat(),
+                                                max_pages=1))
+    if sales_ok is None:
+        failures.remove("Выкупы кабинета")
+
+    # Остатки живут в третьей категории токена — «Аналитика». Её у
+    # прежних токенов нет, и это не поломка: категории задаются при
+    # создании токена и потом не меняются.
+    print()
+    _print("Проверяем доступ к остаткам (категория «Аналитика»)…")
+    print()
+    stock_client = WBAnalyticsClient(cfg.token, ca_bundle=cfg.ca_bundle)
+    stocks_ok = probe("Остатки на складах",
+                      "POST /api/analytics/v1/stocks-report",
+                      lambda: stock_client.stocks(max_pages=1))
+    if stocks_ok is None:
+        failures.remove("Остатки на складах")
+        _print("Остатки собираться не будут — всё остальное будет.")
+        _print("Чтобы они появились, выпустите в кабинете новый токен")
+        _print("с категориями «Продвижение», «Статистика» и «Аналитика»")
+        _print("и вставьте его: python run.py setup")
     print()
 
     if failures:

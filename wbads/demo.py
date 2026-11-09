@@ -190,6 +190,12 @@ ARTICLES: dict[int, dict[str, Any]] = {
 # что отменённые не попадают в знаменатель ДРР.
 CANCEL_RATE = 0.03
 
+# Доля заказов, доезжающих до выкупа, и доля возвратов среди них.
+# Числа примерно рыночные: демо должно выглядеть правдоподобно, а не
+# идеально.
+BUYOUT_RATE = 0.62
+RETURN_RATE = 0.05
+
 
 def _build_orders(rng: random.Random, nm_rows: list[dict[str, Any]], days: int,
                   start: date, now: str) -> list[dict[str, Any]]:
@@ -245,6 +251,78 @@ def _build_orders(rng: random.Random, nm_rows: list[dict[str, Any]], days: int,
                     "collected_at": now,
                 })
     return orders
+
+
+def _build_sales(rng: random.Random, orders: list[dict[str, Any]],
+                 now: str) -> list[dict[str, Any]]:
+    """Выкупы из заказов: часть доезжает до оплаты, и не в тот же день.
+
+    Разрыв в днях здесь не для красоты: именно он отличает выкуп от
+    заказа, и без него демо показывало бы одинаковые линии.
+    """
+    sales: list[dict[str, Any]] = []
+    for order in orders:
+        if order["is_cancel"] or rng.random() > BUYOUT_RATE:
+            continue
+        day = date.fromisoformat(order["date"]) + timedelta(
+            days=rng.choice([1, 2, 2, 3, 3, 4, 5]))
+        if day > date.today():
+            continue
+        finished = order["finished_price"]
+        returned = rng.random() < RETURN_RATE
+        sales.append({
+            "srid": f"S:{order['srid']}",
+            "sale_id": "R" if returned else "S",
+            "date": day.isoformat(),
+            "last_change": f"{day.isoformat()}T15:00:00",
+            "nm_id": order["nm_id"],
+            "supplier_article": order["supplier_article"],
+            "brand": order["brand"],
+            "subject": order["subject"],
+            "warehouse": order["warehouse"],
+            "region": order["region"],
+            "total_price": order["total_price"],
+            "discount_percent": order["discount_percent"],
+            "price_with_disc": order["price_with_disc"],
+            "finished_price": finished,
+            "for_pay": round(finished * 0.78, 2),
+            "spp": 7.0,
+            "is_return": 1 if returned else 0,
+            "collected_at": now,
+        })
+    return sales
+
+
+def _build_stocks(rng: random.Random, days: int, start: date, now: str
+                  ) -> list[dict[str, Any]]:
+    """Снимки остатков по дням — так, как их набрал бы ежедневный сбор."""
+    rows: list[dict[str, Any]] = []
+    for nm_id, spec in ARTICLES.items():
+        left = rng.randint(120, 400)
+        out_from = (days - spec["out_of_stock_last"]
+                    if spec.get("out_of_stock_last") else None)
+        for i in range(days):
+            day = start + timedelta(days=i)
+            if out_from is not None and i >= out_from:
+                left = 0
+            else:
+                left = max(0, left - rng.randint(2, 14))
+                if left < 40 and rng.random() < 0.25:
+                    left += rng.randint(150, 350)      # приехала поставка
+            for warehouse_id, name in ((1, "Коледино"), (2, "Казань")):
+                share = 0.7 if warehouse_id == 1 else 0.3
+                rows.append({
+                    "date": day.isoformat(),
+                    "nm_id": nm_id,
+                    "warehouse_id": warehouse_id,
+                    "warehouse": name,
+                    "region": "ЦФО" if warehouse_id == 1 else "ПФО",
+                    "quantity": int(left * share),
+                    "in_way_to_client": int(left * share * 0.05),
+                    "in_way_from_client": 0,
+                    "collected_at": now,
+                })
+    return rows
 
 
 def _jitter(rng: random.Random, low: float = 0.85, high: float = 1.15) -> float:
@@ -343,12 +421,16 @@ def generate(conn: sqlite3.Connection, days: int = 60,
                 })
 
     order_rows = _build_orders(rng, nm_rows, days, start, now)
+    sale_rows = _build_sales(rng, order_rows, now)
+    stock_rows = _build_stocks(rng, days, start, now)
 
     log_id = db.start_collect(conn, "demo", now, start.isoformat(), end.isoformat())
     db.upsert_campaigns(conn, campaign_rows)
     db.upsert_daily(conn, daily_rows)
     db.upsert_nm_daily(conn, nm_rows)
     db.upsert_orders(conn, order_rows)
+    db.upsert_sales(conn, sale_rows)
+    db.upsert_stocks(conn, stock_rows)
     db.save_balance(conn, now, balance=18400.0, bonus=2300.0, net=20700.0)
     changes_written = _build_changes(conn, rng, nm_rows, start, end)
     db.finish_collect(conn, log_id, datetime.now().isoformat(timespec="seconds"),
@@ -361,6 +443,8 @@ def generate(conn: sqlite3.Connection, days: int = 60,
         "rows": len(daily_rows),
         "nm_rows": len(nm_rows),
         "orders": len(order_rows),
+        "sales": len(sale_rows),
+        "stocks": len(stock_rows),
         "changes": changes_written,
     }
 

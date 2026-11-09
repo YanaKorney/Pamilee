@@ -520,3 +520,65 @@ def _session_stub(conn):
         yield conn
 
     return session
+
+
+class TestBuyoutsAreNamedAsMissing(unittest.TestCase):
+    """Выкупы собираются тем же токеном, что и заказы, с версии
+    2026-11-13. Данные, собранные раньше, свежи по дате и неполны по
+    содержимому — и молчать об этом нельзя."""
+
+    def setUp(self):
+        import tempfile
+
+        from wbads import db
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.conn = db.init_db(Path(self.tmp.name) / "t.db")
+        self.addCleanup(self.conn.close)
+        self.conn.execute(
+            "INSERT OR REPLACE INTO campaign_daily (advert_id, date, views,"
+            " clicks, atbs, orders, shks, spend, revenue, collected_at)"
+            " VALUES (1,'2026-11-01',100,5,1,1,1,50.0,500.0,'now')")
+        self.conn.execute(
+            "INSERT OR REPLACE INTO campaign_nm_daily (advert_id, date,"
+            " nm_id, name, views, clicks, atbs, orders, shks, spend, revenue)"
+            " VALUES (1,'2026-11-01',777,'Товар',100,5,1,1,1,50.0,500.0)")
+        self.conn.execute(
+            "INSERT OR REPLACE INTO campaign_nm_search_daily (advert_id,"
+            " date, nm_id, views, clicks, atbs, orders, shks, spend)"
+            " VALUES (1,'2026-11-01',777,40,2,0,0,0,20.0)")
+        self.conn.commit()
+
+    def order(self):
+        self.conn.execute(
+            "INSERT OR REPLACE INTO orders_raw (srid, date, last_change,"
+            " nm_id, supplier_article, brand, subject, price_with_disc,"
+            " finished_price, total_price, is_cancel, collected_at)"
+            " VALUES ('o','2026-11-01','2026-11-01',777,'A','B','C',"
+            "1000,900,1200,0,'now')")
+        self.conn.commit()
+
+    def test_orders_without_sales_are_not_fresh(self):
+        self.order()
+        self.assertEqual(cli._missing_parts(self.conn),
+                         ["выкупов (их показывает сводка по дням)"])
+        self.assertFalse(cli._data_is_fresh(self.conn))
+
+    def test_stocks_are_not_demanded(self):
+        """Остаткам нужна третья категория токена. Звать на сбор того, у
+        кого её нет, — значит звать впустую каждый запуск."""
+        self.order()
+        self.conn.execute(
+            "INSERT OR REPLACE INTO sales_raw (srid, sale_id, date,"
+            " last_change, nm_id, supplier_article, brand, subject,"
+            " warehouse, region, total_price, discount_percent,"
+            " price_with_disc, finished_price, for_pay, spp, is_return,"
+            " collected_at) VALUES ('s','S1','2026-11-01','2026-11-01',777,"
+            "'A','B','C','W','R',1200,20,1000,900,700,7,0,'now')")
+        self.conn.commit()
+        self.assertEqual(cli._missing_parts(self.conn), [])
+
+    def test_a_cabinet_without_orders_is_not_nagged(self):
+        """Нет заказов — нет и выкупов, и это не повод звать на сбор."""
+        self.assertEqual(cli._missing_parts(self.conn), [])

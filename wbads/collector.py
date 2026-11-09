@@ -19,9 +19,11 @@ from .wb_client import (
     MAX_SEARCH_REQUESTS,
     STATS_GIVE_UP,
     WBAdvertClient,
+    WBAnalyticsClient,
     WBError,
     WBStatisticsClient,
     _order_key,
+    _sale_key,
 )
 
 Progress = Callable[[str], None]
@@ -226,10 +228,90 @@ def normalize_order(raw: dict[str, Any], now: str) -> dict[str, Any] | None:
         "discount_percent": discount,
         "price_with_disc": price_with_disc,
         "finished_price": _num(raw.get("finishedPrice")),
+        # СПП WB отдаёт сам, процентом. Считать её разницей цен можно,
+        # но в разницу попадут и другие скидки — лучше взять как есть.
+        "spp": _num(raw.get("spp")),
         "is_cancel": 1 if raw.get("isCancel") else 0,
         "cancel_date": raw.get("cancelDate"),
         "collected_at": now,
     }
+
+
+def normalize_sale(raw: dict[str, Any], now: str) -> dict[str, Any] | None:
+    """Строка выкупа из API статистики → строка нашей таблицы.
+
+    Возврат WB присылает тем же методом, с saleID на «R». Это не
+    отрицательный выкуп: возврат приезжает через недели, и вычитать его
+    из дня, в котором он приехал, значило бы испортить оба дня.
+    """
+    key = _sale_key(raw)
+    if not key or key == ":":
+        return None
+
+    sale_id = str(raw.get("saleID") or raw.get("saleId") or "").strip()
+    total = _num(raw.get("totalPrice"))
+    discount = _num(raw.get("discountPercent"))
+    price_with_disc = (_num(raw.get("priceWithDisc"))
+                       or round(total * (1 - discount / 100), 2))
+
+    return {
+        "srid": key,
+        "sale_id": sale_id,
+        "date": _day(raw.get("date")),
+        "last_change": raw.get("lastChangeDate"),
+        "nm_id": _int(raw.get("nmId") or raw.get("nmID")),
+        "supplier_article": (raw.get("supplierArticle") or "").strip(),
+        "brand": (raw.get("brand") or "").strip(),
+        "subject": (raw.get("subject") or "").strip(),
+        "warehouse": (raw.get("warehouseName") or "").strip(),
+        "region": (raw.get("regionName") or "").strip(),
+        "total_price": total,
+        "discount_percent": discount,
+        "price_with_disc": price_with_disc,
+        "finished_price": _num(raw.get("finishedPrice")),
+        "for_pay": _num(raw.get("forPay")),
+        "spp": _num(raw.get("spp")),
+        "is_return": 1 if sale_id.upper().startswith("R") else 0,
+        "collected_at": now,
+    }
+
+
+def normalize_stock(raw: dict[str, Any], day: str, now: str
+                    ) -> dict[str, Any] | None:
+    """Строка остатков: один размер товара на одном складе WB.
+
+    Размеры складываются в одну строку по товару и складу: в сводке
+    смотрят «сколько штук осталось», а не «сколько осталось сорок
+    второго». Сложение делает база, здесь только приведение полей.
+    """
+    nm_id = _int(raw.get("nmId") or raw.get("nmID"))
+    if not nm_id:
+        return None
+    return {
+        "date": day,
+        "nm_id": nm_id,
+        "warehouse_id": _int(raw.get("warehouseId")),
+        "warehouse": (raw.get("warehouseName") or "").strip(),
+        "region": (raw.get("regionName") or "").strip(),
+        "quantity": _int(raw.get("quantity")),
+        "in_way_to_client": _int(raw.get("inWayToClient")),
+        "in_way_from_client": _int(raw.get("inWayFromClient")),
+        "collected_at": now,
+    }
+
+
+def merge_stocks(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Складывает размеры одного товара на одном складе в одну строку."""
+    merged: dict[tuple[str, int, int], dict[str, Any]] = {}
+    for row in rows:
+        key = (row["date"], row["nm_id"], row["warehouse_id"])
+        slot = merged.get(key)
+        if slot is None:
+            merged[key] = dict(row)
+            continue
+        for field in ("quantity", "in_way_to_client", "in_way_from_client"):
+            slot[field] += row[field]
+    return list(merged.values())
 
 
 # Статистика есть только у кампаний, которые хотя бы раз откручивались.
@@ -298,6 +380,63 @@ def collect_orders(conn: sqlite3.Connection, token: str, days: int = 30,
     cancels = sum(1 for r in rows if r["is_cancel"])
     _log(on_progress, f"Заказов сохранено: {len(rows)} (из них отменённых {cancels}).")
     return {"orders": len(rows), "cancels": cancels, "date_from": start.isoformat()}
+
+
+def collect_sales(conn: sqlite3.Connection, token: str, days: int = 30,
+                  end: date | None = None, on_progress: Progress | None = None,
+                  ca_bundle: str = "") -> dict[str, Any]:
+    """Забирает выкупы кабинета: сколько заказов дошло до оплаты.
+
+    Заказ и выкуп — разные события, и разрыв между ними в днях как раз
+    и есть то, что менеджер хочет видеть: реклама привела заказ, а
+    деньги пришли (или не пришли) позже.
+    """
+    end = end or date.today()
+    start = end - timedelta(days=days - 1)
+    now = datetime.now().isoformat(timespec="seconds")
+
+    client = WBStatisticsClient(token, ca_bundle=ca_bundle)
+    _log(on_progress, f"Забираем выкупы с {start.isoformat()}…")
+    raw_rows = client.sales(start.isoformat(), on_progress=on_progress)
+
+    rows = [normalize_sale(r, now) for r in raw_rows]
+    rows = [r for r in rows if r and r["nm_id"]]
+    db.upsert_sales(conn, rows)
+    conn.commit()
+
+    returns = sum(1 for r in rows if r["is_return"])
+    _log(on_progress, f"Выкупов сохранено: {len(rows) - returns} "
+                      f"(и {returns} возвратов).")
+    return {"sales": len(rows) - returns, "returns": returns}
+
+
+def collect_stocks(conn: sqlite3.Connection, token: str,
+                   day: date | None = None,
+                   on_progress: Progress | None = None,
+                   ca_bundle: str = "") -> dict[str, Any]:
+    """Снимок остатков на складах WB за сегодня.
+
+    У метода нет истории: он отдаёт то, что лежит на складах сейчас.
+    Поэтому ряд по дням набирается нашими снимками — по одному за день
+    сбора, и в дни, когда сбор не запускали, остатков не будет.
+    """
+    day = day or date.today()
+    now = datetime.now().isoformat(timespec="seconds")
+
+    client = WBAnalyticsClient(token, ca_bundle=ca_bundle)
+    _log(on_progress, "Забираем остатки на складах WB…")
+    raw_rows = client.stocks(on_progress=on_progress)
+
+    rows = [normalize_stock(r, day.isoformat(), now) for r in raw_rows]
+    rows = merge_stocks([r for r in rows if r])
+    db.upsert_stocks(conn, rows)
+    conn.commit()
+
+    total = sum(r["quantity"] for r in rows)
+    articles = len({r["nm_id"] for r in rows})
+    _log(on_progress, f"Остатки сохранены: {total} шт по {articles} "
+                      f"{plural(articles, 'товару', 'товарам', 'товарам')}.")
+    return {"stocks": len(rows), "quantity": total, "articles": articles}
 
 
 def collect(conn: sqlite3.Connection, token: str, days: int = 30,
@@ -456,6 +595,43 @@ def collect(conn: sqlite3.Connection, token: str, days: int = 30,
                 _log(on_progress, f"Заказы получить не вышло: {exc}")
                 _log(on_progress, "Общий ДРР считаться не будет, рекламный — будет.")
 
+        # Выкупы — тем же токеном, что и заказы. Без них не посчитать
+        # ни конверсию в выкуп, ни ДРР от выкупов.
+        sales_result: dict[str, Any] = {}
+        if with_orders:
+            try:
+                sales_result = collect_sales(conn, token, days=days, end=end,
+                                             on_progress=on_progress,
+                                             ca_bundle=ca_bundle)
+            except Exception as exc:
+                conn.rollback()
+                _log(on_progress, f"Выкупы получить не вышло: {exc}")
+                _log(on_progress, "Строки про выкупы в сводке останутся "
+                                  "пустыми, остальное собрано.")
+
+        # Остатки — отдельная категория токена. Её у старых токенов нет,
+        # и это не сбой сбора: скажем словами, что делать.
+        stocks_result: dict[str, Any] = {}
+        try:
+            stocks_result = collect_stocks(conn, token, day=end,
+                                           on_progress=on_progress,
+                                           ca_bundle=ca_bundle)
+        except WBError as exc:
+            conn.rollback()
+            if exc.status in (401, 403):
+                _log(on_progress, "Остатки не отдались: у токена нет "
+                                  "категории «Аналитика».")
+                _log(on_progress, "Категории задаются при создании токена и "
+                                  "потом не меняются — чтобы появились "
+                                  "остатки, выпустите новый токен с "
+                                  "категориями «Продвижение», «Статистика» "
+                                  "и «Аналитика».")
+            else:
+                _log(on_progress, f"Остатки получить не вышло: {exc}")
+        except Exception as exc:
+            conn.rollback()
+            _log(on_progress, f"Остатки получить не вышло: {exc}")
+
         db.finish_collect(conn, log_id, datetime.now().isoformat(timespec="seconds"),
                           len(campaign_rows), len(daily_all))
         conn.commit()
@@ -479,6 +655,8 @@ def collect(conn: sqlite3.Connection, token: str, days: int = 30,
             "rows": len(daily_all),
             "nm_rows": len(nm_all),
             "orders": orders_result.get("orders", 0),
+            "sales": sales_result.get("sales", 0),
+            "stocks": stocks_result.get("articles", 0),
             "date_from": date_from,
             "date_to": date_to,
         }
