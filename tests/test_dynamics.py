@@ -489,3 +489,148 @@ class TestSppComesFromWb(DynamicsCase):
         self.conn.commit()
         rows = self.rows(dynamics.table(self.conn, "2026-11-01", "2026-11-01"))
         self.assertEqual(rows["spp_pct"]["days"], [20.0])
+
+
+class TestItemRating(DynamicsCase):
+    """«Оценка товара» — то, что в кабинете на одноимённой странице.
+    Как и остатки, это снимок «что сейчас»: истории у метода нет."""
+
+    def rating(self, date, *, nm_id=777, rating=4.8, feedback_rating=4.9,
+               feedbacks=120):
+        self.conn.execute(
+            "INSERT OR REPLACE INTO item_rating_daily (date, nm_id, rating,"
+            " feedback_rating, feedback_count, collected_at)"
+            " VALUES (?,?,?,?,?,'now')",
+            (date, nm_id, rating, feedback_rating, feedbacks))
+        self.conn.commit()
+
+    def test_rows_appear_only_with_ratings(self):
+        self.day("2026-11-01")
+        self.assertNotIn("rating", self.rows(
+            dynamics.table(self.conn, "2026-11-01", "2026-11-01")))
+        self.rating("2026-11-01")
+        rows = self.rows(dynamics.table(self.conn, "2026-11-01", "2026-11-01"))
+        self.assertEqual(rows["rating"]["days"], [4.8])
+        self.assertEqual(rows["feedback_rating"]["days"], [4.9])
+        self.assertEqual(rows["feedback_count"]["days"], [120.0])
+
+    def test_cabinet_rating_is_averaged_over_items(self):
+        """Средневзвешенная по отзывам была бы оценкой магазина, где
+        товар с тысячей отзывов заглушает десять остальных."""
+        self.day("2026-11-01")
+        self.rating("2026-11-01", nm_id=1, rating=5.0, feedbacks=1000)
+        self.rating("2026-11-01", nm_id=2, rating=3.0, feedbacks=2)
+        rows = self.rows(dynamics.table(self.conn, "2026-11-01", "2026-11-01"))
+        self.assertEqual(rows["rating"]["days"], [4.0])
+        # Отзывы — штуки, их складывают.
+        self.assertEqual(rows["feedback_count"]["days"], [1002.0])
+
+    def test_one_article_sees_only_its_own(self):
+        self.day("2026-11-01", nm_id=777)
+        self.rating("2026-11-01", nm_id=777, rating=4.2)
+        self.rating("2026-11-01", nm_id=888, rating=2.0)
+        rows = self.rows(dynamics.table(self.conn, "2026-11-01", "2026-11-01",
+                                        nm_id=777))
+        self.assertEqual(rows["rating"]["days"], [4.2])
+
+    def test_rating_is_not_summed_over_the_period(self):
+        self.day("2026-11-01")
+        self.day("2026-11-02")
+        self.rating("2026-11-01", rating=4.5)
+        self.rating("2026-11-02", rating=4.7)
+        rows = self.rows(dynamics.table(self.conn, "2026-11-01", "2026-11-02"))
+        self.assertEqual(rows["rating"]["days"], [4.5, 4.7])
+        self.assertEqual(rows["rating"]["total"], 4.7, "итог — последний день")
+
+    def test_rating_is_shown_with_tenths(self):
+        """Оценка 4,8, округлённая до 5, перестаёт быть оценкой."""
+        from wbads.config import ROOT
+
+        js = (ROOT / "wbads" / "web" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("row.unit === 'балл'", js)
+        self.assertIn("toFixed(2)", js)
+
+
+class TestRatingRequestMatchesWb(unittest.TestCase):
+    """Метод «Оценка товара» требователен к телу запроса: без периода,
+    поля сортировки и смещения он отвечает отказом, а не данными."""
+
+    def client(self, capture):
+        from wbads.wb_client import WBAnalyticsClient
+
+        client = WBAnalyticsClient.__new__(WBAnalyticsClient)
+        client.token = "t"
+        client.base_url = "x"
+        client.timeout = 1
+        client.max_retries = 1
+        client.ca_bundle = ""
+        client.used_fallback_bundle = False
+        client._last_call = 0.0
+        client._wait_turn = lambda on_progress=None, cooldown=0: None
+        client._request = capture
+        return client
+
+    def test_body_carries_period_order_and_offset(self):
+        sent = {}
+
+        def capture(method, path, payload=None, on_progress=None):
+            sent.update({"method": method, "path": path, "payload": payload})
+            return {"data": {"items": []}}
+
+        self.client(capture).item_rating("2026-11-13")
+        self.assertEqual(sent["method"], "POST")
+        self.assertEqual(sent["path"], "/api/analytics/v2/item-rating")
+        self.assertEqual(sent["payload"]["currentPeriod"],
+                         {"start": "2026-11-13", "end": "2026-11-13"})
+        self.assertEqual(sent["payload"]["orderBy"],
+                         {"field": "feedbackCount", "mode": "desc"})
+        self.assertEqual(sent["payload"]["offset"], 0)
+
+    def test_one_day_period_makes_the_review_count_daily(self):
+        """WB отдаёт отзывы приростом за период. Период в один день —
+        и это честный дневной ряд, а не нарастающий итог."""
+        sent = []
+
+        def capture(method, path, payload=None, on_progress=None):
+            sent.append(payload)
+            return {"data": {"items": []}}
+
+        self.client(capture).item_rating("2026-11-13")
+        self.assertEqual(sent[0]["currentPeriod"]["start"],
+                         sent[0]["currentPeriod"]["end"])
+
+
+class TestRatingFieldsAreUnwrapped(unittest.TestCase):
+    """Оценка по отзывам и число отзывов приходят объектами, а не
+    числами. Записать в базу словарь — значит получить мусор в таблице
+    и узнать об этом через неделю."""
+
+    def test_objects_are_unwrapped(self):
+        from wbads import collector
+
+        row = collector.normalize_rating({
+            "nmId": 777,
+            "rating": 10,
+            "feedbackRating": {"current": 4.87, "percentile": 1.7,
+                               "dynamics": 0.31},
+            "feedbackCount": {"current": 12, "dynamics": 9},
+        }, "2026-11-13", "now")
+        self.assertEqual(row["rating"], 10.0)
+        self.assertEqual(row["feedback_rating"], 4.87)
+        self.assertEqual(row["feedback_count"], 12)
+
+    def test_plain_numbers_still_work(self):
+        """Если WB однажды отдаст число вместо объекта — не падаем."""
+        from wbads import collector
+
+        row = collector.normalize_rating({
+            "nmID": 777, "rating": 4.5, "feedbackRating": 4.6,
+            "feedbackCount": 3}, "2026-11-13", "now")
+        self.assertEqual(row["feedback_rating"], 4.6)
+        self.assertEqual(row["feedback_count"], 3)
+
+    def test_a_row_without_an_article_is_skipped(self):
+        from wbads import collector
+
+        self.assertIsNone(collector.normalize_rating({"rating": 5},
+                                                     "2026-11-13", "now"))

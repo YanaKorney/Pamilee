@@ -81,9 +81,9 @@ class TestNothingStopsTheDiagnosis(unittest.TestCase):
         report = self.run_all(always_denied)
         self.assertEqual(len(report["findings"]), len(diagnose.PROBES),
                          "отказ первой пробы не отменяет остальные")
-        # Остатки — исключение: 403 там означает не поломку, а
-        # отсутствующую у токена категорию «Аналитика».
-        self.assertEqual(len(report["problems"]), len(diagnose.PROBES) - 1)
+        # Остатки и оценка товара — исключение: 403 там означает не
+        # поломку, а отсутствующую у токена категорию «Аналитика».
+        self.assertEqual(len(report["problems"]), len(diagnose.PROBES) - 2)
         text = diagnose.render(report)
         for label, *_ in diagnose.PROBES:
             self.assertIn(label, text, f"{label} обязан попасть в отчёт")

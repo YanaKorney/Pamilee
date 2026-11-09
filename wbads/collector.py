@@ -300,6 +300,42 @@ def normalize_stock(raw: dict[str, Any], day: str, now: str
     }
 
 
+def _current(value: Any) -> Any:
+    """Берёт «current» у полей, которые WB отдаёт объектом.
+
+    В этом отчёте оценка по отзывам и число отзывов приходят не числом,
+    а объектом с текущим значением и динамикой. Разбирать это на месте
+    каждый раз — верный способ однажды записать в базу словарь.
+    """
+    if isinstance(value, dict):
+        return value.get("current")
+    return value
+
+
+def normalize_rating(raw: dict[str, Any], day: str, now: str
+                     ) -> dict[str, Any] | None:
+    """Строка отчёта «Оценка товара» → строка нашей таблицы.
+
+    Имена полей у WB от метода к методу гуляют (nmId против nmID), и
+    спорить с этим бесполезно — читаем оба.
+    """
+    nm_id = _int(raw.get("nmId") or raw.get("nmID"))
+    if not nm_id:
+        return None
+    return {
+        "date": day,
+        "nm_id": nm_id,
+        # «rating» — оценка карточки, «feedbackRating» — оценка по
+        # отзывам. Это два разных числа, и путать их нельзя.
+        "rating": _num(_current(raw.get("rating"))),
+        "feedback_rating": _num(_current(raw.get("feedbackRating"))),
+        # Отзывы здесь — прирост за запрошенный период, а мы просим
+        # ровно один день. Значит, это отзывы за день.
+        "feedback_count": _int(_current(raw.get("feedbackCount"))),
+        "collected_at": now,
+    }
+
+
 def merge_stocks(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     """Складывает размеры одного товара на одном складе в одну строку."""
     merged: dict[tuple[str, int, int], dict[str, Any]] = {}
@@ -437,6 +473,28 @@ def collect_stocks(conn: sqlite3.Connection, token: str,
     _log(on_progress, f"Остатки сохранены: {total} шт по {articles} "
                       f"{plural(articles, 'товару', 'товарам', 'товарам')}.")
     return {"stocks": len(rows), "quantity": total, "articles": articles}
+
+
+def collect_rating(conn: sqlite3.Connection, token: str,
+                   day: date | None = None,
+                   on_progress: Progress | None = None,
+                   ca_bundle: str = "") -> dict[str, Any]:
+    """Оценка товара за день: карточка, отзывы и сколько их пришло."""
+    day = day or date.today()
+    now = datetime.now().isoformat(timespec="seconds")
+
+    client = WBAnalyticsClient(token, ca_bundle=ca_bundle)
+    _log(on_progress, "Забираем оценку товара…")
+    raw_rows = client.item_rating(day.isoformat(), on_progress=on_progress)
+
+    rows = [normalize_rating(r, day.isoformat(), now) for r in raw_rows]
+    rows = [r for r in rows if r]
+    db.upsert_ratings(conn, rows)
+    conn.commit()
+
+    _log(on_progress, f"Оценка собрана по {len(rows)} "
+                      f"{plural(len(rows), 'товару', 'товарам', 'товарам')}.")
+    return {"ratings": len(rows)}
 
 
 def collect(conn: sqlite3.Connection, token: str, days: int = 30,
@@ -632,6 +690,21 @@ def collect(conn: sqlite3.Connection, token: str, days: int = 30,
             conn.rollback()
             _log(on_progress, f"Остатки получить не вышло: {exc}")
 
+        # Оценка товара — та же категория токена, что и остатки. Если
+        # её нет, про это уже сказано выше, и повторять не нужно.
+        rating_result: dict[str, Any] = {}
+        try:
+            rating_result = collect_rating(conn, token, day=end,
+                                           on_progress=on_progress,
+                                           ca_bundle=ca_bundle)
+        except WBError as exc:
+            conn.rollback()
+            if exc.status not in (401, 403):
+                _log(on_progress, f"Оценку товара получить не вышло: {exc}")
+        except Exception as exc:
+            conn.rollback()
+            _log(on_progress, f"Оценку товара получить не вышло: {exc}")
+
         db.finish_collect(conn, log_id, datetime.now().isoformat(timespec="seconds"),
                           len(campaign_rows), len(daily_all))
         conn.commit()
@@ -657,6 +730,7 @@ def collect(conn: sqlite3.Connection, token: str, days: int = 30,
             "orders": orders_result.get("orders", 0),
             "sales": sales_result.get("sales", 0),
             "stocks": stocks_result.get("articles", 0),
+            "ratings": rating_result.get("ratings", 0),
             "date_from": date_from,
             "date_to": date_to,
         }

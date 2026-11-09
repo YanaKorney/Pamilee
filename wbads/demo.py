@@ -325,6 +325,31 @@ def _build_stocks(rng: random.Random, days: int, start: date, now: str
     return rows
 
 
+def _build_ratings(rng: random.Random, days: int, start: date, now: str
+                   ) -> list[dict[str, Any]]:
+    """Снимки оценки товара по дням — как их набрал бы ежедневный сбор."""
+    rows: list[dict[str, Any]] = []
+    for nm_id in ARTICLES:
+        rating = round(rng.uniform(4.1, 4.9), 2)
+        for i in range(days):
+            day = start + timedelta(days=i)
+            # Оценка ходит медленно: отзыв-другой в день её почти не
+            # двигает, и ровная линия здесь честнее случайного шума.
+            rating = max(3.0, min(5.0, rating + rng.choice(
+                [0, 0, 0, 0.01, -0.01, 0.02, -0.02])))
+            # Отзывы WB отдаёт приростом за период, а период мы
+            # просим в один день: значит, это отзывы за день.
+            rows.append({
+                "date": day.isoformat(),
+                "nm_id": nm_id,
+                "rating": round(rating, 2),
+                "feedback_rating": round(min(5.0, rating + 0.05), 2),
+                "feedback_count": rng.choice([0, 0, 1, 1, 2, 3]),
+                "collected_at": now,
+            })
+    return rows
+
+
 def _jitter(rng: random.Random, low: float = 0.85, high: float = 1.15) -> float:
     return rng.uniform(low, high)
 
@@ -423,6 +448,7 @@ def generate(conn: sqlite3.Connection, days: int = 60,
     order_rows = _build_orders(rng, nm_rows, days, start, now)
     sale_rows = _build_sales(rng, order_rows, now)
     stock_rows = _build_stocks(rng, days, start, now)
+    rating_rows = _build_ratings(rng, days, start, now)
 
     log_id = db.start_collect(conn, "demo", now, start.isoformat(), end.isoformat())
     db.upsert_campaigns(conn, campaign_rows)
@@ -431,6 +457,7 @@ def generate(conn: sqlite3.Connection, days: int = 60,
     db.upsert_orders(conn, order_rows)
     db.upsert_sales(conn, sale_rows)
     db.upsert_stocks(conn, stock_rows)
+    db.upsert_ratings(conn, rating_rows)
     db.save_balance(conn, now, balance=18400.0, bonus=2300.0, net=20700.0)
     changes_written = _build_changes(conn, rng, nm_rows, start, end)
     db.finish_collect(conn, log_id, datetime.now().isoformat(timespec="seconds"),
@@ -445,6 +472,7 @@ def generate(conn: sqlite3.Connection, days: int = 60,
         "orders": len(order_rows),
         "sales": len(sale_rows),
         "stocks": len(stock_rows),
+        "ratings": len(rating_rows),
         "changes": changes_written,
     }
 

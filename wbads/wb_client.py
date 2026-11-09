@@ -94,6 +94,11 @@ STOCKS_COOLDOWN = 21
 STOCKS_PAGE = 20000
 MAX_STOCK_PAGES = 8
 
+# Оценка товара: тот же лимит, что у остатков (три запроса в минуту с
+# интервалом в двадцать секунд), страница до тысячи товаров.
+RATING_PAGE = 1000
+MAX_RATING_PAGES = 6
+
 Progress = Callable[[str], None]
 
 
@@ -1071,6 +1076,44 @@ class WBAnalyticsClient(_MinuteLimited):
 
     base_url = ANALYTICS_URL
     scope = "Аналитика"
+
+    def item_rating(self, day: str, on_progress: Progress | None = None,
+                    max_pages: int = MAX_RATING_PAGES) -> list[dict[str, Any]]:
+        """Отчёт «Оценка товара» за один день.
+
+        Период спрашиваем в один день: оценка в ответе приходит как
+        «сейчас», а количество отзывов — как прирост за период, и день
+        делает из второго честный дневной ряд.
+        """
+        collected: list[dict[str, Any]] = []
+        offset = 0
+
+        for page in range(max_pages):
+            self._wait_turn(on_progress, cooldown=STOCKS_COOLDOWN)
+            payload = {
+                "currentPeriod": {"start": day, "end": day},
+                # Поле сортировки и порядок метод требует всегда, хотя
+                # нам они безразличны: мы забираем всё подряд.
+                "orderBy": {"field": "feedbackCount", "mode": "desc"},
+                "limit": RATING_PAGE,
+                "offset": offset,
+            }
+            data = self._request("POST", "/api/analytics/v2/item-rating",
+                                 payload=payload, on_progress=on_progress)
+            self._last_call = time.monotonic()
+
+            items = (((data or {}).get("data") or {}).get("items")) or []
+            collected.extend(items)
+            if on_progress:
+                on_progress(f"Оценка товара: строк {len(collected)}")
+            if len(items) < RATING_PAGE:
+                break
+            offset += len(items)
+        else:
+            if on_progress:
+                on_progress("Оценка товара: взял первые страницы, "
+                            "остальное доберётся следующим сбором.")
+        return collected
 
     def stocks(self, on_progress: Progress | None = None,
                max_pages: int = MAX_STOCK_PAGES) -> list[dict[str, Any]]:

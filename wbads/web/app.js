@@ -2574,6 +2574,9 @@ function dynValue(row, value) {
   if (!value) return '—';
   if (row.unit === '₽') return money(value, Math.abs(value) < 100 ? 2 : 0);
   if (row.unit === '%') return pct(value, Math.abs(value) < 10 ? 2 : 1);
+  /* Оценка «4,8» округлённая до «5» перестаёт быть оценкой: вся
+     разница между товарами живёт в десятых. */
+  if (row.unit === 'балл') return value.toFixed(2).replace('.', ',');
   return num(value);
 }
 

@@ -60,6 +60,8 @@ PROBES = [
     ("Выкупы кабинета", STATISTICS_URL, "GET", "/api/v1/supplier/sales", "orders", True),
     ("Остатки на складах", ANALYTICS_URL, "POST",
      "/api/analytics/v1/stocks-report/wb-warehouses", "stocks", True),
+    ("Оценка товара", ANALYTICS_URL, "POST",
+     "/api/analytics/v2/item-rating", "rating", True),
 ]
 
 # Адреса, которые WB отключил. Проверяем их намеренно: если старый молчит,
@@ -301,17 +303,17 @@ def run_diagnostics(token: str, ca_bundle: str = "",
         say(f"Проверяю: {label}…")
         url = base + path + _query_for(kind, live_ids)
         # Остатки спрашиваются телом запроса, а не адресом.
-        payload = {"limit": 1, "offset": 0} if kind == "stocks" else None
+        payload = _payload_for(kind)
         finding = raw_request(url, token, method, ca_bundle, payload=payload)
         finding.label = label
         _grade(finding, expect_data)
-        if kind == "stocks" and finding.status in (401, 403):
+        if kind in ("stocks", "rating") and finding.status in (401, 403):
             # Это не поломка, а отсутствующая категория токена: сказать
             # надо так, чтобы человек понял, что делать.
             finding.level = "warn"
             finding.note = ("нет категории «Аналитика» у токена — остатки "
-                            "собираться не будут. Категории задаются при "
-                            "создании токена: выпустите новый с "
+                            "и оценка товара собираться не будут. Категории "
+                            "задаются при создании токена: выпустите новый с "
                             "«Продвижением», «Статистикой» и «Аналитикой».")
         report["findings"].append(finding)
 
@@ -364,6 +366,18 @@ def _query_for(kind: str | None, live_ids: list[int]) -> str:
         begin = (date.today() - timedelta(days=1)).isoformat()
         return f"?dateFrom={begin}&flag=0"
     return ""
+
+
+def _payload_for(kind: str | None) -> dict[str, Any] | None:
+    """Тело запроса для проб, которые спрашивают не адресом, а телом."""
+    if kind == "stocks":
+        return {"limit": 1, "offset": 0}
+    if kind == "rating":
+        day = (date.today() - timedelta(days=1)).isoformat()
+        return {"currentPeriod": {"start": day, "end": day},
+                "orderBy": {"field": "feedbackCount", "mode": "desc"},
+                "limit": 1, "offset": 0}
+    return None
 
 
 def _live_ids(data: Any) -> list[int]:

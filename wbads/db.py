@@ -195,6 +195,20 @@ CREATE TABLE IF NOT EXISTS stocks_daily (
 CREATE INDEX IF NOT EXISTS idx_stocks_date ON stocks_daily(date);
 CREATE INDEX IF NOT EXISTS idx_stocks_nm ON stocks_daily(nm_id, date);
 
+-- Оценка товара: то, что в кабинете на странице «Оценка товара».
+-- Как и остатки, это снимок «что сейчас»: истории у метода нет, и ряд
+-- по дням набирается нашими снимками.
+CREATE TABLE IF NOT EXISTS item_rating_daily (
+    date            TEXT    NOT NULL,      -- день снимка, YYYY-MM-DD
+    nm_id           INTEGER NOT NULL,
+    rating          REAL    DEFAULT 0,     -- оценка товара
+    feedback_rating REAL    DEFAULT 0,     -- оценка по отзывам
+    feedback_count  INTEGER DEFAULT 0,     -- сколько отзывов учтено
+    collected_at    TEXT    NOT NULL,
+    PRIMARY KEY (date, nm_id)
+);
+CREATE INDEX IF NOT EXISTS idx_rating_date ON item_rating_daily(date);
+
 -- Пороги и настройки, изменённые из дашборда
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
@@ -534,6 +548,44 @@ def upsert_stocks(conn: sqlite3.Connection, rows: Iterable[dict]) -> int:
     rows = list(rows)
     conn.executemany(sql, rows)
     return len(rows)
+
+
+def upsert_ratings(conn: sqlite3.Connection, rows: Iterable[dict]) -> int:
+    """Снимок оценок за день. Повторный сбор в тот же день заменяет его."""
+    sql = """
+        INSERT INTO item_rating_daily (date, nm_id, rating, feedback_rating,
+                                       feedback_count, collected_at)
+        VALUES (:date, :nm_id, :rating, :feedback_rating, :feedback_count,
+                :collected_at)
+        ON CONFLICT(date, nm_id) DO UPDATE SET
+            rating=excluded.rating,
+            feedback_rating=excluded.feedback_rating,
+            feedback_count=excluded.feedback_count,
+            collected_at=excluded.collected_at
+    """
+    rows = list(rows)
+    conn.executemany(sql, rows)
+    return len(rows)
+
+
+def has_ratings(conn: sqlite3.Connection) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM item_rating_daily LIMIT 1").fetchone() is not None
+
+
+def ratings_by_day(conn: sqlite3.Connection, date_from: str, date_to: str
+                   ) -> list[sqlite3.Row]:
+    """Оценки по дням и артикулам.
+
+    По кабинету целиком оценка усредняется по товарам, а не по отзывам:
+    средневзвешенная по отзывам была бы оценкой магазина, а здесь
+    вопрос «как в среднем оценивают мои товары».
+    """
+    return list(conn.execute("""
+        SELECT date, nm_id, rating, feedback_rating, feedback_count
+        FROM item_rating_daily
+        WHERE date BETWEEN ? AND ?
+    """, (date_from, date_to)))
 
 
 def has_sales(conn: sqlite3.Connection) -> bool:

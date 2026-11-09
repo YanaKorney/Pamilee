@@ -34,8 +34,12 @@ ORDERS_OK = {
 }
 
 # Остатки — третий клиент и третья категория токена.
-STOCKS_OK = {"stocks": lambda self, on_progress=None, max_pages=1: [
-    {"nmId": 777, "quantity": 5}]}
+STOCKS_OK = {
+    "stocks": lambda self, on_progress=None, max_pages=1: [
+        {"nmId": 777, "quantity": 5}],
+    "item_rating": lambda self, day, on_progress=None, max_pages=1: [
+        {"nmId": 777, "rating": 4.8}],
+}
 
 
 def denied(*args, **kwargs):
@@ -60,8 +64,8 @@ class TestCheck(unittest.TestCase):
         code, out = run_check({})
         self.assertEqual(code, 0)
         self.assertIn("считаются оба ДРР", out)
-        # четыре метода рекламы, заказы, выкупы и остатки
-        self.assertEqual(out.count("✓"), 7)
+        # четыре метода рекламы, заказы, выкупы, остатки и оценка товара
+        self.assertEqual(out.count("✓"), 8)
         self.assertNotIn("✗", out)
 
     def test_names_every_endpoint_it_needs(self):
@@ -315,7 +319,8 @@ class TestCardsAreOptional(unittest.TestCase):
             conn = db.init_db(Path(tmp) / "c.db")
             with p2.multiple("wbads.wb_client.WBAdvertClient", **methods), \
                     p2.multiple("wbads.wb_client.WBAnalyticsClient",
-                                stocks=lambda self, **kw: []), \
+                                stocks=lambda self, **kw: [],
+                                item_rating=lambda self, *a, **kw: []), \
                     p2.multiple("wbads.wb_client.WBStatisticsClient",
                                 sales=lambda self, *a, **kw: [],
                                 orders=lambda self, d, on_progress=None, max_pages=12: []):
@@ -833,7 +838,8 @@ class TestBrokenMethodIsNotWaitedOut(unittest.TestCase):
             conn = db.init_db(Path(tmp) / "c.db")
             with p2.multiple("wbads.wb_client.WBAdvertClient", **methods), \
                     p2.multiple("wbads.wb_client.WBAnalyticsClient",
-                                stocks=lambda self, **kw: []), \
+                                stocks=lambda self, **kw: [],
+                                item_rating=lambda self, *a, **kw: []), \
                     p2.multiple("wbads.wb_client.WBStatisticsClient",
                                 sales=lambda self, *a, **kw: [],
                                 orders=lambda self, d, on_progress=None, max_pages=12: []):
@@ -867,7 +873,8 @@ class TestBrokenMethodIsNotWaitedOut(unittest.TestCase):
             conn = db.init_db(Path(tmp) / "c.db")
             with p2.multiple("wbads.wb_client.WBAdvertClient", **methods), \
                     p2.multiple("wbads.wb_client.WBAnalyticsClient",
-                                stocks=lambda self, **kw: []), \
+                                stocks=lambda self, **kw: [],
+                                item_rating=lambda self, *a, **kw: []), \
                     p2.multiple("wbads.wb_client.WBStatisticsClient",
                                 sales=lambda self, *a, **kw: [],
                                 orders=lambda self, d, on_progress=None, max_pages=12: []):
@@ -1118,7 +1125,8 @@ class TestRateLimitDoesNotKillTheCollection(unittest.TestCase):
             conn = db.init_db(Path(tmp) / "c.db")
             with p2.multiple("wbads.wb_client.WBAdvertClient", **methods), \
                     p2.multiple("wbads.wb_client.WBAnalyticsClient",
-                                stocks=lambda self, **kw: []), \
+                                stocks=lambda self, **kw: [],
+                                item_rating=lambda self, *a, **kw: []), \
                     p2.multiple("wbads.wb_client.WBStatisticsClient", sales=lambda self, *a, **kw: [], orders=orders):
                 result = collector.collect(conn, "token", days=30)
             conn.close()
@@ -1929,7 +1937,8 @@ class TestCollectionSurvivesTheZoneStep(unittest.TestCase):
             conn = db.init_db(Path(tmp) / "c.db")
             with p2.multiple("wbads.wb_client.WBAdvertClient", **methods), \
                     p2.multiple("wbads.wb_client.WBAnalyticsClient",
-                                stocks=lambda self, **kw: []), \
+                                stocks=lambda self, **kw: [],
+                                item_rating=lambda self, *a, **kw: []), \
                     p2.multiple("wbads.wb_client.WBStatisticsClient",
                                 sales=lambda self, *a, **kw: [],
                                 orders=orders):
@@ -2009,7 +2018,7 @@ class TestStocksNeedTheirOwnCategory(unittest.TestCase):
     def test_check_explains_the_missing_category(self):
         code, out = run_check({}, stocks={"stocks": denied})
         self.assertEqual(code, 0, "отказ остатков не валит проверку")
-        self.assertIn("Остатки собираться не будут", out)
+        self.assertIn("Остатки и оценка товара собираться не будут", out)
         self.assertIn("«Продвижение», «Статистика» и «Аналитика»", out)
 
     def test_everything_else_still_passes(self):
@@ -2045,7 +2054,7 @@ class TestStocksNeedTheirOwnCategory(unittest.TestCase):
             conn = db.init_db(Path(tmp) / "c.db")
             with p2.multiple("wbads.wb_client.WBAdvertClient", **methods), \
                     p2.multiple("wbads.wb_client.WBAnalyticsClient",
-                                stocks=denied), \
+                                stocks=denied, item_rating=denied), \
                     p2.multiple("wbads.wb_client.WBStatisticsClient",
                                 orders=lambda self, *a, **kw: [],
                                 sales=lambda self, *a, **kw: []):

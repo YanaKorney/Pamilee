@@ -724,7 +724,7 @@ def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
     # прежних токенов нет, и это не поломка: категории задаются при
     # создании токена и потом не меняются.
     print()
-    _print("Проверяем доступ к остаткам (категория «Аналитика»)…")
+    _print("Проверяем доступ к остаткам и оценке товара (категория «Аналитика»)…")
     print()
     stock_client = WBAnalyticsClient(cfg.token, ca_bundle=cfg.ca_bundle)
     stocks_ok = probe("Остатки на складах",
@@ -732,7 +732,14 @@ def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
                       lambda: stock_client.stocks(max_pages=1))
     if stocks_ok is None:
         failures.remove("Остатки на складах")
-        _print("Остатки собираться не будут — всё остальное будет.")
+    rating_ok = probe("Оценка товара", "POST /api/analytics/v2/item-rating",
+                      lambda: stock_client.item_rating(
+                          date.today().isoformat(), max_pages=1))
+    if rating_ok is None:
+        failures.remove("Оценка товара")
+    if stocks_ok is None or rating_ok is None:
+        _print("Остатки и оценка товара собираться не будут — "
+               "всё остальное будет.")
         _print("Чтобы они появились, выпустите в кабинете новый токен")
         _print("с категориями «Продвижение», «Статистика» и «Аналитика»")
         _print("и вставьте его: python run.py setup")

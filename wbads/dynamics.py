@@ -102,6 +102,17 @@ GROUPS: list[dict[str, Any]] = [
         ],
     },
     {
+        "title": "Оценка товара",
+        "rows": [
+            {"key": "rating", "title": "Оценка товара", "unit": "балл",
+             "good": "up", "rating": True},
+            {"key": "feedback_rating", "title": "Оценка по отзывам",
+             "unit": "балл", "good": "up", "rating": True},
+            {"key": "feedback_count", "title": "Отзывов за день, шт",
+             "unit": "шт", "good": "up", "rating": True},
+        ],
+    },
+    {
         "title": "Цена и СПП",
         "rows": [
             {"key": "price_before_spp", "title": "Цена до СПП", "unit": "₽",
@@ -133,7 +144,7 @@ GROUPS: list[dict[str, Any]] = [
 # итог периода у них считается из сумм, а не усреднением дней.
 SUMMABLE = set(RAW_KEYS) | {"views_search", "views_other", "total_orders",
                             "total_revenue", "buyouts", "buyout_revenue",
-                            "for_pay", "returns"}
+                            "for_pay", "returns", "feedback_count"}
 
 # Складываются тоже, но строками не показываются: из них считаются
 # средние цены за период. Складывать сами средние нельзя — день с одним
@@ -167,6 +178,7 @@ def table(conn: sqlite3.Connection, date_from: str, date_to: str,
     has_orders = db.has_orders(conn)
     has_sales = db.has_sales(conn)
     has_stocks = db.has_stocks(conn)
+    has_ratings = db.has_ratings(conn)
 
     groups = []
     for group in GROUPS:
@@ -179,6 +191,8 @@ def table(conn: sqlite3.Connection, date_from: str, date_to: str,
             if spec.get("sales") and not has_sales:
                 continue
             if spec.get("stocks") and not has_stocks:
+                continue
+            if spec.get("rating") and not has_ratings:
                 continue
             rows.append(_row(spec, values, days, prev_values, prev_days,
                              totals, prev_totals))
@@ -197,6 +211,7 @@ def table(conn: sqlite3.Connection, date_from: str, date_to: str,
         "has_orders": has_orders,
         "has_sales": has_sales,
         "has_stocks": has_stocks,
+        "has_ratings": has_ratings,
     }
 
 
@@ -243,6 +258,7 @@ def _values_by_day(conn: sqlite3.Connection, date_from: str, date_to: str,
                        ("sales", "revenue", "for_pay", "returns"))
     stocks = _by_nm_day(db.stocks_by_day(conn, date_from, date_to), nm_id,
                         ("quantity", "in_way_to_client", "in_way_from_client"))
+    ratings = _ratings_by_day(conn, date_from, date_to, nm_id)
 
     days = daterange(date_from, date_to)
     out: dict[str, dict[str, float]] = {}
@@ -250,9 +266,41 @@ def _values_by_day(conn: sqlite3.Connection, date_from: str, date_to: str,
         totals = raw.get(day) or {key: 0.0 for key in RAW_KEYS}
         out[day] = _derive_day(totals, search.get(day, 0.0),
                                cabinet.get(day, {}), sales.get(day, {}),
-                               stocks.get(day, {}))
+                               stocks.get(day, {}), ratings.get(day, {}))
 
     _add_days_left(conn, out, days, nm_id, price_field)
+    return out
+
+
+def _ratings_by_day(conn: sqlite3.Connection, date_from: str, date_to: str,
+                    nm_id: int | None) -> dict[str, dict[str, float]]:
+    """Оценки по дням: по товару — как есть, по кабинету — среднее.
+
+    Среднее по товарам, а не по отзывам: средневзвешенная по отзывам
+    была бы оценкой магазина, где товар с тысячей отзывов заглушает
+    десять остальных, а вопрос здесь «как в среднем оценивают мои
+    товары». Отзывы при этом складываются — их считают штуками.
+    """
+    buckets: dict[str, list[dict[str, float]]] = {}
+    for row in db.ratings_by_day(conn, date_from, date_to):
+        if nm_id is not None and int(row["nm_id"] or 0) != nm_id:
+            continue
+        buckets.setdefault(str(row["date"])[:10], []).append({
+            "rating": float(row["rating"] or 0),
+            "feedback_rating": float(row["feedback_rating"] or 0),
+            "feedback_count": float(row["feedback_count"] or 0),
+        })
+
+    out: dict[str, dict[str, float]] = {}
+    for day, rows in buckets.items():
+        rated = [r["rating"] for r in rows if r["rating"]]
+        by_feedback = [r["feedback_rating"] for r in rows
+                       if r["feedback_rating"]]
+        out[day] = {
+            "rating": safe_div(sum(rated), len(rated)),
+            "feedback_rating": safe_div(sum(by_feedback), len(by_feedback)),
+            "feedback_count": sum(r["feedback_count"] for r in rows),
+        }
     return out
 
 
@@ -313,9 +361,11 @@ def _shift_back(day: str, days: int) -> str:
 
 def _derive_day(totals: dict[str, float], search_views: float,
                 cabinet: dict[str, float], sales: dict[str, float] | None = None,
-                stocks: dict[str, float] | None = None) -> dict[str, float]:
+                stocks: dict[str, float] | None = None,
+                rating: dict[str, float] | None = None) -> dict[str, float]:
     sales = sales or {}
     stocks = stocks or {}
+    rating = rating or {}
     values = derive(totals)
 
     views = float(totals.get("views") or 0)
@@ -375,6 +425,12 @@ def _derive_day(totals: dict[str, float], search_views: float,
     values["stock"] = float(stocks.get("quantity") or 0)
     values["in_way_to_client"] = float(stocks.get("in_way_to_client") or 0)
     values["days_left"] = 0.0
+
+    # Оценка — состояние на день, как и остаток. Складывать её нельзя,
+    # усреднять по дням периода — тоже: за период берём последний день.
+    values["rating"] = float(rating.get("rating") or 0)
+    values["feedback_rating"] = float(rating.get("feedback_rating") or 0)
+    values["feedback_count"] = float(rating.get("feedback_count") or 0)
     return values
 
 
@@ -410,6 +466,16 @@ def _period_totals(values: dict[str, dict[str, float]],
         totals["stock"] = last["stock"]
         totals["in_way_to_client"] = last["in_way_to_client"]
         totals["days_left"] = last.get("days_left") or 0.0
+
+    # Оценка — состояние на день: за период берём последний известный.
+    # А отзывы приходят приростом за день, и их как раз складывают.
+    rated = next((values[day] for day in reversed(days)
+                  if values[day].get("rating")
+                  or values[day].get("feedback_rating")), None)
+    if rated:
+        totals["rating"] = rated["rating"]
+        totals["feedback_rating"] = rated["feedback_rating"]
+    totals["feedback_count"] = sums["feedback_count"]
     return totals
 
 
