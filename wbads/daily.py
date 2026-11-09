@@ -55,7 +55,7 @@ SUMMABLE = {"views", "clicks", "atbs", "orders", "shks", "spend", "revenue",
             "views_search", "views_other"}
 
 
-def _search_by_day(conn: sqlite3.Connection, date_from: str, date_to: str,
+def search_views_by_day(conn: sqlite3.Connection, date_from: str, date_to: str,
                    nm_id: int | None, advert_id: int | None = None
                    ) -> dict[str, float]:
     """Показы в поиске по дням — из статистики поисковых кластеров."""
@@ -98,8 +98,8 @@ def daily_table(conn: sqlite3.Connection, date_from: str, date_to: str,
     Среднее от дневных ДРР — это не ДРР периода: день с расходом 10 ₽ весит
     в нём столько же, сколько день с расходом 10 000 ₽.
     """
-    table = _table(_by_day(conn, date_from, date_to, nm_id),
-                   _search_by_day(conn, date_from, date_to, nm_id),
+    table = _table(raw_by_day(conn, date_from, date_to, nm_id),
+                   search_views_by_day(conn, date_from, date_to, nm_id),
                    daterange(date_from, date_to))
     return {"period": {"from": date_from, "to": date_to,
                        "days": len(table["dates"])},
@@ -125,9 +125,9 @@ def campaign_tables(conn: sqlite3.Connection, date_from: str, date_to: str,
         block = {
             **camp,
             "notes": notes.get(advert_id, {}),
-            **_table(_by_day(conn, date_from, date_to, nm_id,
+            **_table(raw_by_day(conn, date_from, date_to, nm_id,
                              advert_id=advert_id),
-                     _search_by_day(conn, date_from, date_to, nm_id,
+                     search_views_by_day(conn, date_from, date_to, nm_id,
                                     advert_id=advert_id),
                      days),
         }
@@ -164,8 +164,8 @@ def all_campaign_tables(conn: sqlite3.Connection, date_from: str,
         block = {
             **camp,
             "notes": notes.get(advert_id, {}),
-            **_table(_by_advert(conn, date_from, date_to, advert_id),
-                     _search_by_day(conn, date_from, date_to, None,
+            **_table(raw_by_advert(conn, date_from, date_to, advert_id),
+                     search_views_by_day(conn, date_from, date_to, None,
                                     advert_id=advert_id),
                      days),
         }
@@ -295,7 +295,7 @@ def _table(totals_by_day: dict[str, dict[str, float]],
     }
 
 
-def _by_day(conn: sqlite3.Connection, date_from: str, date_to: str,
+def raw_by_day(conn: sqlite3.Connection, date_from: str, date_to: str,
             nm_id: int | None, advert_id: int | None = None
             ) -> dict[str, dict[str, float]]:
     """Сырые суммы по дням: по кабинету, по артикулу или по его кампании."""
@@ -316,7 +316,7 @@ def _by_day(conn: sqlite3.Connection, date_from: str, date_to: str,
             for row in conn.execute(sql, params)}
 
 
-def _by_advert(conn: sqlite3.Connection, date_from: str, date_to: str,
+def raw_by_advert(conn: sqlite3.Connection, date_from: str, date_to: str,
                advert_id: int) -> dict[str, dict[str, float]]:
     """Сырые суммы по дням одной кампании — по всем её товарам сразу."""
     sums = ", ".join(f"SUM({k}) AS {k}" for k in RAW_KEYS)

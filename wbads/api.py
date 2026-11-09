@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
-from . import analytics, changes, daily, db
+from . import analytics, changes, daily, db, dynamics
 from .config import APP_VERSION, ROOT, Config, Thresholds
 from .metrics import parse_date
 
@@ -271,6 +271,21 @@ def handle_daily_csv(conn: sqlite3.Connection, cfg: Config,
     return daily.to_csv(table, f"{title} · {date_from} — {date_to}"), filename
 
 
+def handle_dynamics(conn: sqlite3.Connection, cfg: Config,
+                    query: dict[str, list[str]]) -> dict[str, Any]:
+    """Динамика по дням: все показатели разом, по группам."""
+    date_from, date_to = _period(conn, query)
+    nm_raw = (query.get("nm_id") or [""])[0]
+    nm_id = int(nm_raw) if nm_raw.isdigit() else None
+
+    table = dynamics.table(conn, date_from, date_to, nm_id,
+                           cfg.order_price_field)
+    names = _article_names(conn)
+    table["articles"] = daily.articles(conn, date_from, date_to, names)
+    table["nm_name"] = names.get(nm_id, "") if nm_id else ""
+    return table
+
+
 def handle_campaign_daily(conn: sqlite3.Connection, cfg: Config,
                           query: dict[str, list[str]]) -> dict[str, Any]:
     """Сводка по кампаниям: по одному артикулу или по всему кабинету."""
@@ -411,6 +426,7 @@ ROUTES: dict[str, Callable] = {
     "/api/meta": handle_meta,
     "/api/daily": handle_daily,
     "/api/campaign-daily": handle_campaign_daily,
+    "/api/dynamics": handle_dynamics,
     "/api/changes": handle_changes,
     "/api/articles": handle_articles,
 }

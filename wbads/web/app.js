@@ -1066,9 +1066,11 @@ function switchView(view) {
   document.getElementById('view-analytics').hidden = view !== 'analytics';
   document.getElementById('view-daily').hidden = view !== 'daily';
   document.getElementById('view-camps').hidden = view !== 'camps';
+  document.getElementById('view-dyn').hidden = view !== 'dyn';
   document.getElementById('view-journal').hidden = view !== 'journal';
   if (view === 'daily') loadDaily();
   if (view === 'camps') loadCamps();
+  if (view === 'dyn') loadDyn();
   /* Период, цель ДРР и выгрузка относятся к аналитике. В журнале своё окно
      сравнения, и две пары настроек периода рядом только путают. */
   /* У сводки и журнала свои периоды, две пары настроек рядом путают. */
@@ -2421,7 +2423,7 @@ const dailyCombo = makeCombo({
     daily.nm = nm;
     /* Выбранный товар — один на обе сводки: человек выбрал артикул и
        переходит на соседнюю вкладку за его кампаниями, а не за чужими. */
-    if (nm) { camps.nm = nm; camps.all = false; camps.note = null; }
+    if (nm) { camps.nm = nm; camps.all = false; camps.note = null; dyn.nm = nm; }
     loadDaily();
   },
 });
@@ -2439,7 +2441,267 @@ const campsCombo = makeCombo({
     camps.all = nm === null;
     camps.nm = nm;
     camps.note = null;
-    if (nm) daily.nm = nm;
+    if (nm) { daily.nm = nm; dyn.nm = nm; }
     loadCamps();
+  },
+});
+
+
+/* ── динамика по дням ─────────────────────────────────────────────────────
+
+   Сводка по товарам отвечает «какие были цифры». Здесь вопрос другой:
+   «где за две недели что-то поехало». Поэтому показателей много, они
+   разбиты по смыслу, у каждого форма тренда и сравнение с прошлым
+   периодом, а ячейки залиты от меньшего к большему: глаз находит
+   выброс раньше, чем человек прочтёт числа. */
+
+const dyn = { days: 14, from: null, to: null, nm: null, data: null,
+              heat: true, open: '' };
+
+function dynQuery() {
+  const p = new URLSearchParams();
+  if (dyn.from && dyn.to) { p.set('from', dyn.from); p.set('to', dyn.to); }
+  else p.set('days', String(dyn.days));
+  if (dyn.nm) p.set('nm_id', String(dyn.nm));
+  return p.toString();
+}
+
+async function loadDyn() {
+  const empty = document.getElementById('dyn-empty');
+  try {
+    const res = await fetch('/api/dynamics?' + dynQuery());
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    dyn.data = data;
+    renderDynFilters(data);
+    renderDyn(data);
+    empty.hidden = data.has_data;
+    if (!data.has_data) {
+      empty.textContent = dyn.nm
+        ? 'У этого товара за выбранный период открутки не было.'
+        : 'За выбранный период данных нет. Соберите статистику из кабинета.';
+    }
+  } catch (err) {
+    document.getElementById('dyn-table').innerHTML = '';
+    empty.hidden = false;
+    empty.textContent = 'Не удалось загрузить динамику: ' + err.message;
+  }
+}
+
+function renderDynFilters(data) {
+  document.getElementById('dyn-from').value = data.period.from;
+  document.getElementById('dyn-to').value = data.period.to;
+  dynCombo.setItems((data.articles || []).map((a) => String(a.nm_id)));
+  dynCombo.sync(dyn.nm);
+
+  const noArticles = !(data.articles || []).length;
+  dynCombo.disable(noArticles);
+  const note = document.getElementById('dyn-nm-note');
+  note.hidden = !noArticles;
+  if (noArticles) note.textContent = 'Товары появятся после сбора статистики.';
+
+  const title = document.getElementById('dyn-title');
+  const sub = document.getElementById('dyn-sub');
+  if (data.nm_id) {
+    title.textContent = data.nm_name
+      ? `Динамика по дням · ${data.nm_name}`
+      : `Динамика по дням · артикул ${data.nm_id}`;
+  } else {
+    title.textContent = 'Динамика по дням · весь кабинет';
+  }
+  sub.textContent = 'Строка — показатель, колонка — день. Колонка «Тренд» '
+    + 'сравнивает период с предыдущим такой же длины '
+    + `(${dayLabel(data.previous.from)} — ${dayLabel(data.previous.to)}). `
+    + 'Нажмите на строку — откроется график.';
+}
+
+/* Заливка — одна краска, от меньшего к большему внутри строки: это
+   «сколько», а не «хорошо или плохо». Хорошо или плохо говорит колонка
+   «Тренд», и там рядом со знаком, а не одним цветом. */
+const HEAT_STEPS = 5;
+
+function heatClass(row, value) {
+  if (!dyn.heat || row.is_ratio === undefined) return '';
+  /* Шкала — от минимума строки к её максимуму, а не от нуля: показы
+     гуляют между 130 и 176 тысячами, и от нуля вся строка красится
+     одинаково, то есть не показывает ничего. */
+  const values = row.days.filter((v) => typeof v === 'number');
+  const max = Math.max(...values);
+  const min = Math.min(...values);
+  if (!row.has_data || !values.length || max === min) return '';
+  const share = (value - min) / (max - min);
+  const step = Math.min(HEAT_STEPS, Math.max(1, Math.ceil(share * HEAT_STEPS)));
+  return value ? `heat heat-${step}` : '';
+}
+
+function dynValue(row, value) {
+  if (!value) return '—';
+  if (row.unit === '₽') return money(value, Math.abs(value) < 100 ? 2 : 0);
+  if (row.unit === '%') return pct(value, Math.abs(value) < 10 ? 2 : 1);
+  return num(value);
+}
+
+function renderDyn(data) {
+  const table = document.getElementById('dyn-table');
+  table.innerHTML = '';
+  const width = 3 + data.dates.length;
+
+  const head = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  headRow.appendChild(el('th', 'm-name', 'Показатель'));
+  headRow.appendChild(el('th', 'm-trend', 'Тренд · Δ'));
+  data.dates.forEach((d) => headRow.appendChild(el('th', '', dayLabel(d))));
+  headRow.appendChild(el('th', 'm-total', 'За период'));
+  head.appendChild(headRow);
+  table.appendChild(head);
+
+  const body = document.createElement('tbody');
+  (data.groups || []).forEach((group) => {
+    const head = document.createElement('tr');
+    head.className = 'dyn-group';
+    const cell = el('td', '', escapeHtml(group.title));
+    cell.colSpan = width;
+    head.appendChild(cell);
+    body.appendChild(head);
+
+    group.rows.forEach((row) => body.appendChild(dynRow(row, data)));
+  });
+  table.appendChild(body);
+
+  const legend = document.getElementById('dyn-legend');
+  legend.hidden = !dyn.heat;
+  legend.textContent = 'Заливка показывает величину внутри строки: чем '
+    + 'темнее, тем больше. Это «сколько», а не «хорошо»: хорошо или плохо '
+    + 'сказано в колонке «Тренд» — там учтено, в какую сторону для этого '
+    + 'показателя лучше.';
+
+  renderDynChart();
+}
+
+function dynRow(row, data) {
+  const tr = document.createElement('tr');
+  tr.className = [row.is_ratio ? 'ratio' : '', row.zone ? 'zone' : '',
+                  dyn.open === row.key ? 'picked' : ''].filter(Boolean).join(' ');
+  tr.tabIndex = 0;
+  tr.setAttribute('role', 'button');
+  tr.setAttribute('aria-expanded', String(dyn.open === row.key));
+  tr.title = 'Открыть график';
+  const open = () => toggleDynChart(row.key);
+  tr.addEventListener('click', open);
+  tr.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
+  });
+
+  tr.appendChild(el('td', 'm-name', escapeHtml(row.title)));
+
+  /* Форма тренда и изменение к прошлому периоду — рядом: по одной
+     цифре не видно, был ли это ровный рост или качели. */
+  const trend = el('td', 'm-trend',
+    sparkline(row.days, cssVar('--series-1')) + dynDelta(row));
+  tr.appendChild(trend);
+
+  row.days.forEach((value) => {
+    tr.appendChild(el('td', heatClass(row, value) || (value ? '' : 'm-zero'),
+                      dynValue(row, value)));
+  });
+  tr.appendChild(el('td', 'm-total', dynValue(row, row.total)));
+  return tr;
+}
+
+function dynDelta(row) {
+  if (row.delta_pct === null || row.delta_pct === undefined) {
+    return '<span class="m-delta">нет базы</span>';
+  }
+  const up = row.delta_pct >= 0;
+  /* Цвет только вместе со знаком и стрелкой: смысл одним цветом не
+     передают, а для расхода «больше» вообще не хорошо и не плохо. */
+  let tone = '';
+  if (row.good && Math.abs(row.delta_pct) >= 5) {
+    const good = (row.good === 'up') === up;
+    tone = good ? ' good' : ' bad';
+  }
+  return `<span class="m-delta${tone}">${up ? '↑' : '↓'} `
+    + `${signed(row.delta_pct)}</span>`;
+}
+
+function toggleDynChart(key) {
+  dyn.open = dyn.open === key ? '' : key;
+  renderDyn(dyn.data);
+  if (dyn.open) {
+    document.getElementById('dyn-chart').scrollIntoView(
+      { block: 'nearest', behavior: 'smooth' });
+  }
+}
+
+function renderDynChart() {
+  const host = document.getElementById('dyn-chart');
+  host.innerHTML = '';
+  host.hidden = !dyn.open;
+  if (!dyn.open) return;
+
+  const data = dyn.data;
+  const row = (data.groups || []).flatMap((g) => g.rows)
+    .find((r) => r.key === dyn.open);
+  if (!row) { host.hidden = true; return; }
+
+  const head = el('div', 'dyn-chart-head');
+  head.appendChild(el('h3', '', escapeHtml(row.title)));
+  const close = el('button', 'btn', 'Закрыть');
+  close.type = 'button';
+  close.addEventListener('click', () => toggleDynChart(row.key));
+  head.appendChild(close);
+  host.appendChild(head);
+
+  const plot = el('div', 'chart');
+  host.appendChild(plot);
+
+  /* Прошлый период — вторая серия того же графика и своим цветом, а не
+     пунктиром: пунктир читается как «прогноз». Длина у периодов одна,
+     поэтому дни совмещаются по порядку, а не по датам. */
+  lineChart(plot, {
+    dates: data.dates,
+    height: 240,
+    series: [
+      { name: 'Этот период', values: row.days, color: cssVar('--series-1'),
+        fill: true },
+      { name: `Прошлый период (${dayLabel(data.previous.from)} — `
+              + `${dayLabel(data.previous.to)})`,
+        values: row.prev_days, color: cssVar('--series-2') },
+    ],
+    format: (v) => dynValue(row, v),
+    axisFormat: (v) => (row.unit === '%' ? pct(v, 0) : num(v)),
+    ariaLabel: `${row.title} по дням, этот и прошлый период`,
+  });
+
+  const legend = el('div', 'legend');
+  legend.innerHTML = [
+    ['Этот период', cssVar('--series-1')],
+    [`Прошлый период: ${dayLabel(data.previous.from)} — `
+     + `${dayLabel(data.previous.to)}`, cssVar('--series-2')],
+  ].map(([name, color]) =>
+    `<span class="legend-item"><span class="swatch" style="background:${color}">`
+    + `</span>${escapeHtml(name)}</span>`).join('');
+  host.appendChild(legend);
+}
+
+document.getElementById('dyn-heat').addEventListener('change', (e) => {
+  dyn.heat = e.target.checked;
+  if (dyn.data) renderDyn(dyn.data);
+});
+
+bindPeriod('dyn', dyn, loadDyn);
+
+const dynCombo = makeCombo({
+  inputId: 'dyn-nm-input',
+  listId: 'dyn-nm-list',
+  clearId: 'dyn-nm-clear',
+  noteId: 'dyn-nm-note',
+  allLabel: 'Весь кабинет',
+  selected: () => dyn.nm,
+  onPick: (nm) => {
+    dyn.nm = nm;
+    /* Товар общий для всех сводок: выбрал артикул — он и остаётся. */
+    if (nm) { daily.nm = nm; camps.nm = nm; camps.all = false; }
+    loadDyn();
   },
 });

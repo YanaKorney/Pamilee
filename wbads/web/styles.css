@@ -18,6 +18,7 @@
   /* Категориальные слоты: 1 — выручка, 2 — расход */
   --series-1: #2a78d6;
   --series-2: #eb6834;
+  --heat-rgb: 42, 120, 214;
   --grid:     #e6e4df;
 
   /* Статусы — зарезервированы, в сериях не используются */
@@ -50,6 +51,7 @@
 
     --series-1: #3987e5;
     --series-2: #d95926;
+    --heat-rgb: 57, 135, 229;
     --grid:     #2b2b28;
 
     --status-good-soft:     #12210f;
@@ -662,6 +664,59 @@ table.data tr.star td:first-child { border-left: 3px solid var(--status-good); p
   margin: 3px 0 0; font-size: 12.5px; color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
+
+/* ── динамика по дням ─────────────────────────────────────────────────── */
+/*
+   Заливка ячеек — одна краска от меньшего к большему: это «сколько», а
+   не «хорошо». Краска полупрозрачная поверх подложки, а не готовый
+   цвет: так число в ячейке читается и в светлой теме, и в тёмной, где
+   плотный синий съел бы белый текст.
+*/
+.dgrid.dyn .heat { background: rgba(var(--heat-rgb), var(--heat-a, .1)); }
+.dgrid.dyn .heat-1 { --heat-a: .07; }
+.dgrid.dyn .heat-2 { --heat-a: .14; }
+.dgrid.dyn .heat-3 { --heat-a: .24; }
+.dgrid.dyn .heat-4 { --heat-a: .36; }
+.dgrid.dyn .heat-5 { --heat-a: .50; }
+
+/* Шапка группы: без неё двадцать строк читаются как один список, в
+   котором «CTR» и «Средний чек» стоят рядом без причины. */
+.dgrid.dyn tr.dyn-group td {
+  /* В таблице числа прижаты вправо, и заголовок группы без этой строки
+     уезжает в конец строки шириной в полторы тысячи пикселей. */
+  text-align: left;
+  background: var(--surface-2); color: var(--text-muted);
+  font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase;
+  font-weight: 600; padding: 7px 12px; position: sticky; left: 0;
+}
+.dgrid.dyn tbody tr[role="button"] { cursor: pointer; }
+.dgrid.dyn tbody tr.picked .m-name,
+.dgrid.dyn tbody tr.picked td { background: var(--status-info-soft); }
+.dgrid.dyn tbody tr:focus-visible { outline: 2px solid var(--series-1); }
+
+.dgrid.dyn .m-trend {
+  min-width: 132px; white-space: nowrap;
+  display: table-cell; vertical-align: middle;
+}
+.dgrid.dyn .m-trend .spark { display: inline-block; vertical-align: middle; }
+.m-delta {
+  display: inline-block; margin-left: 6px; font-size: 12px;
+  color: var(--text-secondary); font-variant-numeric: tabular-nums;
+}
+.m-delta.good { color: var(--status-good); }
+.m-delta.bad { color: var(--status-critical); }
+
+.dyn-chart-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin: 18px 0 6px;
+}
+.dyn-chart-head h3 { margin: 0; font-size: 15px; font-weight: 600; }
+#dyn-chart .chart { position: relative; width: 100%; }
+#dyn-chart .chart svg { display: block; width: 100%; overflow: visible; }
+
+/* Переключатель заливки: та же кнопка, что и везде, только с галочкой. */
+.btn.toggle { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
+.btn.toggle input { margin: 0; }
 
 /* ── точки правок на датах ────────────────────────────────────────────── */
 /*

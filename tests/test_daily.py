@@ -1073,7 +1073,9 @@ class TestTypedArticleCounts(unittest.TestCase):
         """Выбрал артикул в сводке по товарам, перешёл в сводку по
         кампаниям — там его кампании, а не чужие."""
         self.assertIn("if (nm) { camps.nm = nm; camps.all = false;", self.js)
-        self.assertIn("if (nm) daily.nm = nm;", self.js)
+        self.assertIn("if (nm) { daily.nm = nm; dyn.nm = nm; }", self.js)
+        # И третья сводка живёт по тому же правилу.
+        self.assertIn("if (nm) { daily.nm = nm; camps.nm = nm;", self.js)
 
 
 class TestNoteFieldOpensAtItsDot(unittest.TestCase):

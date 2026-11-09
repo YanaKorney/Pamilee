@@ -41,6 +41,7 @@
     <button role="tab" data-view="analytics" aria-selected="true">Аналитика</button>
     <button role="tab" data-view="daily" aria-selected="false">Сводка по товарам</button>
     <button role="tab" data-view="camps" aria-selected="false">Сводка по кампаниям</button>
+    <button role="tab" data-view="dyn" aria-selected="false">Динамика по дням</button>
     <button role="tab" data-view="journal" aria-selected="false">Журнал изменений</button>
   </nav>
 
@@ -188,6 +189,56 @@
     </section>
 
   </div><!-- /view-camps -->
+
+  <div id="view-dyn" hidden>
+
+    <section class="card">
+      <div class="dhead">
+        <div>
+          <h2 id="dyn-title">Динамика по дням</h2>
+          <p class="hint" id="dyn-sub">Все показатели разом: строка —
+            показатель, колонка — день.</p>
+        </div>
+        <label class="btn toggle" title="Заливка ячеек от меньшего к большему внутри строки">
+          <input type="checkbox" id="dyn-heat" checked> Тепловая карта
+        </label>
+      </div>
+
+      <div class="dfilter">
+        <div class="seg" id="dyn-seg" role="group" aria-label="Период">
+          <button data-days="7" aria-pressed="false">7 дней</button>
+          <button data-days="14" aria-pressed="true">14 дней</button>
+          <button data-days="30" aria-pressed="false">30 дней</button>
+        </div>
+        <label><span class="cap">с</span>
+          <input type="date" id="dyn-from"></label>
+        <label><span class="cap">по</span>
+          <input type="date" id="dyn-to"></label>
+        <label class="combo-field"><span class="cap">Товар</span>
+          <div class="combo">
+            <input type="text" id="dyn-nm-input" role="combobox"
+                   aria-expanded="false" aria-controls="dyn-nm-list"
+                   aria-autocomplete="list" autocomplete="off"
+                   placeholder="весь кабинет"
+                   aria-label="Артикул товара, поиск по номеру">
+            <button type="button" class="combo-clear" id="dyn-nm-clear"
+                    hidden aria-label="Показать весь кабинет">×</button>
+            <ul class="combo-list" id="dyn-nm-list" role="listbox" hidden
+                aria-label="Артикулы"></ul>
+          </div>
+          <span class="dnote" id="dyn-nm-note" hidden></span>
+        </label>
+      </div>
+
+      <div class="dgrid-scroll">
+        <table class="dgrid dyn" id="dyn-table"></table>
+      </div>
+      <div id="dyn-chart" hidden></div>
+      <p class="dgrid-note" id="dyn-legend" hidden></p>
+      <p class="jempty" id="dyn-empty" hidden></p>
+    </section>
+
+  </div><!-- /view-dyn -->
 
   <div id="view-journal" hidden>
 
