@@ -504,21 +504,29 @@ class TestCollectionIsReachableWithoutTheTerminal(unittest.TestCase):
         self.assertIn("SBOR-Windows.bat", self.js)
 
     def test_launchers_exist_for_both_systems(self):
-        for name in ("SBOR-Windows.bat", "SBOR-Mac.command"):
+        for name in ("SBOR-Windows.bat", "SBOR-Mac.command",
+                     "DANNYE-Windows.bat", "DANNYE-Mac.command"):
             self.assertTrue((self.root / name).exists(), f"нет файла {name}")
+
+    def test_data_launcher_answers_where_the_journal_is(self):
+        """«Журнал пустой» — вопрос, на который программа отвечает
+        сама, и ради этого ответа не надо открывать командную строку."""
+        text = (self.root / "DANNYE-Windows.bat").read_text(encoding="ascii")
+        self.assertIn("run.py data", text)
 
     def test_launchers_run_the_collection(self):
         for name in ("SBOR-Windows.bat", "SBOR-Mac.command"):
             text = (self.root / name).read_text(encoding="utf-8")
             self.assertIn("run.py collect", text, f"{name} не запускает сбор")
 
-    def test_windows_launcher_stays_ascii_with_crlf(self):
+    def test_every_windows_launcher_stays_ascii_with_crlf(self):
         """cmd.exe читает .bat в кодировке системы, а не в UTF-8: русская
         буква в самом файле превращает команду в мусор. Перевод строки
         тоже обязан быть виндовым."""
-        raw = (self.root / "SBOR-Windows.bat").read_bytes()
-        raw.decode("ascii")
-        self.assertNotIn(b"\n", raw.replace(b"\r\n", b""))
+        for name in sorted(p.name for p in self.root.glob("*.bat")):
+            raw = (self.root / name).read_bytes()
+            raw.decode("ascii")
+            self.assertNotIn(b"\n", raw.replace(b"\r\n", b""), name)
 
     def test_mac_launcher_is_executable(self):
         import os

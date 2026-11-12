@@ -30,6 +30,7 @@
 | Собрать данные заново | `SBOR-Windows.bat` | `SBOR-Mac.command` |
 | Перенести журнал из Excel | `ZHURNAL-Windows.bat` | `ZHURNAL-Mac.command` |
 | Открыть с другого компьютера сети | `NETWORK-Windows.bat` | `NETWORK-Mac.command` |
+| Найти свои данные и журнал | `DANNYE-Windows.bat` | `DANNYE-Mac.command` |
 | Разобраться, если не работает | `DIAGNOSTIKA-Windows.bat` | `DIAGNOSTIKA-Mac.command` |
 
 Файл проверки нужен, когда что-то не подключается: поменяли дату, отключили
