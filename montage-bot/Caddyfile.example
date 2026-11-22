@@ -1,0 +1,4 @@
+# Вместо bot.example.ru впишите адрес вашего домена. Caddy сам получит сертификат HTTPS.
+bot.example.ru {
+    reverse_proxy 127.0.0.1:8000
+}
