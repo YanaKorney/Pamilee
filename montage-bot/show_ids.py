@@ -1,11 +1,27 @@
 """Показывает номера этапов воронки и сотрудников amoCRM (они нужны для настройки).
 
 Запуск:  python show_ids.py
-Берёт AMO_SUBDOMAIN и AMO_TOKEN из переменных окружения (из файла .env).
+Берёт AMO_SUBDOMAIN и AMO_TOKEN из файла .env, который лежит рядом со скриптом.
 """
 import os
 
 import requests
+
+
+def load_env_file():
+    """Читает файл .env рядом со скриптом (если он есть)."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8-sig") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
+                os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+load_env_file()
 
 base = f"https://{os.environ['AMO_SUBDOMAIN']}.amocrm.ru/api/v4"
 headers = {"Authorization": f"Bearer {os.environ['AMO_TOKEN']}"}
