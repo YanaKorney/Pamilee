@@ -5,7 +5,6 @@ After=network.target
 
 [Service]
 WorkingDirectory=/opt/montage-bot
-EnvironmentFile=/opt/montage-bot/.env
 ExecStart=/opt/montage-bot/venv/bin/gunicorn --workers 1 --threads 4 --bind 127.0.0.1:8000 app:app
 Restart=always
 

@@ -21,6 +21,22 @@ from datetime import datetime, timedelta, timezone
 import requests
 from flask import Flask, abort, request
 
+
+def load_env_file():
+    """Читает файл .env рядом с программой (если он есть)."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8-sig") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
+                os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+load_env_file()
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("montage-bot")
 
@@ -104,7 +120,7 @@ def max_send(user_id, text):
 # ---------- сотрудники ----------
 
 def load_employees():
-    path = env("EMPLOYEES_FILE", "employees.json")
+    path = env("EMPLOYEES_FILE") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "employees.json")
     with open(path, encoding="utf-8") as f:
         return json.load(f)
 

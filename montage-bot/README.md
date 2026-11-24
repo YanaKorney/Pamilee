@@ -82,7 +82,6 @@ systemctl enable --now montage-bot
 На сервере в папке бота (с подгруженными значениями из `.env`) выполните:
 
 ```bash
-set -a; . ./.env; set +a
 venv/bin/python setup_max_webhook.py https://ваш-домен
 ```
 
