@@ -427,6 +427,11 @@ def cmd_collect(args: argparse.Namespace) -> int:
     if result.get("stocks"):
         _print(f"Остатки собраны по {result['stocks']} товарам — "
                "в сводке по дням появятся строки «Остатки».")
+    if not result.get("funnel_days"):
+        # Молчание здесь читается как «всё собралось»: строка про
+        # воронку должна быть всегда, даже когда её нет.
+        _print("Воронка продаж не собрана — «Заказы кабинета» считаются "
+               "по строкам заказов и с кабинетом не сойдутся.")
     if result.get("funnel_days"):
         _print(f"Воронка продаж собрана за {result['funnel_days']} "
                f"{plural(result['funnel_days'], 'день', 'дня', 'дней')} — "

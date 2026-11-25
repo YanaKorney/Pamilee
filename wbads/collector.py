@@ -790,7 +790,16 @@ def collect(conn: sqlite3.Connection, token: str, days: int = 30,
                                            ca_bundle=ca_bundle)
         except WBError as exc:
             conn.rollback()
-            if exc.status not in (401, 403):
+            if exc.status in (401, 403):
+                # Про остатки уже сказано выше, но промолчать здесь
+                # нельзя: воронка — источник «Заказов кабинета», и без
+                # неё они так и не сойдутся с кабинетом.
+                _log(on_progress, "Воронка продаж не отдалась: у токена нет "
+                                  "категории «Аналитика».")
+                _log(on_progress, "«Заказы кабинета» останутся счётом по "
+                                  "строкам заказов — с кабинетом они не "
+                                  "сходятся.")
+            else:
                 _log(on_progress, f"Воронку продаж получить не вышло: {exc}")
         except Exception as exc:
             conn.rollback()
