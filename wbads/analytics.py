@@ -53,14 +53,16 @@ def load_thresholds(conn: sqlite3.Connection, base: Thresholds) -> Thresholds:
 # ── общий ДРР: реклама против ВСЕХ заказов, а не только рекламных ────────
 
 def _orders_index(conn: sqlite3.Connection, date_from: str, date_to: str,
-                  price_field: str) -> dict[str, Any]:
+                  price_field: str,
+                  include_cancelled: bool = False) -> dict[str, Any]:
     """Заказы кабинета за период: по артикулам, по дням и итогом.
 
     Рекламный ДРР считается от заказов, которые WB атрибутировал рекламе.
     Общий — от всех заказов артикула, включая органику. Второй показывает
     нагрузку рекламы на оборот, первый — эффективность самой открутки.
     """
-    rows = db.orders_by_nm(conn, date_from, date_to, price_field)
+    rows = db.orders_by_nm(conn, date_from, date_to, price_field,
+                           include_cancelled)
     by_nm: dict[int, dict[str, float]] = {}
     by_nm_day: dict[tuple[int, str], float] = {}
     by_day: dict[str, float] = {}
@@ -81,7 +83,8 @@ def _orders_index(conn: sqlite3.Connection, date_from: str, date_to: str,
         "by_nm": by_nm,
         "by_nm_day": by_nm_day,
         "by_day": by_day,
-        "totals": db.orders_totals(conn, date_from, date_to, price_field),
+        "totals": db.orders_totals(conn, date_from, date_to, price_field,
+                                   include_cancelled),
         "available": bool(rows),
     }
 
@@ -182,7 +185,8 @@ def _nm_flag(kpi: Mapping[str, float], t: Thresholds) -> str:
 
 def build_report(conn: sqlite3.Connection, date_from: str, date_to: str,
                  thresholds: Thresholds, with_nm: bool = True,
-                 price_field: str = "price_with_disc") -> dict[str, Any]:
+                 price_field: str = "price_with_disc",
+                 include_cancelled: bool = False) -> dict[str, Any]:
     """Главный отчёт: итоги, динамика и разбор каждой кампании."""
     prev_from, prev_to = shift_window(date_from, date_to)
 
@@ -190,8 +194,10 @@ def build_report(conn: sqlite3.Connection, date_from: str, date_to: str,
     prev_rows = db.daily_rows(conn, prev_from, prev_to)
     campaigns = {int(c["advert_id"]): dict(c) for c in db.list_campaigns(conn)}
 
-    orders = _orders_index(conn, date_from, date_to, price_field)
-    prev_orders = _orders_index(conn, prev_from, prev_to, price_field)
+    orders = _orders_index(conn, date_from, date_to, price_field,
+                           include_cancelled)
+    prev_orders = _orders_index(conn, prev_from, prev_to, price_field,
+                                include_cancelled)
     nm_spend = _campaign_nm_spend(conn, date_from, date_to)
     prev_nm_spend = _campaign_nm_spend(conn, prev_from, prev_to)
     article_spend: dict[int, float] = {}
@@ -260,6 +266,7 @@ def build_report(conn: sqlite3.Connection, date_from: str, date_to: str,
         "prev_revenue": prev_orders["totals"]["revenue"],
         "ad_share": safe_div(derive(totals_cur)["revenue"], orders["totals"]["revenue"]) * 100,
         "price_field": price_field,
+        "orders_cancelled": include_cancelled,
     }
 
     return {
@@ -368,7 +375,8 @@ def _meta(conn: sqlite3.Connection) -> dict[str, Any]:
 
 def campaign_detail(conn: sqlite3.Connection, advert_id: int, date_from: str,
                     date_to: str, thresholds: Thresholds,
-                    price_field: str = "price_with_disc") -> dict[str, Any] | None:
+                    price_field: str = "price_with_disc",
+                    include_cancelled: bool = False) -> dict[str, Any] | None:
     """Подробный разбор одной кампании."""
     prev_from, prev_to = shift_window(date_from, date_to)
     rows = [dict(r) for r in db.daily_rows(conn, date_from, date_to, [advert_id])]
@@ -379,8 +387,10 @@ def campaign_detail(conn: sqlite3.Connection, advert_id: int, date_from: str,
     if not rows and not meta_row:
         return None
     meta = dict(meta_row) if meta_row else {"advert_id": advert_id}
-    orders = _orders_index(conn, date_from, date_to, price_field)
-    prev_orders = _orders_index(conn, prev_from, prev_to, price_field)
+    orders = _orders_index(conn, date_from, date_to, price_field,
+                           include_cancelled)
+    prev_orders = _orders_index(conn, prev_from, prev_to, price_field,
+                                include_cancelled)
     nm_spend = _campaign_nm_spend(conn, date_from, date_to)
     prev_nm_spend = _campaign_nm_spend(conn, prev_from, prev_to)
     article_spend: dict[int, float] = {}

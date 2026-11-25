@@ -401,6 +401,35 @@ def set_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
 
 # ── чтение ────────────────────────────────────────────────────────────────
 
+# Как считать заказы кабинета. WB показывает одно и то же событие
+# тремя разными суммами и двумя разными счётчиками, и «правильного»
+# среди них нет — есть то, с чем человек сверяется в кабинете. Поэтому
+# это настройка, а не зашитый в код выбор.
+ORDER_PRICE_FIELDS = ("price_with_disc", "finished_price", "total_price")
+ORDER_PRICE_TITLES = {
+    "finished_price": "с СПП — что заплатил покупатель",
+    "price_with_disc": "без СПП — после вашей скидки продавца",
+    "total_price": "до скидок — цена без вашей скидки",
+}
+
+
+def order_basis(conn: sqlite3.Connection,
+                default_field: str = "price_with_disc") -> dict[str, Any]:
+    """Какой ценой и с отменами ли считать заказы кабинета."""
+    stored = get_settings(conn)
+    field = str(stored.get("order_price") or default_field)
+    if field not in ORDER_PRICE_FIELDS:
+        field = "price_with_disc"
+    return {
+        "field": field,
+        "cancelled": str(stored.get("orders_cancelled") or "0") == "1",
+    }
+
+
+def _cancel_clause(include_cancelled: bool) -> str:
+    return "" if include_cancelled else " AND is_cancel = 0"
+
+
 def get_settings(conn: sqlite3.Connection) -> dict[str, str]:
     return {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM settings")}
 
@@ -431,14 +460,15 @@ def nm_rows(conn: sqlite3.Connection, advert_id: int, date_from: str,
 
 
 def orders_by_nm(conn: sqlite3.Connection, date_from: str, date_to: str,
-                 price_field: str = "price_with_disc") -> list[sqlite3.Row]:
+                 price_field: str = "price_with_disc",
+                 include_cancelled: bool = False) -> list[sqlite3.Row]:
     """Заказы, свёрнутые по «артикул + день». Отменённые не считаем.
 
     price_field выбирает, какую цену брать за сумму заказа:
     price_with_disc — после скидки продавца (по умолчанию, сопоставимо
     с рекламным отчётом), finished_price — что заплатил покупатель с учётом СПП.
     """
-    if price_field not in ("price_with_disc", "finished_price", "total_price"):
+    if price_field not in ORDER_PRICE_FIELDS:
         price_field = "price_with_disc"
     return list(conn.execute(f"""
         SELECT date, nm_id,
@@ -448,20 +478,22 @@ def orders_by_nm(conn: sqlite3.Connection, date_from: str, date_to: str,
                MAX(brand)          AS brand,
                MAX(subject)        AS subject
         FROM orders_raw
-        WHERE date BETWEEN ? AND ? AND is_cancel = 0
+        WHERE date BETWEEN ? AND ?{_cancel_clause(include_cancelled)}
         GROUP BY date, nm_id
     """, (date_from, date_to)))
 
 
 def orders_totals(conn: sqlite3.Connection, date_from: str, date_to: str,
-                  price_field: str = "price_with_disc") -> dict[str, float]:
+                  price_field: str = "price_with_disc",
+                  include_cancelled: bool = False) -> dict[str, float]:
     """Итог по кабинету за период: заказы, их сумма и отмены."""
-    if price_field not in ("price_with_disc", "finished_price", "total_price"):
+    if price_field not in ORDER_PRICE_FIELDS:
         price_field = "price_with_disc"
+    keep = "1 = 1" if include_cancelled else "is_cancel = 0"
     row = conn.execute(f"""
         SELECT
-            SUM(CASE WHEN is_cancel = 0 THEN 1 ELSE 0 END)             AS orders,
-            SUM(CASE WHEN is_cancel = 0 THEN {price_field} ELSE 0 END) AS revenue,
+            SUM(CASE WHEN {keep} THEN 1 ELSE 0 END)             AS orders,
+            SUM(CASE WHEN {keep} THEN {price_field} ELSE 0 END) AS revenue,
             SUM(CASE WHEN is_cancel = 1 THEN 1 ELSE 0 END)             AS cancels,
             SUM(CASE WHEN is_cancel = 1 THEN {price_field} ELSE 0 END) AS cancel_revenue
         FROM orders_raw WHERE date BETWEEN ? AND ?
@@ -633,8 +665,8 @@ def stocks_by_day(conn: sqlite3.Connection, date_from: str, date_to: str
     """, (date_from, date_to)))
 
 
-def prices_by_day(conn: sqlite3.Connection, date_from: str, date_to: str
-                  ) -> list[sqlite3.Row]:
+def prices_by_day(conn: sqlite3.Connection, date_from: str, date_to: str,
+                  include_cancelled: bool = False) -> list[sqlite3.Row]:
     """Средние цены заказов по дням: до СПП, с СПП и число заказов.
 
     СПП — скидка постоянного покупателя — отдельным методом WB не
@@ -643,13 +675,13 @@ def prices_by_day(conn: sqlite3.Connection, date_from: str, date_to: str
     (finished_price). Разница между ними и есть СПП, причём ровно та,
     что видел покупатель в тот день.
     """
-    return list(conn.execute("""
+    return list(conn.execute(f"""
         SELECT date, nm_id,
                COUNT(*)              AS orders,
                SUM(price_with_disc)  AS before_spp,
                SUM(finished_price)   AS with_spp,
                SUM(spp)              AS spp_sum
         FROM orders_raw
-        WHERE date BETWEEN ? AND ? AND is_cancel = 0
+        WHERE date BETWEEN ? AND ?{_cancel_clause(include_cancelled)}
         GROUP BY date, nm_id
     """, (date_from, date_to)))

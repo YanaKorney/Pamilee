@@ -2462,7 +2462,8 @@ const campsCombo = makeCombo({
    выброс раньше, чем человек прочтёт числа. */
 
 const dyn = { days: 14, from: null, to: null, nm: null, data: null,
-              heat: true, picked: [], slots: {} };
+              heat: true, picked: [], slots: {},
+              compare: null, showCompare: false };
 
 /* Линий на одном графике — не больше шести: дальше их не различить ни
    по цвету, ни глазом, и палитра кончается честными цветами. */
@@ -2617,6 +2618,7 @@ function renderDyn(data) {
     + 'залит одной краской по величине: тратить больше само по себе ни '
     + 'плохо, ни хорошо.';
 
+  renderDynBasis(data);
   renderDynChart();
 }
 
@@ -2855,4 +2857,82 @@ const dynCombo = makeCombo({
     if (nm) { daily.nm = nm; camps.nm = nm; camps.all = false; }
     loadDyn();
   },
+});
+
+
+/* ── как считать заказы кабинета ──────────────────────────────────────────
+
+   WB показывает одно и то же событие тремя суммами и двумя счётчиками:
+   с СПП и без, с отменёнными и без. «Правильного» среди них нет — есть
+   тот, с которым человек сверяется в кабинете. Поэтому это настройка, а
+   рядом с ней таблица сверки: видно, какой вариант совпал с воронкой
+   продаж, и выбор перестаёт быть угадыванием. */
+
+function renderDynBasis(data) {
+  const box = document.getElementById('dyn-basis');
+  const basis = data.orders_basis;
+  if (!basis || !data.has_orders) { box.hidden = true; return; }
+  box.hidden = false;
+
+  document.getElementById('dyn-price').value = basis.field;
+  document.getElementById('dyn-cancelled').checked = !!basis.cancelled;
+  dyn.compare = basis.compare || { variants: [] };
+  renderDynCompare();
+}
+
+function renderDynCompare() {
+  const host = document.getElementById('dyn-basis-table');
+  if (!dyn.showCompare) { host.hidden = true; host.innerHTML = ''; return; }
+
+  const basis = (dyn.data || {}).orders_basis || {};
+  const titles = basis.titles || {};
+  const rows = (dyn.compare || {}).variants || [];
+  host.hidden = false;
+  host.innerHTML =
+    '<p class="dbasis-hint">Заказы кабинета за выбранный период во всех '
+    + 'вариантах. Сравните с «Этапы воронки продаж» в кабинете за тот же '
+    + 'период и выберите строку, которая совпала.</p>'
+    + '<table class="dbasis-grid"><thead><tr>'
+    + '<th>Цена</th><th>Отменённые</th><th>Заказы, шт</th><th>Сумма, ₽</th>'
+    + '</tr></thead><tbody>'
+    + rows.map((v) => {
+      const picked = v.field === basis.field
+        && !!v.cancelled === !!basis.cancelled;
+      return `<tr class="${picked ? 'picked' : ''}">`
+        + `<td>${escapeHtml(titles[v.field] || v.field)}</td>`
+        + `<td>${v.cancelled ? 'учтены' : 'не учтены'}</td>`
+        + `<td>${num(v.orders)}</td><td>${money(v.revenue)}</td></tr>`;
+    }).join('')
+    + '</tbody></table>';
+}
+
+async function saveDynBasis() {
+  const body = {
+    order_price: document.getElementById('dyn-price').value,
+    orders_cancelled: document.getElementById('dyn-cancelled').checked,
+  };
+  try {
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    /* Настройка общая для всех вкладок: общий ДРР считается из тех же
+       заказов, и расходиться они не имеют права. */
+    await loadDyn();
+    if (state.report) load();
+  } catch (err) {
+    document.getElementById('dyn-empty').hidden = false;
+    document.getElementById('dyn-empty').textContent =
+      'Не удалось сохранить настройку: ' + err.message;
+  }
+}
+
+document.getElementById('dyn-price').addEventListener('change', saveDynBasis);
+document.getElementById('dyn-cancelled').addEventListener('change', saveDynBasis);
+document.getElementById('dyn-compare').addEventListener('click', () => {
+  dyn.showCompare = !dyn.showCompare;
+  renderDynCompare();
 });

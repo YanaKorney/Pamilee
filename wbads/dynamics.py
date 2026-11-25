@@ -162,14 +162,17 @@ NOTABLE_PCT = 5.0
 
 def table(conn: sqlite3.Connection, date_from: str, date_to: str,
           nm_id: int | None = None,
-          price_field: str = "price_with_disc") -> dict[str, Any]:
+          price_field: str = "price_with_disc",
+          include_cancelled: bool = False) -> dict[str, Any]:
     """Таблица «показатели × дни» с трендом и прошлым периодом."""
     days = daterange(date_from, date_to)
     prev_from, prev_to = shift_window(date_from, date_to)
     prev_days = daterange(prev_from, prev_to)
 
-    values = _values_by_day(conn, date_from, date_to, nm_id, price_field)
-    prev_values = _values_by_day(conn, prev_from, prev_to, nm_id, price_field)
+    values = _values_by_day(conn, date_from, date_to, nm_id, price_field,
+                            include_cancelled)
+    prev_values = _values_by_day(conn, prev_from, prev_to, nm_id,
+                                 price_field, include_cancelled)
 
     totals = _period_totals(values, days)
     prev_totals = _period_totals(prev_values, prev_days)
@@ -212,6 +215,8 @@ def table(conn: sqlite3.Connection, date_from: str, date_to: str,
         "has_sales": has_sales,
         "has_stocks": has_stocks,
         "has_ratings": has_ratings,
+        "orders_basis": {"field": price_field,
+                         "cancelled": bool(include_cancelled)},
     }
 
 
@@ -248,12 +253,14 @@ def _delta_pct(current: float, previous: float) -> float | None:
 
 
 def _values_by_day(conn: sqlite3.Connection, date_from: str, date_to: str,
-                   nm_id: int | None, price_field: str
+                   nm_id: int | None, price_field: str,
+                   include_cancelled: bool = False
                    ) -> dict[str, dict[str, float]]:
     """Все показатели по каждому дню периода, включая пустые дни."""
     raw = raw_by_day(conn, date_from, date_to, nm_id)
     search = search_views_by_day(conn, date_from, date_to, nm_id)
-    cabinet = _cabinet_orders(conn, date_from, date_to, nm_id, price_field)
+    cabinet = _cabinet_orders(conn, date_from, date_to, nm_id, price_field,
+                              include_cancelled)
     sales = _by_nm_day(db.sales_by_day(conn, date_from, date_to), nm_id,
                        ("sales", "revenue", "for_pay", "returns"))
     stocks = _by_nm_day(db.stocks_by_day(conn, date_from, date_to), nm_id,
@@ -268,7 +275,8 @@ def _values_by_day(conn: sqlite3.Connection, date_from: str, date_to: str,
                                cabinet.get(day, {}), sales.get(day, {}),
                                stocks.get(day, {}), ratings.get(day, {}))
 
-    _add_days_left(conn, out, days, nm_id, price_field)
+    _add_days_left(conn, out, days, nm_id, price_field,
+                   include_cancelled)
     return out
 
 
@@ -320,7 +328,8 @@ def _by_nm_day(rows: Any, nm_id: int | None,
 
 def _add_days_left(conn: sqlite3.Connection,
                    values: dict[str, dict[str, float]], days: list[str],
-                   nm_id: int | None, price_field: str) -> None:
+                   nm_id: int | None, price_field: str,
+                   include_cancelled: bool = False) -> None:
     """Запас дней: остаток, делённый на продажи в день за неделю.
 
     Неделя, а не вчерашний день: по одному дню запас прыгает от двух
@@ -336,7 +345,8 @@ def _add_days_left(conn: sqlite3.Connection,
     back = _shift_back(start, SALES_WINDOW)
     sold = _by_nm_day(db.sales_by_day(conn, back, days[-1]), nm_id,
                       ("sales",))
-    ordered = _by_nm_day(db.orders_by_nm(conn, back, days[-1], price_field),
+    ordered = _by_nm_day(db.orders_by_nm(conn, back, days[-1], price_field,
+                                         include_cancelled),
                          nm_id, ("orders",))
     history = daterange(back, days[-1])
 
@@ -480,7 +490,8 @@ def _period_totals(values: dict[str, dict[str, float]],
 
 
 def _cabinet_orders(conn: sqlite3.Connection, date_from: str, date_to: str,
-                    nm_id: int | None, price_field: str
+                    nm_id: int | None, price_field: str,
+                    include_cancelled: bool = False
                     ) -> dict[str, dict[str, float]]:
     """Заказы кабинета по дням: знаменатель общего ДРР и цены."""
     out: dict[str, dict[str, float]] = {}
@@ -490,14 +501,16 @@ def _cabinet_orders(conn: sqlite3.Connection, date_from: str, date_to: str,
                                     "price_orders": 0.0, "before_spp": 0.0,
                                     "with_spp": 0.0, "spp_sum": 0.0})
 
-    for row in db.orders_by_nm(conn, date_from, date_to, price_field):
+    for row in db.orders_by_nm(conn, date_from, date_to, price_field,
+                               include_cancelled):
         if nm_id is not None and int(row["nm_id"] or 0) != nm_id:
             continue
         here = slot(str(row["date"])[:10])
         here["orders"] += float(row["orders"] or 0)
         here["revenue"] += float(row["revenue"] or 0)
 
-    for row in db.prices_by_day(conn, date_from, date_to):
+    for row in db.prices_by_day(conn, date_from, date_to,
+                                include_cancelled):
         if nm_id is not None and int(row["nm_id"] or 0) != nm_id:
             continue
         here = slot(str(row["date"])[:10])

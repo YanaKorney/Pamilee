@@ -230,6 +230,21 @@
         </label>
       </div>
 
+      <div class="dbasis" id="dyn-basis" hidden>
+        <label><span class="cap">Заказы кабинета считать</span>
+          <select id="dyn-price">
+            <option value="price_with_disc">без СПП — после скидки продавца</option>
+            <option value="finished_price">с СПП — что заплатил покупатель</option>
+            <option value="total_price">до скидок</option>
+          </select>
+        </label>
+        <label class="dbasis-check">
+          <input type="checkbox" id="dyn-cancelled"> учитывать отменённые
+        </label>
+        <button class="btn" id="dyn-compare" type="button">Сверить с кабинетом</button>
+        <div class="dbasis-table" id="dyn-basis-table" hidden></div>
+      </div>
+
       <div class="dgrid-scroll">
         <table class="dgrid dyn" id="dyn-table"></table>
       </div>

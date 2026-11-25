@@ -58,7 +58,8 @@ def handle_report(conn: sqlite3.Connection, cfg: Config,
     date_from, date_to = _period(conn, query)
     thresholds = analytics.load_thresholds(conn, cfg.thresholds)
     return analytics.build_report(conn, date_from, date_to, thresholds,
-                                  price_field=cfg.order_price_field)
+                                  price_field=_basis(conn, cfg)["field"],
+                                  include_cancelled=_basis(conn, cfg)["cancelled"])
 
 
 def handle_campaign(conn: sqlite3.Connection, cfg: Config,
@@ -67,7 +68,8 @@ def handle_campaign(conn: sqlite3.Connection, cfg: Config,
     date_from, date_to = _period(conn, query)
     thresholds = analytics.load_thresholds(conn, cfg.thresholds)
     detail = analytics.campaign_detail(conn, advert_id, date_from, date_to, thresholds,
-                                       price_field=cfg.order_price_field)
+                                       price_field=_basis(conn, cfg)["field"],
+                                       include_cancelled=_basis(conn, cfg)["cancelled"])
     if detail is None:
         return {"error": f"Кампания {advert_id} не найдена"}
     return detail
@@ -102,8 +104,19 @@ def handle_settings(conn: sqlite3.Connection, cfg: Config,
     """Смена порогов из дашборда — сохраняется в базу и переживает перезапуск."""
     payload = body or {}
     allowed = Thresholds().to_dict()
-    saved = {}
+    saved: dict[str, Any] = {}
     for key, value in payload.items():
+        # Основа расчёта заказов — не число, и разбирать её как число
+        # значило бы молча её потерять.
+        if key == "order_price":
+            if str(value) in db.ORDER_PRICE_FIELDS:
+                saved[key] = str(value)
+                db.set_setting(conn, key, str(value))
+            continue
+        if key == "orders_cancelled":
+            saved[key] = "1" if value in (True, 1, "1", "true") else "0"
+            db.set_setting(conn, key, saved[key])
+            continue
         if key not in allowed:
             continue
         try:
@@ -112,7 +125,9 @@ def handle_settings(conn: sqlite3.Connection, cfg: Config,
             continue
         db.set_setting(conn, key, str(saved[key]))
     conn.commit()
-    return {"saved": saved, "thresholds": analytics.load_thresholds(conn, cfg.thresholds).to_dict()}
+    return {"saved": saved,
+            "thresholds": analytics.load_thresholds(conn, cfg.thresholds).to_dict(),
+            "orders_basis": _basis(conn, cfg)}
 
 
 def handle_export(conn: sqlite3.Connection, cfg: Config,
@@ -121,7 +136,8 @@ def handle_export(conn: sqlite3.Connection, cfg: Config,
     date_from, date_to = _period(conn, query)
     thresholds = analytics.load_thresholds(conn, cfg.thresholds)
     report = analytics.build_report(conn, date_from, date_to, thresholds, with_nm=False,
-                                    price_field=cfg.order_price_field)
+                                    price_field=_basis(conn, cfg)["field"],
+                                    include_cancelled=_basis(conn, cfg)["cancelled"])
 
     buffer = io.StringIO()
     writer = csv.writer(buffer, delimiter=";")
@@ -271,6 +287,35 @@ def handle_daily_csv(conn: sqlite3.Connection, cfg: Config,
     return daily.to_csv(table, f"{title} · {date_from} — {date_to}"), filename
 
 
+def _basis(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
+    """Как считать заказы кабинета: настройка дашборда поверх умолчания."""
+    return db.order_basis(conn, cfg.order_price_field)
+
+
+def _basis_compare(conn: sqlite3.Connection, date_from: str, date_to: str,
+                   nm_id: int | None) -> dict[str, Any]:
+    """Заказы кабинета за период во всех вариантах сразу.
+
+    Ровно та таблица, которую человек сверяет с воронкой продаж в
+    кабинете: совпали штуки и сумма — значит основа выбрана верно.
+    Иначе выбор свёлся бы к угадыванию, а разница между вариантами
+    доходит до десяти процентов.
+    """
+    out: dict[str, Any] = {"variants": []}
+    for cancelled in (False, True):
+        for field in db.ORDER_PRICE_FIELDS:
+            rows = db.orders_by_nm(conn, date_from, date_to, field, cancelled)
+            if nm_id is not None:
+                rows = [r for r in rows if int(r["nm_id"] or 0) == nm_id]
+            out["variants"].append({
+                "field": field,
+                "cancelled": cancelled,
+                "orders": sum(float(r["orders"] or 0) for r in rows),
+                "revenue": round(sum(float(r["revenue"] or 0) for r in rows), 2),
+            })
+    return out
+
+
 def handle_dynamics(conn: sqlite3.Connection, cfg: Config,
                     query: dict[str, list[str]]) -> dict[str, Any]:
     """Динамика по дням: все показатели разом, по группам."""
@@ -278,8 +323,15 @@ def handle_dynamics(conn: sqlite3.Connection, cfg: Config,
     nm_raw = (query.get("nm_id") or [""])[0]
     nm_id = int(nm_raw) if nm_raw.isdigit() else None
 
-    table = dynamics.table(conn, date_from, date_to, nm_id,
-                           cfg.order_price_field)
+    basis = _basis(conn, cfg)
+    table = dynamics.table(conn, date_from, date_to, nm_id, basis["field"],
+                           basis["cancelled"])
+    # Чем отличались бы числа при другой основе — чтобы человек сверил
+    # с кабинетом и выбрал, а не гадал.
+    table["orders_basis"] = {**basis,
+                             "titles": db.ORDER_PRICE_TITLES,
+                             "compare": _basis_compare(conn, date_from,
+                                                       date_to, nm_id)}
     names = _article_names(conn)
     table["articles"] = daily.articles(conn, date_from, date_to, names)
     table["nm_name"] = names.get(nm_id, "") if nm_id else ""

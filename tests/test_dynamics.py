@@ -634,3 +634,127 @@ class TestRatingFieldsAreUnwrapped(unittest.TestCase):
 
         self.assertIsNone(collector.normalize_rating({"rating": 5},
                                                      "2026-11-13", "now"))
+
+
+class TestOrdersBasis(DynamicsCase):
+    """WB показывает одно и то же событие тремя суммами и двумя
+    счётчиками. «Правильного» среди них нет — есть тот, с которым
+    человек сверяется в кабинете, и он обязан переключаться."""
+
+    def order(self, date, *, srid="o1", with_disc=1000.0, finished=800.0,
+              total=1500.0, cancelled=False, nm_id=777):
+        self.conn.execute(
+            "INSERT OR REPLACE INTO orders_raw (srid, date, last_change,"
+            " nm_id, supplier_article, brand, subject, price_with_disc,"
+            " finished_price, total_price, spp, is_cancel, collected_at)"
+            " VALUES (?,?,?,?,'A','B','C',?,?,?,20,?,'now')",
+            (srid, date, date, nm_id, with_disc, finished, total,
+             1 if cancelled else 0))
+        self.conn.commit()
+
+    def basis(self, field="price_with_disc", cancelled=False):
+        from wbads import api
+        from wbads.config import Config
+
+        api.handle_settings(self.conn, Config(db_path=self.path, token="t"),
+                            {}, {"order_price": field,
+                                 "orders_cancelled": cancelled})
+        return api.handle_dynamics(self.conn, Config(db_path=self.path,
+                                                     token="t"),
+                                   {"from": ["2026-11-01"],
+                                    "to": ["2026-11-01"]})
+
+    def setUp(self):
+        super().setUp()
+        self.day("2026-11-01")
+        self.order("2026-11-01", srid="a")
+        self.order("2026-11-01", srid="b", cancelled=True)
+
+    def test_default_is_the_price_after_the_seller_discount(self):
+        rows = self.rows(self.basis())
+        self.assertEqual(rows["total_orders"]["days"], [1.0])
+        self.assertEqual(rows["total_revenue"]["days"], [1000.0])
+
+    def test_switching_to_the_buyer_price(self):
+        rows = self.rows(self.basis("finished_price"))
+        self.assertEqual(rows["total_revenue"]["days"], [800.0])
+
+    def test_counting_cancelled_orders(self):
+        rows = self.rows(self.basis("price_with_disc", cancelled=True))
+        self.assertEqual(rows["total_orders"]["days"], [2.0])
+        self.assertEqual(rows["total_revenue"]["days"], [2000.0])
+
+    def test_the_setting_survives_a_restart(self):
+        """Настройка живёт в базе, а не в памяти вкладки."""
+        from wbads import db
+
+        self.basis("finished_price", cancelled=True)
+        again = db.order_basis(db.connect(self.path))
+        self.assertEqual(again, {"field": "finished_price", "cancelled": True})
+
+    def test_junk_is_not_saved(self):
+        from wbads import api, db
+        from wbads.config import Config
+
+        api.handle_settings(self.conn, Config(db_path=self.path, token="t"),
+                            {}, {"order_price": "выдумка"})
+        self.assertEqual(db.order_basis(self.conn)["field"], "price_with_disc")
+
+    def test_comparison_lists_every_variant(self):
+        """Таблица сверки — ответ на «а почему у меня в кабинете другое»:
+        видно все шесть вариантов сразу."""
+        data = self.basis()
+        variants = data["orders_basis"]["compare"]["variants"]
+        self.assertEqual(len(variants), 6)
+        pairs = {(v["field"], v["cancelled"]): (v["orders"], v["revenue"])
+                 for v in variants}
+        self.assertEqual(pairs[("price_with_disc", False)], (1.0, 1000.0))
+        self.assertEqual(pairs[("finished_price", False)], (1.0, 800.0))
+        self.assertEqual(pairs[("total_price", True)], (2.0, 3000.0))
+
+    def test_cabinet_report_follows_the_same_setting(self):
+        """Общий ДРР считается из тех же заказов: расходиться вкладкам
+        нельзя, иначе одно и то же число в программе разное."""
+        from wbads import api
+        from wbads.config import Config
+
+        cfg = Config(db_path=self.path, token="t")
+        api.handle_settings(self.conn, cfg, {}, {"order_price": "finished_price"})
+        report = api.handle_report(self.conn, cfg, {"from": ["2026-11-01"],
+                                                    "to": ["2026-11-01"]})
+        self.assertEqual(report["orders"]["revenue"], 800.0)
+        self.assertEqual(report["orders"]["price_field"], "finished_price")
+
+    def test_cancelled_setting_reaches_the_cabinet_report(self):
+        from wbads import api
+        from wbads.config import Config
+
+        cfg = Config(db_path=self.path, token="t")
+        api.handle_settings(self.conn, cfg, {}, {"orders_cancelled": True})
+        report = api.handle_report(self.conn, cfg, {"from": ["2026-11-01"],
+                                                    "to": ["2026-11-01"]})
+        self.assertEqual(report["orders"]["orders"], 2.0)
+        self.assertTrue(report["orders"]["orders_cancelled"])
+
+
+class TestBasisControls(unittest.TestCase):
+    def setUp(self):
+        from wbads.config import ROOT
+
+        self.html = (ROOT / "wbads" / "web" / "index.html").read_text(
+            encoding="utf-8")
+        self.js = (ROOT / "wbads" / "web" / "app.js").read_text(encoding="utf-8")
+
+    def test_switch_sits_above_the_table(self):
+        self.assertIn('id="dyn-price"', self.html)
+        self.assertIn('id="dyn-cancelled"', self.html)
+        self.assertIn("function saveDynBasis", self.js)
+
+    def test_comparison_can_be_opened(self):
+        self.assertIn('id="dyn-compare"', self.html)
+        self.assertIn("Сверить с кабинетом", self.html)
+        self.assertIn("воронки продаж", self.js)
+
+    def test_analytics_reloads_after_the_change(self):
+        """Общий ДРР на первой вкладке считается из тех же заказов."""
+        self.assertIn("if (state.report) load();", self.js)
