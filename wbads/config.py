@@ -457,6 +457,10 @@ def describe_database(path: Path) -> dict[str, object] | None:
             ("articles", "SELECT COUNT(DISTINCT nm_id) FROM campaign_nm_daily"),
             ("campaigns", "SELECT COUNT(*) FROM campaigns"),
             ("orders", "SELECT COUNT(*) FROM orders_raw"),
+            # Воронка продаж — то, из чего считаются «Заказы кабинета».
+            # Её отсутствие и есть самый частый ответ на «данные не
+            # поменялись»: программа новая, а сбор ещё не запускали.
+            ("funnel_days", "SELECT COUNT(DISTINCT date) FROM funnel_daily"),
         ):
             try:
                 counts[key] = int(conn.execute(sql).fetchone()[0] or 0)
@@ -468,12 +472,19 @@ def describe_database(path: Path) -> dict[str, object] | None:
                 "SELECT MAX(date) FROM campaign_daily").fetchone()[0] or "")
         except sqlite3.Error:
             pass
+        funnel_last = ""
+        try:
+            funnel_last = str(conn.execute(
+                "SELECT MAX(date) FROM funnel_daily").fetchone()[0] or "")
+        except sqlite3.Error:
+            pass
     except sqlite3.DatabaseError:
         return None
     finally:
         conn.close()
 
-    return {"path": path, "last_day": last, **counts}
+    return {"path": path, "last_day": last, "funnel_last": funnel_last,
+            **counts}
 
 
 def find_previous_tokens(current: Path | None = None) -> list[dict[str, object]]:

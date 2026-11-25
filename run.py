@@ -1490,6 +1490,23 @@ def cmd_data(args: argparse.Namespace) -> int:
             _print("  в журнале. Соберите статистику заново: run.py collect")
         if here.get("last_day"):
             _print(f"Последний день статистики: {here['last_day']}")
+
+        # Воронка — источник «Заказов кабинета». Если её нет, числа в
+        # дашборде останутся прежними, сколько ни обновляй программу,
+        # и человек должен увидеть это одной строкой, а не догадаться.
+        funnel_days = int(here.get("funnel_days") or 0)
+        if funnel_days:
+            _print(f"Воронка продаж собрана за {funnel_days} "
+                   f"{plural(funnel_days, 'день', 'дня', 'дней')}"
+                   + (f", по {here['funnel_last']} включительно"
+                      if here.get("funnel_last") else "")
+                   + " — «Заказы кабинета» считаются по ней.")
+        else:
+            _print("Воронки продаж в базе нет. Пока её не собрать, "
+                   "«Заказы кабинета» считаются по строкам заказов и с "
+                   "кабинетом не сходятся.")
+            _print("  Соберите её: SBOR-Windows.bat "
+                   "(на Mac — SBOR-Mac.command).")
     else:
         _print("База пустая или ещё не создана.")
     print()
