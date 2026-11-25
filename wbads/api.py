@@ -721,6 +721,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "Файл не найден"}, 404)
             return
         body = path.read_bytes()
+        if path.suffix == ".html":
+            # Адрес страницы и скриптов один и тот же от версии к
+            # версии, и браузер считает себя вправе отдать их из кеша.
+            # Снаружи это выглядит как «обновил программу, а нового не
+            # появилось». Номер версии в адресе делает файл новым.
+            body = body.replace(b"__VERSION__", APP_VERSION.encode("utf-8"))
         self.send_response(200)
         self.send_header("Content-Type", CONTENT_TYPES.get(path.suffix, "application/octet-stream"))
         self.send_header("Content-Length", str(len(body)))
