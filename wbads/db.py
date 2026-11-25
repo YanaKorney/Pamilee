@@ -434,13 +434,6 @@ ORDER_PRICE_TITLES = {
 }
 
 
-ORDER_SOURCES = ("funnel", "orders")
-ORDER_SOURCE_TITLES = {
-    "funnel": "как в кабинете — воронка продаж",
-    "orders": "по заказам (строки заказов)",
-}
-
-
 def order_basis(conn: sqlite3.Connection,
                 default_field: str = "price_with_disc") -> dict[str, Any]:
     """Какой ценой и с отменами ли считать заказы кабинета."""
@@ -448,17 +441,9 @@ def order_basis(conn: sqlite3.Connection,
     field = str(stored.get("order_price") or default_field)
     if field not in ORDER_PRICE_FIELDS:
         field = "price_with_disc"
-    # Откуда брать штуки и рубли заказов кабинета. По умолчанию — из
-    # воронки продаж: это те же числа, что человек видит в кабинете, и
-    # спорить с ними бессмысленно. Метод заказов считает строки
-    # заказа, а воронка — товары, поэтому они и расходились.
-    source = str(stored.get("orders_source") or "funnel")
-    if source not in ORDER_SOURCES:
-        source = "funnel"
     return {
         "field": field,
         "cancelled": str(stored.get("orders_cancelled") or "0") == "1",
-        "source": source,
     }
 
 

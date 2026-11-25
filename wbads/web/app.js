@@ -2877,24 +2877,18 @@ function renderDynBasis(data) {
   if (!basis || !data.has_orders) { box.hidden = true; return; }
   box.hidden = false;
 
-  const source = data.has_funnel ? (basis.source || 'funnel') : 'orders';
-  const pick = document.getElementById('dyn-source');
-  pick.value = source;
-  /* Пока воронка не собрана, выбирать между источниками не из чего:
-     показывать выбор, который ничего не меняет, хуже, чем его спрятать. */
-  pick.closest('label').hidden = !data.has_funnel;
-
   document.getElementById('dyn-price').value = basis.field;
   document.getElementById('dyn-cancelled').checked = !!basis.cancelled;
-  /* При счёте по воронке цена заказа всё равно нужна: из неё считаются
-     строки «Цена до СПП», «Цена с СПП» и «СПП, %». */
-  document.getElementById('dyn-price-cap').textContent = source === 'funnel'
+  /* Заказы кабинета считает воронка, и цена заказа к ним отношения не
+     имеет: из неё считаются только строки «Цена до СПП», «Цена с СПП»
+     и «СПП, %». Пока воронки нет, цена — основа и для заказов тоже. */
+  document.getElementById('dyn-price-cap').textContent = data.has_funnel
     ? 'Цена в заказах — для строк про цену и СПП'
     : 'Цена в заказах';
 
   const note = document.getElementById('dyn-funnel-note');
   const missing = data.funnel_missing || [];
-  if (source === 'funnel' && missing.length) {
+  if (data.has_funnel && missing.length) {
     note.hidden = false;
     note.textContent = 'Воронка собрана не за весь период: за '
       + missing.length + ' ' + plural(missing.length, 'день', 'дня', 'дней')
@@ -2920,24 +2914,28 @@ function renderDynCompare() {
   const titles = basis.titles || {};
   const rows = (dyn.compare || {}).variants || [];
   const funnel = (dyn.compare || {}).funnel;
-  const source = basis.source || 'funnel';
   host.hidden = false;
   host.innerHTML =
-    '<p class="dbasis-hint">Заказы кабинета за выбранный период. Первая '
-    + 'строка — числа самой воронки продаж: их WB отдаёт своим методом, '
-    + 'и это ровно то, что стоит в кабинете. Ниже — счёт по строкам '
-    + 'заказов, во всех вариантах цены: воронка считает товары, а заказы '
-    + 'строки, поэтому они и не совпадают.</p>'
+    (funnel
+      ? '<p class="dbasis-hint">Первая строка — числа самой воронки '
+        + 'продаж: их WB отдаёт своим методом, и это ровно то, что стоит '
+        + 'в кабинете. По ним и считаются «Заказы кабинета». Ниже — счёт '
+        + 'по строкам заказов, во всех вариантах цены: воронка считает '
+        + 'товары, а заказы строки, поэтому они и не совпадают. На строки '
+        + 'про цену и СПП влияет только выбор цены.</p>'
+      : '<p class="dbasis-hint">Заказы кабинета за выбранный период во '
+        + 'всех вариантах. Сравните с «Этапы воронки продаж» в кабинете '
+        + 'за тот же период и выберите строку, которая совпала.</p>')
     + '<table class="dbasis-grid"><thead><tr>'
     + '<th>Цена</th><th>Отменённые</th><th>Заказы, шт</th><th>Сумма, ₽</th>'
     + '</tr></thead><tbody>'
     + (funnel
-      ? `<tr class="${source === 'funnel' ? 'picked' : ''}">`
+      ? '<tr class="picked">'
         + '<td>воронка продаж — как в кабинете</td><td>по счёту WB</td>'
         + `<td>${num(funnel.orders)}</td><td>${money(funnel.revenue)}</td></tr>`
       : '')
     + rows.map((v) => {
-      const picked = source !== 'funnel' && v.field === basis.field
+      const picked = !funnel && v.field === basis.field
         && !!v.cancelled === !!basis.cancelled;
       return `<tr class="${picked ? 'picked' : ''}">`
         + `<td>${escapeHtml(titles[v.field] || v.field)}</td>`
@@ -2949,7 +2947,6 @@ function renderDynCompare() {
 
 async function saveDynBasis() {
   const body = {
-    orders_source: document.getElementById('dyn-source').value,
     order_price: document.getElementById('dyn-price').value,
     orders_cancelled: document.getElementById('dyn-cancelled').checked,
   };
@@ -2972,7 +2969,6 @@ async function saveDynBasis() {
   }
 }
 
-document.getElementById('dyn-source').addEventListener('change', saveDynBasis);
 document.getElementById('dyn-price').addEventListener('change', saveDynBasis);
 document.getElementById('dyn-cancelled').addEventListener('change', saveDynBasis);
 document.getElementById('dyn-compare').addEventListener('click', () => {

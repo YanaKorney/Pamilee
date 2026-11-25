@@ -59,8 +59,7 @@ def handle_report(conn: sqlite3.Connection, cfg: Config,
     thresholds = analytics.load_thresholds(conn, cfg.thresholds)
     return analytics.build_report(conn, date_from, date_to, thresholds,
                                   price_field=_basis(conn, cfg)["field"],
-                                  include_cancelled=_basis(conn, cfg)["cancelled"],
-                                  orders_source=_basis(conn, cfg)["source"])
+                                  include_cancelled=_basis(conn, cfg)["cancelled"])
 
 
 def handle_campaign(conn: sqlite3.Connection, cfg: Config,
@@ -70,8 +69,7 @@ def handle_campaign(conn: sqlite3.Connection, cfg: Config,
     thresholds = analytics.load_thresholds(conn, cfg.thresholds)
     detail = analytics.campaign_detail(conn, advert_id, date_from, date_to, thresholds,
                                        price_field=_basis(conn, cfg)["field"],
-                                       include_cancelled=_basis(conn, cfg)["cancelled"],
-                                       orders_source=_basis(conn, cfg)["source"])
+                                       include_cancelled=_basis(conn, cfg)["cancelled"])
     if detail is None:
         return {"error": f"Кампания {advert_id} не найдена"}
     return detail
@@ -116,11 +114,6 @@ def handle_settings(conn: sqlite3.Connection, cfg: Config,
                 saved[key] = str(value)
                 db.set_setting(conn, key, str(value))
             continue
-        if key == "orders_source":
-            if str(value) in db.ORDER_SOURCES:
-                saved[key] = str(value)
-                db.set_setting(conn, key, str(value))
-            continue
         if key == "orders_cancelled":
             saved[key] = "1" if value in (True, 1, "1", "true") else "0"
             db.set_setting(conn, key, saved[key])
@@ -145,8 +138,7 @@ def handle_export(conn: sqlite3.Connection, cfg: Config,
     thresholds = analytics.load_thresholds(conn, cfg.thresholds)
     report = analytics.build_report(conn, date_from, date_to, thresholds, with_nm=False,
                                     price_field=_basis(conn, cfg)["field"],
-                                    include_cancelled=_basis(conn, cfg)["cancelled"],
-                                    orders_source=_basis(conn, cfg)["source"])
+                                    include_cancelled=_basis(conn, cfg)["cancelled"])
 
     buffer = io.StringIO()
     writer = csv.writer(buffer, delimiter=";")
@@ -346,12 +338,11 @@ def handle_dynamics(conn: sqlite3.Connection, cfg: Config,
 
     basis = _basis(conn, cfg)
     table = dynamics.table(conn, date_from, date_to, nm_id, basis["field"],
-                           basis["cancelled"], basis["source"])
+                           basis["cancelled"])
     # Чем отличались бы числа при другой основе — чтобы человек сверил
     # с кабинетом и выбрал, а не гадал.
     table["orders_basis"] = {**basis,
                              "titles": db.ORDER_PRICE_TITLES,
-                             "source_titles": db.ORDER_SOURCE_TITLES,
                              "compare": _basis_compare(conn, date_from,
                                                        date_to, nm_id)}
     names = _article_names(conn)

@@ -16,7 +16,8 @@
 которого кабинет рисует страницу «Этапы воронки продаж». Метод заказов
 отдаёт строки заказа, а воронка считает товары, и за один день это
 1273 против 1493. Спорить с кабинетом бессмысленно, поэтому здесь
-показаны его числа; счёт по строкам заказов остался переключателем.
+только его числа. По строкам заказов считаются дни, которых в воронке
+ещё нет, — и только они.
 
 Чего здесь нет и не будет, пока WB не отдаст отдельным методом:
 прибыли. Она упирается не в WB, а в себестоимость: её знает только
@@ -176,18 +177,16 @@ NOTABLE_PCT = 5.0
 def table(conn: sqlite3.Connection, date_from: str, date_to: str,
           nm_id: int | None = None,
           price_field: str = "price_with_disc",
-          include_cancelled: bool = False,
-          orders_source: str = "funnel") -> dict[str, Any]:
+          include_cancelled: bool = False) -> dict[str, Any]:
     """Таблица «показатели × дни» с трендом и прошлым периодом."""
     days = daterange(date_from, date_to)
     prev_from, prev_to = shift_window(date_from, date_to)
     prev_days = daterange(prev_from, prev_to)
 
     values = _values_by_day(conn, date_from, date_to, nm_id, price_field,
-                            include_cancelled, orders_source)
+                            include_cancelled)
     prev_values = _values_by_day(conn, prev_from, prev_to, nm_id,
-                                 price_field, include_cancelled,
-                                 orders_source)
+                                 price_field, include_cancelled)
 
     totals = _period_totals(values, days)
     prev_totals = _period_totals(prev_values, prev_days)
@@ -246,8 +245,7 @@ def table(conn: sqlite3.Connection, date_from: str, date_to: str,
         "has_funnel": has_funnel,
         "funnel_missing": funnel_missing,
         "orders_basis": {"field": price_field,
-                         "cancelled": bool(include_cancelled),
-                         "source": orders_source},
+                         "cancelled": bool(include_cancelled)},
     }
 
 
@@ -286,14 +284,13 @@ def _delta_pct(current: float, previous: float) -> float | None:
 
 def _values_by_day(conn: sqlite3.Connection, date_from: str, date_to: str,
                    nm_id: int | None, price_field: str,
-                   include_cancelled: bool = False,
-                   orders_source: str = "funnel"
+                   include_cancelled: bool = False
                    ) -> dict[str, dict[str, float]]:
     """Все показатели по каждому дню периода, включая пустые дни."""
     raw = raw_by_day(conn, date_from, date_to, nm_id)
     search = search_views_by_day(conn, date_from, date_to, nm_id)
     cabinet = _cabinet_orders(conn, date_from, date_to, nm_id, price_field,
-                              include_cancelled, orders_source)
+                              include_cancelled)
     sales = _by_nm_day(db.sales_by_day(conn, date_from, date_to), nm_id,
                        ("sales", "revenue", "for_pay", "returns"))
     stocks = _by_nm_day(db.stocks_by_day(conn, date_from, date_to), nm_id,
@@ -533,14 +530,13 @@ def _period_totals(values: dict[str, dict[str, float]],
 
 def _cabinet_orders(conn: sqlite3.Connection, date_from: str, date_to: str,
                     nm_id: int | None, price_field: str,
-                    include_cancelled: bool = False,
-                    orders_source: str = "funnel"
+                    include_cancelled: bool = False
                     ) -> dict[str, dict[str, float]]:
     """Заказы кабинета по дням: знаменатель общего ДРР и цены.
 
     Штуки и рубли берём из воронки продаж — это ровно те числа, что
-    стоят в кабинете. Метод заказов отдаёт строки заказа, а воронка
-    считает товары, поэтому раньше дашборд и кабинет не сходились.
+    стоят в кабинете, и выбора здесь нет: метод заказов отдаёт строки
+    заказа, а воронка считает товары, и сходиться они не могут.
     Цены и СПП всё равно считаются по заказам: в воронке их нет.
 
     За дни, которых в воронке ещё нет, остаётся старый счёт по
@@ -562,9 +558,8 @@ def _cabinet_orders(conn: sqlite3.Connection, date_from: str, date_to: str,
         here["orders"] += float(row["orders"] or 0)
         here["revenue"] += float(row["revenue"] or 0)
 
-    # Воронка кладётся поверх: переходы и корзины кабинета берутся из
-    # неё всегда, а штуки и рубли — если человек не переключил счёт на
-    # заказы вручную.
+    # Воронка кладётся поверх заказов: за день, который в ней есть,
+    # считает она.
     funnel: dict[str, dict[str, float]] = {}
     for row in db.funnel_by_day(conn, date_from, date_to):
         if nm_id is not None and int(row["nm_id"] or 0) != nm_id:
@@ -581,9 +576,8 @@ def _cabinet_orders(conn: sqlite3.Connection, date_from: str, date_to: str,
         here = slot(day)
         here["opens"] = got["opens"]
         here["carts"] = got["carts"]
-        if orders_source != "orders":
-            here["orders"] = got["orders"]
-            here["revenue"] = got["revenue"]
+        here["orders"] = got["orders"]
+        here["revenue"] = got["revenue"]
 
     for row in db.prices_by_day(conn, date_from, date_to,
                                 include_cancelled):

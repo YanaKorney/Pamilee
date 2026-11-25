@@ -690,8 +690,7 @@ class TestOrdersBasis(DynamicsCase):
 
         self.basis("finished_price", cancelled=True)
         again = db.order_basis(db.connect(self.path))
-        self.assertEqual(again, {"field": "finished_price", "cancelled": True,
-                                 "source": "funnel"})
+        self.assertEqual(again, {"field": "finished_price", "cancelled": True})
 
     def test_junk_is_not_saved(self):
         from wbads import api, db
@@ -785,10 +784,8 @@ class TestSalesFunnel(DynamicsCase):
             "carts": carts, "collected_at": "now"}])
         self.conn.commit()
 
-    def table(self, date_from="2026-11-01", date_to="2026-11-01",
-              source="funnel"):
-        return dynamics.table(self.conn, date_from, date_to,
-                              orders_source=source)
+    def table(self, date_from="2026-11-01", date_to="2026-11-01"):
+        return dynamics.table(self.conn, date_from, date_to)
 
     def test_cabinet_orders_come_from_the_funnel(self):
         """Главное: в дашборде то же число, что в кабинете."""
@@ -800,15 +797,19 @@ class TestSalesFunnel(DynamicsCase):
         self.assertEqual(rows["total_orders"]["days"], [10.0])
         self.assertEqual(rows["total_revenue"]["days"], [6460.0])
 
-    def test_switching_back_to_order_rows(self):
-        """Переключатель обязан возвращать старый счёт целиком."""
+    def test_the_funnel_wins_over_the_order_rows(self):
+        """Выбора нет: за день, который есть в воронке, считает она.
+
+        Строк заказов за тот же день может быть сколько угодно — они
+        считают другое, и смешивать их внутри дня нельзя."""
         self.day("2026-11-01")
-        self.order("2026-11-01", srid="a")
+        for n in range(5):
+            self.order("2026-11-01", srid=f"o{n}")
         self.funnel("2026-11-01", orders=10, orders_sum=6460.0)
 
-        rows = self.rows(self.table(source="orders"))
-        self.assertEqual(rows["total_orders"]["days"], [1.0])
-        self.assertEqual(rows["total_revenue"]["days"], [1000.0])
+        rows = self.rows(self.table())
+        self.assertEqual(rows["total_orders"]["days"], [10.0])
+        self.assertEqual(rows["total_revenue"]["days"], [6460.0])
 
     def test_days_without_the_funnel_keep_counting_by_orders(self):
         """Ноль вместо несобранного дня читался бы как провал продаж."""
@@ -889,35 +890,19 @@ class TestSalesFunnel(DynamicsCase):
         self.assertEqual(report["orders"]["orders"], 10.0)
         self.assertAlmostEqual(report["orders"]["total_drr"], 10.0, places=3)
 
-    def test_the_analytics_tab_follows_the_switch_back(self):
+    def test_the_analytics_tab_falls_back_on_days_without_the_funnel(self):
+        """За день без воронки оборот считается по заказам — иначе
+        вчерашний день выглядел бы нулевым."""
         from wbads import analytics
 
         self.day("2026-11-01", spend=646.0)
         self.order("2026-11-01", srid="a")
-        self.funnel("2026-11-01", orders=10, orders_sum=6460.0)
 
         report = analytics.build_report(self.conn, "2026-11-01",
                                         "2026-11-01",
-                                        analytics.Thresholds(), with_nm=False,
-                                        orders_source="orders")
+                                        analytics.Thresholds(), with_nm=False)
         self.assertEqual(report["orders"]["revenue"], 1000.0)
-
-    def test_the_source_setting_survives_a_restart(self):
-        from wbads import api
-        from wbads.config import Config
-
-        api.handle_settings(self.conn, Config(db_path=self.path, token="t"),
-                            {}, {"orders_source": "orders"})
-        again = db.order_basis(db.connect(self.path))
-        self.assertEqual(again["source"], "orders")
-
-    def test_a_made_up_source_is_not_saved(self):
-        from wbads import api
-        from wbads.config import Config
-
-        api.handle_settings(self.conn, Config(db_path=self.path, token="t"),
-                            {}, {"orders_source": "выдумка"})
-        self.assertEqual(db.order_basis(self.conn)["source"], "funnel")
+        self.assertEqual(report["orders"]["source"], "orders")
 
 
 class TestFunnelNormalize(unittest.TestCase):
