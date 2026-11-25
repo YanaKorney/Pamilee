@@ -266,3 +266,117 @@ class TestReportWithoutOrders(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReconcile(unittest.TestCase):
+    """«В дашборде одно, в кабинете другое» — вопрос, на который нельзя
+    отвечать догадками. Сверка считает день всеми способами сразу и
+    различает три разные беды, которые в таблице выглядят одинаково."""
+
+    def rows(self, *, duplicates=0, cancelled=0, extra_day=0):
+        out = []
+        for i in range(3):
+            out.append({"srid": f"s{i}", "date": "2026-11-24T10:00:00",
+                        "priceWithDisc": 1000, "finishedPrice": 800,
+                        "totalPrice": 1500, "isCancel": i < cancelled})
+        for i in range(duplicates):
+            out.append({"srid": "s0", "date": "2026-11-24T10:00:00",
+                        "priceWithDisc": 1000, "finishedPrice": 800,
+                        "totalPrice": 1500, "isCancel": False})
+        for i in range(extra_day):
+            out.append({"srid": f"x{i}", "date": "2026-11-23T10:00:00",
+                        "priceWithDisc": 500, "finishedPrice": 400,
+                        "totalPrice": 700, "isCancel": False})
+        return out
+
+    def base(self, orders=3, cancelled=0):
+        import tempfile
+
+        from wbads import db
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        conn = db.init_db(Path(tmp.name) / "t.db")
+        self.addCleanup(conn.close)
+        for i in range(orders):
+            conn.execute(
+                "INSERT OR REPLACE INTO orders_raw (srid, date, last_change,"
+                " nm_id, supplier_article, brand, subject, price_with_disc,"
+                " finished_price, total_price, spp, is_cancel, collected_at)"
+                " VALUES (?,'2026-11-24','2026-11-24',777,'A','B','C',"
+                "1000,800,1500,20,?,'now')", (f"s{i}", 1 if i < cancelled else 0))
+        conn.commit()
+        return conn
+
+    def test_other_days_are_dropped(self):
+        """WB изредка досылает соседние дни — в сверке они всё испортят."""
+        from wbads import reconcile
+
+        wb = reconcile.from_wb(self.rows(extra_day=2), "2026-11-24")
+        self.assertEqual(wb["rows"], 3)
+        self.assertEqual(wb["other_days"], 2)
+
+    def test_every_way_of_counting_is_shown(self):
+        from wbads import reconcile
+
+        wb = reconcile.from_wb(self.rows(cancelled=1), "2026-11-24")
+        pairs = {(v["field"], v["cancelled"]): (v["orders"], v["revenue"])
+                 for v in wb["variants"]}
+        self.assertEqual(len(pairs), 6)
+        self.assertEqual(pairs[("price_with_disc", False)], (2, 2000.0))
+        self.assertEqual(pairs[("price_with_disc", True)], (3, 3000.0))
+        self.assertEqual(pairs[("finished_price", False)], (2, 1600.0))
+
+    def test_duplicate_srid_is_named(self):
+        """Один номер заказа на несколько товаров: база хранит такую
+        строку как одну, и заказов у нас меньше, чем товаров в воронке."""
+        from wbads import reconcile
+
+        wb = reconcile.from_wb(self.rows(duplicates=2), "2026-11-24")
+        base = reconcile.from_base(self.base(orders=3), "2026-11-24")
+        self.assertEqual(wb["rows"], 5)
+        self.assertEqual(wb["unique"], 3)
+        text = " ".join(reconcile.verdict(wb, base))
+        self.assertIn("повторяющимся номером", text)
+        self.assertNotIn("не доехала", text,
+                         "повторы — не потеря при сборе, и путать их нельзя")
+
+    def test_missing_orders_are_named(self):
+        from wbads import reconcile
+
+        wb = reconcile.from_wb(self.rows(), "2026-11-24")
+        base = reconcile.from_base(self.base(orders=1), "2026-11-24")
+        text = " ".join(reconcile.verdict(wb, base))
+        self.assertIn("не доехала", text)
+        self.assertIn("SBOR-Windows.bat", text)
+
+    def test_agreement_is_said_plainly(self):
+        from wbads import reconcile
+
+        wb = reconcile.from_wb(self.rows(), "2026-11-24")
+        base = reconcile.from_base(self.base(orders=3), "2026-11-24")
+        text = " ".join(reconcile.verdict(wb, base))
+        self.assertIn("Строки сошлись", text)
+
+    def test_single_day_request_uses_the_order_date(self):
+        """Обычный сбор ходит по дате изменения, и день в нём может быть
+        собран частями. Для сверки нужен отбор по дате заказа."""
+        from wbads.wb_client import WBStatisticsClient
+
+        sent = {}
+
+        client = WBStatisticsClient.__new__(WBStatisticsClient)
+        client.token = "t"
+        client.base_url = "x"
+        client.timeout = 1
+        client.max_retries = 1
+        client.ca_bundle = ""
+        client.used_fallback_bundle = False
+        client._last_call = 0.0
+        client._wait_turn = lambda on_progress=None, cooldown=0: None
+        client._request = lambda method, path, params=None, **kw: (
+            sent.update({"path": path, "params": params}) or [])
+
+        client.orders_for_day("2026-11-24")
+        self.assertEqual(sent["path"], "/api/v1/supplier/orders")
+        self.assertEqual(sent["params"], {"dateFrom": "2026-11-24", "flag": "1"})

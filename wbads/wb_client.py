@@ -1021,6 +1021,22 @@ class WBStatisticsClient(_MinuteLimited):
         return collected
 
 
+    def orders_for_day(self, day: str,
+                       on_progress: Progress | None = None
+                       ) -> list[dict[str, Any]]:
+        """Все заказы за один календарный день, одним запросом.
+
+        Здесь flag=1: WB отбирает по дате заказа, а не по дате
+        изменения. Для сверки с кабинетом нужен именно этот отбор —
+        обычный сбор ходит по дате изменения, и день в нём может быть
+        собран частями.
+        """
+        self._wait_turn(on_progress)
+        data = self._request("GET", "/api/v1/supplier/orders",
+                             params={"dateFrom": day, "flag": "1"})
+        self._last_call = time.monotonic()
+        return data if isinstance(data, list) else []
+
     def sales(self, date_from: str, on_progress: Progress | None = None,
               max_pages: int = MAX_ORDER_PAGES) -> list[dict[str, Any]]:
         """Выкупы и возвраты, изменённые начиная с date_from.

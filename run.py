@@ -842,6 +842,93 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sverka(args: argparse.Namespace) -> int:
+    """Сверяет заказы за один день: WB, наша база и кабинет.
+
+    Отвечает на «в дашборде одно, а в кабинете другое» числами, а не
+    предположениями: спрашивает WB заказы ровно за день, считает их
+    всеми способами сразу и говорит, в чём дело.
+    """
+    from wbads import reconcile
+
+    cfg = load_config()
+    if not cfg.has_token:
+        _print("Не задан токен WB. Вставьте его: python run.py setup")
+        return 1
+
+    day = str(getattr(args, "date", "") or "").strip()
+    if not day:
+        day = (date.today() - timedelta(days=1)).isoformat()
+        if sys.stdin is not None and sys.stdin.isatty():
+            print()
+            _print(f"Какой день сверяем? Enter — вчера ({day}).")
+            typed = input("  Дата (2026-11-24): ").strip()
+            if typed:
+                day = typed
+    try:
+        date.fromisoformat(day)
+    except ValueError:
+        _print(f"Не разобрала дату «{day}». Нужен вид 2026-11-24.")
+        return 1
+
+    print()
+    _print(f"Спрашиваю у WB заказы за {day}…")
+    client = WBStatisticsClient(cfg.token, ca_bundle=cfg.ca_bundle)
+    try:
+        rows = client.orders_for_day(day, on_progress=_print)
+    except WBError as exc:
+        _print(f"Не вышло: {exc}")
+        return 1
+
+    wb = reconcile.from_wb(rows, day)
+    with db.session(cfg.db_path) as conn:
+        base = reconcile.from_base(conn, day)
+        said = reconcile.verdict(wb, base)
+
+    print()
+    _print(f"WB отдал строк за {day}: {wb['rows']}"
+           + (f", из них с разными номерами: {wb['unique']}"
+              if wb["duplicates"] else "")
+           + (f" (ещё {wb['other_days']} — за соседние дни, их не считаем)"
+              if wb["other_days"] else ""))
+    _print(f"В нашей базе за этот день: {base['rows']}")
+    print()
+    _print("Заказы за день, все способы счёта:")
+    print()
+    print(f"    {'Цена':<34} {'Отменённые':<12} {'шт':>6}   {'сумма, ₽':>14}")
+    for left, mine in zip(wb["variants"], base["variants"]):
+        shown = (mine["field"] == base["basis"]["field"]
+                 and mine["cancelled"] == base["basis"]["cancelled"])
+        mark = "→" if shown else " "
+        print(f"  {mark} {left['title']:<34} "
+              f"{'учтены' if left['cancelled'] else 'не учтены':<12} "
+              f"{left['orders']:>6}   {left['revenue']:>14,.2f}"
+              .replace(",", " "))
+    print()
+    _print("Стрелкой отмечено то, что сейчас показывает дашборд.")
+    _print("Сравните с «Этапы воронки продаж» в кабинете за этот день.")
+    print()
+    for line in said:
+        for part in _wrap(line):
+            _print(part)
+        print()
+    return 0
+
+
+def _wrap(text: str, width: int = 66) -> list[str]:
+    """Переносит длинную строку по словам: в консоли нет переноса."""
+    words, lines, current = text.split(), [], ""
+    for word in words:
+        if len(current) + len(word) + 1 > width:
+            lines.append(current)
+            current = word
+        else:
+            current = f"{current} {word}".strip()
+    if current:
+        lines.append(current)
+    return lines
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     """Короткий отчёт в консоли — когда браузер открывать не хочется."""
     cfg = load_config()
@@ -938,6 +1025,12 @@ def main(argv: list[str] | None = None) -> int:
     p_collect = sub.add_parser("collect", help="забрать данные из кабинета WB")
     p_collect.add_argument("--days", type=int, default=30, help="глубина сбора в днях (по умолчанию 30)")
     p_collect.set_defaults(func=cmd_collect)
+
+    p_sverka = sub.add_parser("sverka",
+                              help="сверить заказы за день с кабинетом WB")
+    p_sverka.add_argument("--date", default="",
+                          help="день в виде 2026-11-24 (по умолчанию вчера)")
+    p_sverka.set_defaults(func=cmd_sverka)
 
     p_serve = sub.add_parser("serve", help="открыть дашборд")
     p_serve.add_argument("--port", type=int, default=None)

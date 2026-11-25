@@ -505,7 +505,8 @@ class TestCollectionIsReachableWithoutTheTerminal(unittest.TestCase):
 
     def test_launchers_exist_for_both_systems(self):
         for name in ("SBOR-Windows.bat", "SBOR-Mac.command",
-                     "DANNYE-Windows.bat", "DANNYE-Mac.command"):
+                     "DANNYE-Windows.bat", "DANNYE-Mac.command",
+                     "SVERKA-Windows.bat", "SVERKA-Mac.command"):
             self.assertTrue((self.root / name).exists(), f"нет файла {name}")
 
     def test_data_launcher_answers_where_the_journal_is(self):
