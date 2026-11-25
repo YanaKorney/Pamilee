@@ -7,15 +7,20 @@
 к большему: взгляд находит аномалию до того, как человек прочтёт числа.
 
 Строки появляются по данным: зоны показа — когда собрана статистика
-поиска, заказы кабинета и цены — когда собраны заказы, выкупы — когда
-собраны продажи, остатки — когда у токена есть категория «Аналитика».
+поиска, цены — когда собраны заказы, выкупы — когда собраны продажи,
+остатки и воронка кабинета — когда у токена есть категория «Аналитика».
 Пустая строка с нулями сказала бы «этого не было», хотя правда в том,
 что мы не спрашивали, — поэтому её просто нет.
 
+«Заказы кабинета» берутся из воронки продаж — из того самого метода, из
+которого кабинет рисует страницу «Этапы воронки продаж». Метод заказов
+отдаёт строки заказа, а воронка считает товары, и за один день это
+1273 против 1493. Спорить с кабинетом бессмысленно, поэтому здесь
+показаны его числа; счёт по строкам заказов остался переключателем.
+
 Чего здесь нет и не будет, пока WB не отдаст отдельным методом:
-контент-рейтинга карточки и прибыли. Прибыль упирается не в WB, а в
-себестоимость: её знает только продавец, и без неё любое число будет
-выдумкой.
+прибыли. Она упирается не в WB, а в себестоимость: её знает только
+продавец, и без неё любое число будет выдумкой.
 """
 
 from __future__ import annotations
@@ -47,6 +52,13 @@ GROUPS: list[dict[str, Any]] = [
              "good": "up"},
             {"key": "orders", "title": "Заказы с рекламы, шт", "unit": "шт",
              "good": "up"},
+            {"key": "opens", "title": "Переходы в карточку, весь кабинет",
+             "unit": "шт", "good": "up", "funnel": True},
+            {"key": "carts", "title": "Положили в корзину, весь кабинет",
+             "unit": "шт", "good": "up", "funnel": True},
+            {"key": "cr_cart_cabinet",
+             "title": "Карточка → корзина, весь кабинет", "unit": "%",
+             "good": "up", "funnel": True},
             {"key": "cr_order", "title": "Конверсия в заказ", "unit": "%",
              "good": "up"},
         ],
@@ -116,11 +128,11 @@ GROUPS: list[dict[str, Any]] = [
         "title": "Цена и СПП",
         "rows": [
             {"key": "price_before_spp", "title": "Цена до СПП", "unit": "₽",
-             "good": None, "orders": True},
+             "good": None, "prices": True},
             {"key": "price_with_spp", "title": "Цена с СПП", "unit": "₽",
-             "good": None, "orders": True},
+             "good": None, "prices": True},
             {"key": "spp_pct", "title": "СПП, %", "unit": "%",
-             "good": None, "orders": True},
+             "good": None, "prices": True},
         ],
     },
     {
@@ -144,7 +156,8 @@ GROUPS: list[dict[str, Any]] = [
 # итог периода у них считается из сумм, а не усреднением дней.
 SUMMABLE = set(RAW_KEYS) | {"views_search", "views_other", "total_orders",
                             "total_revenue", "buyouts", "buyout_revenue",
-                            "for_pay", "returns", "feedback_count"}
+                            "for_pay", "returns", "feedback_count",
+                            "opens", "carts"}
 
 # Складываются тоже, но строками не показываются: из них считаются
 # средние цены за период. Складывать сами средние нельзя — день с одним
@@ -163,16 +176,18 @@ NOTABLE_PCT = 5.0
 def table(conn: sqlite3.Connection, date_from: str, date_to: str,
           nm_id: int | None = None,
           price_field: str = "price_with_disc",
-          include_cancelled: bool = False) -> dict[str, Any]:
+          include_cancelled: bool = False,
+          orders_source: str = "funnel") -> dict[str, Any]:
     """Таблица «показатели × дни» с трендом и прошлым периодом."""
     days = daterange(date_from, date_to)
     prev_from, prev_to = shift_window(date_from, date_to)
     prev_days = daterange(prev_from, prev_to)
 
     values = _values_by_day(conn, date_from, date_to, nm_id, price_field,
-                            include_cancelled)
+                            include_cancelled, orders_source)
     prev_values = _values_by_day(conn, prev_from, prev_to, nm_id,
-                                 price_field, include_cancelled)
+                                 price_field, include_cancelled,
+                                 orders_source)
 
     totals = _period_totals(values, days)
     prev_totals = _period_totals(prev_values, prev_days)
@@ -182,6 +197,13 @@ def table(conn: sqlite3.Connection, date_from: str, date_to: str,
     has_sales = db.has_sales(conn)
     has_stocks = db.has_stocks(conn)
     has_ratings = db.has_ratings(conn)
+    has_funnel = db.has_funnel(conn)
+
+    # Дни периода, за которые воронка собрана. Если собрана не вся —
+    # человек должен это видеть, иначе недостающий день выглядит как
+    # провал продаж, а не как несобранные данные.
+    funnel_days = sorted(db.funnel_days(conn, date_from, date_to))
+    funnel_missing = [day for day in days if day not in set(funnel_days)]
 
     groups = []
     for group in GROUPS:
@@ -189,13 +211,19 @@ def table(conn: sqlite3.Connection, date_from: str, date_to: str,
         for spec in group["rows"]:
             if spec.get("zone") and not has_zones:
                 continue
-            if spec.get("orders") and not has_orders:
+            # Заказы кабинета есть и у воронки: прятать их, пока нет
+            # строк заказов, значило бы прятать то, что уже собрано.
+            if spec.get("orders") and not (has_orders or has_funnel):
+                continue
+            if spec.get("prices") and not has_orders:
                 continue
             if spec.get("sales") and not has_sales:
                 continue
             if spec.get("stocks") and not has_stocks:
                 continue
             if spec.get("rating") and not has_ratings:
+                continue
+            if spec.get("funnel") and not has_funnel:
                 continue
             rows.append(_row(spec, values, days, prev_values, prev_days,
                              totals, prev_totals))
@@ -215,8 +243,11 @@ def table(conn: sqlite3.Connection, date_from: str, date_to: str,
         "has_sales": has_sales,
         "has_stocks": has_stocks,
         "has_ratings": has_ratings,
+        "has_funnel": has_funnel,
+        "funnel_missing": funnel_missing,
         "orders_basis": {"field": price_field,
-                         "cancelled": bool(include_cancelled)},
+                         "cancelled": bool(include_cancelled),
+                         "source": orders_source},
     }
 
 
@@ -232,7 +263,8 @@ def _row(spec: dict[str, Any], values: dict[str, dict[str, float]],
     prev_total = float(prev_totals.get(key) or 0)
 
     return {
-        **{k: v for k, v in spec.items() if k != "orders"},
+        **{k: v for k, v in spec.items()
+           if k not in ("orders", "funnel", "prices")},
         "days": series,
         "prev_days": prev_series,
         "total": round(total, 4),
@@ -254,13 +286,14 @@ def _delta_pct(current: float, previous: float) -> float | None:
 
 def _values_by_day(conn: sqlite3.Connection, date_from: str, date_to: str,
                    nm_id: int | None, price_field: str,
-                   include_cancelled: bool = False
+                   include_cancelled: bool = False,
+                   orders_source: str = "funnel"
                    ) -> dict[str, dict[str, float]]:
     """Все показатели по каждому дню периода, включая пустые дни."""
     raw = raw_by_day(conn, date_from, date_to, nm_id)
     search = search_views_by_day(conn, date_from, date_to, nm_id)
     cabinet = _cabinet_orders(conn, date_from, date_to, nm_id, price_field,
-                              include_cancelled)
+                              include_cancelled, orders_source)
     sales = _by_nm_day(db.sales_by_day(conn, date_from, date_to), nm_id,
                        ("sales", "revenue", "for_pay", "returns"))
     stocks = _by_nm_day(db.stocks_by_day(conn, date_from, date_to), nm_id,
@@ -399,6 +432,14 @@ def _derive_day(totals: dict[str, float], search_views: float,
     values["total_revenue"] = total_revenue
     values["total_drr"] = safe_div(spend, total_revenue) * 100
 
+    # Воронка кабинета: сколько раз открыли карточку и сколько раз
+    # положили в корзину — по всем источникам, не только по рекламе.
+    opens = float(cabinet.get("opens") or 0)
+    carts = float(cabinet.get("carts") or 0)
+    values["opens"] = opens
+    values["carts"] = carts
+    values["cr_cart_cabinet"] = safe_div(carts, opens) * 100
+
     # Цены — средние по заказам дня: до скидки постоянного покупателя и
     # после неё. Отдельного метода «какая сегодня СПП» у WB нет, но
     # разница этих двух цен и есть СПП, причём та, что видел покупатель.
@@ -462,7 +503,8 @@ def _period_totals(values: dict[str, dict[str, float]],
         {"orders": sums["total_orders"], "revenue": sums["total_revenue"],
          "price_orders": sums["price_orders"],
          "before_spp": sums["before_spp"], "with_spp": sums["with_spp"],
-         "spp_sum": sums["spp_sum"]},
+         "spp_sum": sums["spp_sum"], "opens": sums["opens"],
+         "carts": sums["carts"]},
         {"sales": sums["buyouts"], "revenue": sums["buyout_revenue"],
          "for_pay": sums["for_pay"], "returns": sums["returns"]})
     totals["views_search"] = sums["views_search"]
@@ -491,15 +533,26 @@ def _period_totals(values: dict[str, dict[str, float]],
 
 def _cabinet_orders(conn: sqlite3.Connection, date_from: str, date_to: str,
                     nm_id: int | None, price_field: str,
-                    include_cancelled: bool = False
+                    include_cancelled: bool = False,
+                    orders_source: str = "funnel"
                     ) -> dict[str, dict[str, float]]:
-    """Заказы кабинета по дням: знаменатель общего ДРР и цены."""
+    """Заказы кабинета по дням: знаменатель общего ДРР и цены.
+
+    Штуки и рубли берём из воронки продаж — это ровно те числа, что
+    стоят в кабинете. Метод заказов отдаёт строки заказа, а воронка
+    считает товары, поэтому раньше дашборд и кабинет не сходились.
+    Цены и СПП всё равно считаются по заказам: в воронке их нет.
+
+    За дни, которых в воронке ещё нет, остаётся старый счёт по
+    заказам: ноль вместо данных читался бы как провал продаж.
+    """
     out: dict[str, dict[str, float]] = {}
 
     def slot(day: str) -> dict[str, float]:
         return out.setdefault(day, {"orders": 0.0, "revenue": 0.0,
                                     "price_orders": 0.0, "before_spp": 0.0,
-                                    "with_spp": 0.0, "spp_sum": 0.0})
+                                    "with_spp": 0.0, "spp_sum": 0.0,
+                                    "opens": 0.0, "carts": 0.0})
 
     for row in db.orders_by_nm(conn, date_from, date_to, price_field,
                                include_cancelled):
@@ -508,6 +561,29 @@ def _cabinet_orders(conn: sqlite3.Connection, date_from: str, date_to: str,
         here = slot(str(row["date"])[:10])
         here["orders"] += float(row["orders"] or 0)
         here["revenue"] += float(row["revenue"] or 0)
+
+    # Воронка кладётся поверх: переходы и корзины кабинета берутся из
+    # неё всегда, а штуки и рубли — если человек не переключил счёт на
+    # заказы вручную.
+    funnel: dict[str, dict[str, float]] = {}
+    for row in db.funnel_by_day(conn, date_from, date_to):
+        if nm_id is not None and int(row["nm_id"] or 0) != nm_id:
+            continue
+        day = str(row["date"])[:10]
+        here = funnel.setdefault(day, {"orders": 0.0, "revenue": 0.0,
+                                       "opens": 0.0, "carts": 0.0})
+        here["orders"] += float(row["orders"] or 0)
+        here["revenue"] += float(row["orders_sum"] or 0)
+        here["opens"] += float(row["opens"] or 0)
+        here["carts"] += float(row["carts"] or 0)
+
+    for day, got in funnel.items():
+        here = slot(day)
+        here["opens"] = got["opens"]
+        here["carts"] = got["carts"]
+        if orders_source != "orders":
+            here["orders"] = got["orders"]
+            here["revenue"] = got["revenue"]
 
     for row in db.prices_by_day(conn, date_from, date_to,
                                 include_cancelled):

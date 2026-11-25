@@ -209,6 +209,27 @@ CREATE TABLE IF NOT EXISTS item_rating_daily (
 );
 CREATE INDEX IF NOT EXISTS idx_rating_date ON item_rating_daily(date);
 
+-- Воронка продаж: то, что кабинет показывает на странице «Этапы
+-- воронки продаж». Метод заказов и воронка считают разное — в заказах
+-- строка на позицию заказа, в воронке товары, — поэтому числа в
+-- дашборде и в кабинете расходились. Храним воронку отдельно и берём
+-- оттуда, когда человек просит «как в кабинете».
+CREATE TABLE IF NOT EXISTS funnel_daily (
+    date         TEXT    NOT NULL,         -- день, YYYY-MM-DD
+    nm_id        INTEGER NOT NULL,
+    orders       INTEGER NOT NULL DEFAULT 0,  -- заказали товаров, шт
+    orders_sum   REAL    NOT NULL DEFAULT 0,  -- заказали на сумму, ₽
+    buyouts      INTEGER NOT NULL DEFAULT 0,  -- выкупили, шт
+    buyouts_sum  REAL    NOT NULL DEFAULT 0,
+    cancels      INTEGER NOT NULL DEFAULT 0,  -- отменили, шт
+    cancels_sum  REAL    NOT NULL DEFAULT 0,
+    opens        INTEGER NOT NULL DEFAULT 0,  -- переходы в карточку
+    carts        INTEGER NOT NULL DEFAULT 0,  -- положили в корзину
+    collected_at TEXT    NOT NULL,
+    PRIMARY KEY (date, nm_id)
+);
+CREATE INDEX IF NOT EXISTS idx_funnel_date ON funnel_daily(date);
+
 -- Пороги и настройки, изменённые из дашборда
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
@@ -413,6 +434,13 @@ ORDER_PRICE_TITLES = {
 }
 
 
+ORDER_SOURCES = ("funnel", "orders")
+ORDER_SOURCE_TITLES = {
+    "funnel": "как в кабинете — воронка продаж",
+    "orders": "по заказам (строки заказов)",
+}
+
+
 def order_basis(conn: sqlite3.Connection,
                 default_field: str = "price_with_disc") -> dict[str, Any]:
     """Какой ценой и с отменами ли считать заказы кабинета."""
@@ -420,9 +448,17 @@ def order_basis(conn: sqlite3.Connection,
     field = str(stored.get("order_price") or default_field)
     if field not in ORDER_PRICE_FIELDS:
         field = "price_with_disc"
+    # Откуда брать штуки и рубли заказов кабинета. По умолчанию — из
+    # воронки продаж: это те же числа, что человек видит в кабинете, и
+    # спорить с ними бессмысленно. Метод заказов считает строки
+    # заказа, а воронка — товары, поэтому они и расходились.
+    source = str(stored.get("orders_source") or "funnel")
+    if source not in ORDER_SOURCES:
+        source = "funnel"
     return {
         "field": field,
         "cancelled": str(stored.get("orders_cancelled") or "0") == "1",
+        "source": source,
     }
 
 
@@ -616,6 +652,61 @@ def ratings_by_day(conn: sqlite3.Connection, date_from: str, date_to: str
     return list(conn.execute("""
         SELECT date, nm_id, rating, feedback_rating, feedback_count
         FROM item_rating_daily
+        WHERE date BETWEEN ? AND ?
+    """, (date_from, date_to)))
+
+
+FUNNEL_COLUMNS = ("orders", "orders_sum", "buyouts", "buyouts_sum",
+                  "cancels", "cancels_sum", "opens", "carts")
+
+
+def upsert_funnel(conn: sqlite3.Connection, rows: Iterable[dict]) -> int:
+    """Воронка за день. Повторный сбор того же дня заменяет запись.
+
+    Переписывать не страшно и нужно: WB досчитывает воронку раз в два
+    часа, и вечером за сегодня стоит одно число, а завтра утром за
+    вчера — другое, уже окончательное.
+    """
+    sets = ",\n            ".join(
+        f"{name}=excluded.{name}" for name in FUNNEL_COLUMNS)
+    sql = f"""
+        INSERT INTO funnel_daily (date, nm_id, {", ".join(FUNNEL_COLUMNS)},
+                                  collected_at)
+        VALUES (:date, :nm_id, {", ".join(f":{n}" for n in FUNNEL_COLUMNS)},
+                :collected_at)
+        ON CONFLICT(date, nm_id) DO UPDATE SET
+            {sets},
+            collected_at=excluded.collected_at
+    """
+    rows = list(rows)
+    conn.executemany(sql, rows)
+    return len(rows)
+
+
+def has_funnel(conn: sqlite3.Connection) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM funnel_daily LIMIT 1").fetchone() is not None
+
+
+def funnel_days(conn: sqlite3.Connection, date_from: str, date_to: str
+                ) -> set[str]:
+    """Дни, за которые воронка уже лежит в базе.
+
+    Нужно сбору: спрашивать воронку можно три раза в минуту, и каждый
+    день — отдельный запрос. Переспрашивать то, что уже собрано, значит
+    тратить минуты на пустом месте.
+    """
+    return {row["date"] for row in conn.execute(
+        "SELECT DISTINCT date FROM funnel_daily WHERE date BETWEEN ? AND ?",
+        (date_from, date_to))}
+
+
+def funnel_by_day(conn: sqlite3.Connection, date_from: str, date_to: str
+                  ) -> list[sqlite3.Row]:
+    """Воронка по дням и артикулам — как её считает сам WB."""
+    return list(conn.execute(f"""
+        SELECT date, nm_id, {", ".join(FUNNEL_COLUMNS)}
+        FROM funnel_daily
         WHERE date BETWEEN ? AND ?
     """, (date_from, date_to)))
 

@@ -355,6 +355,12 @@ def _missing_parts(conn) -> list[str]:
         # Зоны собираются отдельным методом и только с версии 2026-10-11.
         # Проверяем после товаров: без них зон не бывает в принципе.
         missing.append("показов по зонам (поиск и прочее)")
+    elif (db.has_stocks(conn) and not db.has_funnel(conn)):
+        # Воронка собирается с версии 2026-11-25 той же категорией
+        # «Аналитика», что и остатки: есть остатки, нет воронки —
+        # данные собраны прежней версией. Без неё «Заказы кабинета»
+        # считаются по строкам заказов и с кабинетом не сходятся.
+        missing.append("воронки продаж (из неё берутся заказы кабинета)")
     elif (db.has_orders(conn) and not db.has_sales(conn)):
         # Выкупы собираются с версии 2026-11-13 тем же токеном, что и
         # заказы: если заказы есть, а выкупов нет — данные старые.
@@ -421,6 +427,15 @@ def cmd_collect(args: argparse.Namespace) -> int:
     if result.get("stocks"):
         _print(f"Остатки собраны по {result['stocks']} товарам — "
                "в сводке по дням появятся строки «Остатки».")
+    if result.get("funnel_days"):
+        _print(f"Воронка продаж собрана за {result['funnel_days']} "
+               f"{plural(result['funnel_days'], 'день', 'дня', 'дней')} — "
+               "«Заказы кабинета» теперь те же, что в кабинете WB.")
+        if result.get("funnel_left"):
+            _print(f"Ещё {result['funnel_left']} "
+                   f"{plural(result['funnel_left'], 'день', 'дня', 'дней')} "
+                   "воронки доберётся следующими запусками сбора: WB отдаёт "
+                   "её по одному дню за запрос.")
     if result.get("orders"):
         _print(f"Заказов кабинета: {result['orders']} — общий ДРР будет считаться.")
     else:
@@ -724,7 +739,8 @@ def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
     # прежних токенов нет, и это не поломка: категории задаются при
     # создании токена и потом не меняются.
     print()
-    _print("Проверяем доступ к остаткам и оценке товара (категория «Аналитика»)…")
+    _print("Проверяем доступ к остаткам, оценке товара и воронке продаж")
+    _print("(категория «Аналитика»)…")
     print()
     stock_client = WBAnalyticsClient(cfg.token, ca_bundle=cfg.ca_bundle)
     stocks_ok = probe("Остатки на складах",
@@ -737,9 +753,18 @@ def cmd_check(args: argparse.Namespace, quiet_tail: bool = False) -> int:
                           date.today().isoformat(), max_pages=1))
     if rating_ok is None:
         failures.remove("Оценка товара")
-    if stocks_ok is None or rating_ok is None:
-        _print("Остатки и оценка товара собираться не будут — "
-               "всё остальное будет.")
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    funnel_ok = probe("Воронка продаж",
+                      "POST /api/analytics/v3/sales-funnel/products",
+                      lambda: stock_client.sales_funnel(yesterday, yesterday,
+                                                        max_pages=1))
+    if funnel_ok is None:
+        failures.remove("Воронка продаж")
+    if stocks_ok is None or rating_ok is None or funnel_ok is None:
+        _print("Остатки, оценка товара и воронка продаж собираться не "
+               "будут — всё остальное будет.")
+        _print("Без воронки «Заказы кабинета» считаются по строкам заказов")
+        _print("и с кабинетом не сходятся: воронка считает товары.")
         _print("Чтобы они появились, выпустите в кабинете новый токен")
         _print("с категориями «Продвижение», «Статистика» и «Аналитика»")
         _print("и вставьте его: python run.py setup")
@@ -906,8 +931,52 @@ def cmd_sverka(args: argparse.Namespace) -> int:
               .replace(",", " "))
     print()
     _print("Стрелкой отмечено то, что сейчас показывает дашборд.")
-    _print("Сравните с «Этапы воронки продаж» в кабинете за этот день.")
     print()
+
+    # Главное сравнение: у воронки есть свой метод, и спорить с
+    # кабинетом бессмысленно — надо спросить его же числа.
+    _print("Спрашиваю воронку продаж тем же методом, что рисует кабинет…")
+    funnel = None
+    try:
+        a_client = WBAnalyticsClient(cfg.token, ca_bundle=cfg.ca_bundle)
+        funnel = reconcile.funnel_totals(
+            a_client.sales_funnel(day, day, on_progress=_print))
+    except WBError as exc:
+        print()
+        _print(f"Воронку спросить не вышло: {exc}")
+        if "401" in str(exc) or "403" in str(exc) or "доступ" in str(exc):
+            for part in _wrap(
+                    "У токена нет категории «Аналитика» — именно она даёт "
+                    "воронку продаж. Создайте в кабинете новый токен с "
+                    "галочками «Продвижение», «Статистика» и «Аналитика» и "
+                    "вставьте его: python run.py setup"):
+                _print(part)
+
+    if funnel:
+        print()
+        _print("Воронка продаж (её собственный метод WB):")
+        print()
+        print(f"    {'Заказали товаров':<34} "
+              f"{funnel['orders']:>6.0f}   {funnel['orders_sum']:>14,.2f}"
+              .replace(",", " "))
+        print(f"    {'Выкупили':<34} "
+              f"{funnel['buyouts']:>6.0f}   {funnel['buyouts_sum']:>14,.2f}"
+              .replace(",", " "))
+        print(f"    {'Отменили':<34} "
+              f"{funnel['cancels']:>6.0f}   {funnel['cancels_sum']:>14,.2f}"
+              .replace(",", " "))
+        print(f"    {'Переходы в карточку':<34} {funnel['opens']:>6.0f}")
+        print(f"    {'Положили в корзину':<34} {funnel['carts']:>6.0f}")
+        print()
+        for part in _wrap(
+                "Это те самые числа, что стоят в кабинете на странице "
+                "«Этапы воронки продаж». Воронка считает товары, а метод "
+                "заказов — строки заказа, поэтому они и расходились: "
+                "совпадения между таблицами выше и этой строкой ждать не "
+                "надо."):
+            _print(part)
+        print()
+
     for line in said:
         for part in _wrap(line):
             _print(part)
@@ -956,7 +1025,9 @@ def cmd_report(args: argparse.Namespace) -> int:
     orders = report.get("orders") or {}
     if orders.get("available"):
         print()
-        print(f"  Весь оборот по заказам {money(orders['revenue']):>14}"
+        label = ("Весь оборот по воронке" if orders.get("source") == "funnel"
+                 else "Весь оборот по заказам")
+        print(f"  {label:<21} {money(orders['revenue']):>14}"
               f"   ({orders['orders']:.0f} заказов, отменено {orders['cancels']:.0f})")
         print(f"  ДРР общий              {pct(orders['total_drr']):>14}"
               f"   реклама даёт {pct(orders['ad_share'], 0)} оборота")

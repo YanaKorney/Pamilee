@@ -59,7 +59,8 @@ def handle_report(conn: sqlite3.Connection, cfg: Config,
     thresholds = analytics.load_thresholds(conn, cfg.thresholds)
     return analytics.build_report(conn, date_from, date_to, thresholds,
                                   price_field=_basis(conn, cfg)["field"],
-                                  include_cancelled=_basis(conn, cfg)["cancelled"])
+                                  include_cancelled=_basis(conn, cfg)["cancelled"],
+                                  orders_source=_basis(conn, cfg)["source"])
 
 
 def handle_campaign(conn: sqlite3.Connection, cfg: Config,
@@ -69,7 +70,8 @@ def handle_campaign(conn: sqlite3.Connection, cfg: Config,
     thresholds = analytics.load_thresholds(conn, cfg.thresholds)
     detail = analytics.campaign_detail(conn, advert_id, date_from, date_to, thresholds,
                                        price_field=_basis(conn, cfg)["field"],
-                                       include_cancelled=_basis(conn, cfg)["cancelled"])
+                                       include_cancelled=_basis(conn, cfg)["cancelled"],
+                                       orders_source=_basis(conn, cfg)["source"])
     if detail is None:
         return {"error": f"Кампания {advert_id} не найдена"}
     return detail
@@ -86,6 +88,7 @@ def handle_meta(conn: sqlite3.Connection, cfg: Config,
         "program_folder": str(ROOT),
         "has_token": cfg.has_token,
         "has_orders": db.has_orders(conn),
+        "has_funnel": db.has_funnel(conn),
         "orders_from": orders_lo,
         "orders_to": orders_hi,
         "has_data": bool(lo),
@@ -113,6 +116,11 @@ def handle_settings(conn: sqlite3.Connection, cfg: Config,
                 saved[key] = str(value)
                 db.set_setting(conn, key, str(value))
             continue
+        if key == "orders_source":
+            if str(value) in db.ORDER_SOURCES:
+                saved[key] = str(value)
+                db.set_setting(conn, key, str(value))
+            continue
         if key == "orders_cancelled":
             saved[key] = "1" if value in (True, 1, "1", "true") else "0"
             db.set_setting(conn, key, saved[key])
@@ -137,7 +145,8 @@ def handle_export(conn: sqlite3.Connection, cfg: Config,
     thresholds = analytics.load_thresholds(conn, cfg.thresholds)
     report = analytics.build_report(conn, date_from, date_to, thresholds, with_nm=False,
                                     price_field=_basis(conn, cfg)["field"],
-                                    include_cancelled=_basis(conn, cfg)["cancelled"])
+                                    include_cancelled=_basis(conn, cfg)["cancelled"],
+                                    orders_source=_basis(conn, cfg)["source"])
 
     buffer = io.StringIO()
     writer = csv.writer(buffer, delimiter=";")
@@ -302,6 +311,18 @@ def _basis_compare(conn: sqlite3.Connection, date_from: str, date_to: str,
     доходит до десяти процентов.
     """
     out: dict[str, Any] = {"variants": []}
+
+    # Воронка — первой строкой: это и есть кабинет, остальные варианты
+    # лишь показывают, насколько метод заказов считает иначе.
+    rows = db.funnel_by_day(conn, date_from, date_to)
+    if nm_id is not None:
+        rows = [r for r in rows if int(r["nm_id"] or 0) == nm_id]
+    if rows:
+        out["funnel"] = {
+            "orders": sum(float(r["orders"] or 0) for r in rows),
+            "revenue": round(sum(float(r["orders_sum"] or 0) for r in rows), 2),
+        }
+
     for cancelled in (False, True):
         for field in db.ORDER_PRICE_FIELDS:
             rows = db.orders_by_nm(conn, date_from, date_to, field, cancelled)
@@ -325,11 +346,12 @@ def handle_dynamics(conn: sqlite3.Connection, cfg: Config,
 
     basis = _basis(conn, cfg)
     table = dynamics.table(conn, date_from, date_to, nm_id, basis["field"],
-                           basis["cancelled"])
+                           basis["cancelled"], basis["source"])
     # Чем отличались бы числа при другой основе — чтобы человек сверил
     # с кабинетом и выбрал, а не гадал.
     table["orders_basis"] = {**basis,
                              "titles": db.ORDER_PRICE_TITLES,
+                             "source_titles": db.ORDER_SOURCE_TITLES,
                              "compare": _basis_compare(conn, date_from,
                                                        date_to, nm_id)}
     names = _article_names(conn)

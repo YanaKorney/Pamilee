@@ -99,6 +99,11 @@ MAX_STOCK_PAGES = 8
 RATING_PAGE = 1000
 MAX_RATING_PAGES = 6
 
+# Воронка продаж: тот же лимит категории «Аналитика», до тысячи
+# карточек в ответе.
+FUNNEL_PAGE = 1000
+MAX_FUNNEL_PAGES = 6
+
 Progress = Callable[[str], None]
 
 
@@ -1092,6 +1097,46 @@ class WBAnalyticsClient(_MinuteLimited):
 
     base_url = ANALYTICS_URL
     scope = "Аналитика"
+
+    def sales_funnel(self, start: str, end: str,
+                     on_progress: Progress | None = None,
+                     max_pages: int = MAX_FUNNEL_PAGES
+                     ) -> list[dict[str, Any]]:
+        """Воронка продаж за период — ровно то, что рисует кабинет.
+
+        Метод заказов и воронка считают разное: в заказах строка на
+        позицию заказа, в воронке — товары, как их видит продавец на
+        странице «Этапы воронки продаж». Сверять одно с другим
+        бессмысленно, поэтому воронку спрашиваем её же методом.
+        """
+        collected: list[dict[str, Any]] = []
+        offset = 0
+
+        for page in range(max_pages):
+            self._wait_turn(on_progress, cooldown=STOCKS_COOLDOWN)
+            payload = {
+                "selectedPeriod": {"start": start, "end": end},
+                "orderBy": {"field": "orderCount", "mode": "desc"},
+                "limit": FUNNEL_PAGE,
+                "offset": offset,
+            }
+            data = self._request("POST",
+                                 "/api/analytics/v3/sales-funnel/products",
+                                 payload=payload, on_progress=on_progress)
+            self._last_call = time.monotonic()
+
+            items = (((data or {}).get("data") or {}).get("products")) or []
+            collected.extend(items)
+            if on_progress:
+                on_progress(f"Воронка продаж: карточек {len(collected)}")
+            if len(items) < FUNNEL_PAGE:
+                break
+            offset += len(items)
+        else:
+            if on_progress:
+                on_progress("Воронка: взял первые страницы, остальное "
+                            "доберётся следующим сбором.")
+        return collected
 
     def item_rating(self, day: str, on_progress: Progress | None = None,
                     max_pages: int = MAX_RATING_PAGES) -> list[dict[str, Any]]:

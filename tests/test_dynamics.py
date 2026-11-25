@@ -690,7 +690,8 @@ class TestOrdersBasis(DynamicsCase):
 
         self.basis("finished_price", cancelled=True)
         again = db.order_basis(db.connect(self.path))
-        self.assertEqual(again, {"field": "finished_price", "cancelled": True})
+        self.assertEqual(again, {"field": "finished_price", "cancelled": True,
+                                 "source": "funnel"})
 
     def test_junk_is_not_saved(self):
         from wbads import api, db
@@ -758,3 +759,263 @@ class TestBasisControls(unittest.TestCase):
     def test_analytics_reloads_after_the_change(self):
         """Общий ДРР на первой вкладке считается из тех же заказов."""
         self.assertIn("if (state.report) load();", self.js)
+
+
+class TestSalesFunnel(DynamicsCase):
+    """Воронка продаж — единственный источник, который сходится с
+    кабинетом. Метод заказов считает строки заказа, воронка — товары, и
+    в этом была вся разница: 1273 строки против 1493 товаров за один и
+    тот же день. Поэтому «Заказы кабинета» берутся из воронки."""
+
+    def order(self, date, *, srid="o1", nm_id=777):
+        self.conn.execute(
+            "INSERT OR REPLACE INTO orders_raw (srid, date, last_change,"
+            " nm_id, supplier_article, brand, subject, price_with_disc,"
+            " finished_price, total_price, spp, is_cancel, collected_at)"
+            " VALUES (?,?,?,?,'A','B','C',1000,800,1500,20,0,'now')",
+            (srid, date, date, nm_id))
+        self.conn.commit()
+
+    def funnel(self, date, *, nm_id=777, orders=10, orders_sum=6460.0,
+               opens=500, carts=80):
+        db.upsert_funnel(self.conn, [{
+            "date": date, "nm_id": nm_id, "orders": orders,
+            "orders_sum": orders_sum, "buyouts": 4, "buyouts_sum": 2500.0,
+            "cancels": 1, "cancels_sum": 646.0, "opens": opens,
+            "carts": carts, "collected_at": "now"}])
+        self.conn.commit()
+
+    def table(self, date_from="2026-11-01", date_to="2026-11-01",
+              source="funnel"):
+        return dynamics.table(self.conn, date_from, date_to,
+                              orders_source=source)
+
+    def test_cabinet_orders_come_from_the_funnel(self):
+        """Главное: в дашборде то же число, что в кабинете."""
+        self.day("2026-11-01")
+        self.order("2026-11-01", srid="a")
+        self.funnel("2026-11-01", orders=10, orders_sum=6460.0)
+
+        rows = self.rows(self.table())
+        self.assertEqual(rows["total_orders"]["days"], [10.0])
+        self.assertEqual(rows["total_revenue"]["days"], [6460.0])
+
+    def test_switching_back_to_order_rows(self):
+        """Переключатель обязан возвращать старый счёт целиком."""
+        self.day("2026-11-01")
+        self.order("2026-11-01", srid="a")
+        self.funnel("2026-11-01", orders=10, orders_sum=6460.0)
+
+        rows = self.rows(self.table(source="orders"))
+        self.assertEqual(rows["total_orders"]["days"], [1.0])
+        self.assertEqual(rows["total_revenue"]["days"], [1000.0])
+
+    def test_days_without_the_funnel_keep_counting_by_orders(self):
+        """Ноль вместо несобранного дня читался бы как провал продаж."""
+        for day in ("2026-11-01", "2026-11-02"):
+            self.day(day)
+            self.order(day, srid=f"o{day}")
+        self.funnel("2026-11-02", orders=10, orders_sum=6460.0)
+
+        table = self.table("2026-11-01", "2026-11-02")
+        rows = self.rows(table)
+        self.assertEqual(rows["total_orders"]["days"], [1.0, 10.0])
+        self.assertEqual(table["funnel_missing"], ["2026-11-01"])
+
+    def test_the_general_drr_follows_the_funnel(self):
+        """Общий ДРР считается от той же выручки, что показана рядом."""
+        self.day("2026-11-01", spend=646.0)
+        self.order("2026-11-01", srid="a")
+        self.funnel("2026-11-01", orders=10, orders_sum=6460.0)
+
+        rows = self.rows(self.table())
+        self.assertAlmostEqual(rows["total_drr"]["days"][0], 10.0, places=3)
+
+    def test_the_cabinet_funnel_rows_appear(self):
+        """Переходы и корзины кабинета — то, чего в рекламе не видно."""
+        self.day("2026-11-01")
+        self.funnel("2026-11-01", opens=500, carts=80)
+
+        rows = self.rows(self.table())
+        self.assertEqual(rows["opens"]["days"], [500.0])
+        self.assertEqual(rows["carts"]["days"], [80.0])
+        self.assertAlmostEqual(rows["cr_cart_cabinet"]["days"][0], 16.0)
+
+    def test_the_funnel_rows_are_hidden_without_data(self):
+        self.day("2026-11-01")
+        self.assertNotIn("opens", self.rows(self.table()))
+
+    def test_a_period_total_adds_the_days_up(self):
+        """Итог периода — сумма дней, а не последний день."""
+        for day in ("2026-11-01", "2026-11-02"):
+            self.day(day)
+            self.funnel(day, orders=10, orders_sum=6460.0)
+
+        rows = self.rows(self.table("2026-11-01", "2026-11-02"))
+        self.assertEqual(rows["total_orders"]["total"], 20.0)
+        self.assertEqual(rows["total_revenue"]["total"], 12920.0)
+
+    def test_one_article_is_counted_alone(self):
+        self.day("2026-11-01")
+        self.funnel("2026-11-01", nm_id=777, orders=10, orders_sum=6460.0)
+        self.funnel("2026-11-01", nm_id=888, orders=3, orders_sum=1000.0)
+
+        table = dynamics.table(self.conn, "2026-11-01", "2026-11-01",
+                               nm_id=777)
+        self.assertEqual(self.rows(table)["total_orders"]["days"], [10.0])
+
+    def test_a_repeated_collection_replaces_the_day(self):
+        """WB досчитывает воронку раз в два часа: вечернее число меняется."""
+        self.funnel("2026-11-01", orders=10, orders_sum=6460.0)
+        self.funnel("2026-11-01", orders=14, orders_sum=9000.0)
+
+        rows = db.funnel_by_day(self.conn, "2026-11-01", "2026-11-01")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["orders"], 14)
+
+    def test_the_analytics_tab_counts_the_same_turnover(self):
+        """Два экрана с разным оборотом — это два повода не верить ни
+        одному. Вкладка «Аналитика» обязана брать воронку тоже."""
+        from wbads import analytics
+
+        self.day("2026-11-01", spend=646.0)
+        self.order("2026-11-01", srid="a")
+        self.funnel("2026-11-01", orders=10, orders_sum=6460.0)
+
+        report = analytics.build_report(self.conn, "2026-11-01",
+                                        "2026-11-01",
+                                        analytics.Thresholds(), with_nm=False)
+        self.assertEqual(report["orders"]["revenue"], 6460.0)
+        self.assertEqual(report["orders"]["orders"], 10.0)
+        self.assertAlmostEqual(report["orders"]["total_drr"], 10.0, places=3)
+
+    def test_the_analytics_tab_follows_the_switch_back(self):
+        from wbads import analytics
+
+        self.day("2026-11-01", spend=646.0)
+        self.order("2026-11-01", srid="a")
+        self.funnel("2026-11-01", orders=10, orders_sum=6460.0)
+
+        report = analytics.build_report(self.conn, "2026-11-01",
+                                        "2026-11-01",
+                                        analytics.Thresholds(), with_nm=False,
+                                        orders_source="orders")
+        self.assertEqual(report["orders"]["revenue"], 1000.0)
+
+    def test_the_source_setting_survives_a_restart(self):
+        from wbads import api
+        from wbads.config import Config
+
+        api.handle_settings(self.conn, Config(db_path=self.path, token="t"),
+                            {}, {"orders_source": "orders"})
+        again = db.order_basis(db.connect(self.path))
+        self.assertEqual(again["source"], "orders")
+
+    def test_a_made_up_source_is_not_saved(self):
+        from wbads import api
+        from wbads.config import Config
+
+        api.handle_settings(self.conn, Config(db_path=self.path, token="t"),
+                            {}, {"orders_source": "выдумка"})
+        self.assertEqual(db.order_basis(self.conn)["source"], "funnel")
+
+
+class TestFunnelNormalize(unittest.TestCase):
+    """Разбор ответа WB: числа лежат внутри statistic.selected."""
+
+    def row(self, raw):
+        from wbads import collector
+
+        return collector.normalize_funnel(raw, "2026-11-24", "now")
+
+    def test_a_card_becomes_a_row(self):
+        got = self.row({
+            "product": {"nmId": 777, "title": "Чашка"},
+            "statistic": {"selected": {
+                "orderCount": 1493, "orderSum": 964171.0,
+                "buyoutCount": 800, "buyoutSum": 500000.0,
+                "cancelCount": 23, "cancelSum": 14000.0,
+                "openCount": 50000, "cartCount": 3000}},
+        })
+        self.assertEqual(got["nm_id"], 777)
+        self.assertEqual(got["orders"], 1493)
+        self.assertEqual(got["orders_sum"], 964171.0)
+        self.assertEqual(got["buyouts"], 800)
+        self.assertEqual(got["cancels"], 23)
+        self.assertEqual(got["opens"], 50000)
+        self.assertEqual(got["carts"], 3000)
+
+    def test_a_card_without_an_article_is_skipped(self):
+        self.assertIsNone(self.row({"statistic": {"selected": {}}}))
+
+    def test_missing_numbers_become_zero(self):
+        got = self.row({"product": {"nmID": 777}})
+        self.assertEqual(got["orders"], 0)
+        self.assertEqual(got["orders_sum"], 0.0)
+
+    def test_the_period_total_is_summed_from_the_cards(self):
+        from wbads import reconcile
+
+        total = reconcile.funnel_totals([
+            {"statistic": {"selected": {"orderCount": 1000,
+                                        "orderSum": 600000.0}}},
+            {"statistic": {"selected": {"orderCount": 493,
+                                        "orderSum": 364171.0}}},
+        ])
+        self.assertEqual(total["orders"], 1493)
+        self.assertEqual(total["orders_sum"], 964171.0)
+        self.assertEqual(total["cards"], 2)
+
+
+class TestFunnelCollection(DynamicsCase):
+    """Воронка отдаётся по одному дню за запрос, а запросов три в
+    минуту. Значит, сбор обязан спрашивать только то, чего нет, и не
+    запрашивать месяц за один раз."""
+
+    def collect(self, start, end, **kw):
+        from datetime import date as dt
+        from unittest.mock import patch
+
+        from wbads import collector
+
+        asked: list[tuple[str, str]] = []
+
+        def fake(self, s, e, on_progress=None, max_pages=1):
+            asked.append((s, e))
+            return [{"product": {"nmId": 777},
+                     "statistic": {"selected": {"orderCount": 5,
+                                                "orderSum": 500.0}}}]
+
+        with patch.multiple("wbads.wb_client.WBAnalyticsClient",
+                            sales_funnel=fake):
+            result = collector.collect_funnel(
+                self.conn, "token", dt.fromisoformat(start),
+                dt.fromisoformat(end), **kw)
+        return asked, result
+
+    def test_a_day_is_one_request(self):
+        asked, result = self.collect("2026-11-01", "2026-11-03")
+        self.assertEqual(asked, [("2026-11-03", "2026-11-03"),
+                                 ("2026-11-02", "2026-11-02"),
+                                 ("2026-11-01", "2026-11-01")])
+        self.assertEqual(result["funnel_days"], 3)
+
+    def test_collected_days_are_not_asked_again(self):
+        """Переспрашивать собранное — это потерянные минуты."""
+        self.collect("2026-11-01", "2026-11-03")
+        asked, _ = self.collect("2026-11-01", "2026-11-03")
+        # Два свежих дня спрашиваем всегда: WB их ещё досчитывает.
+        self.assertEqual(asked, [("2026-11-03", "2026-11-03"),
+                                 ("2026-11-02", "2026-11-02")])
+
+    def test_a_long_period_is_taken_in_parts(self):
+        asked, result = self.collect("2026-11-01", "2026-11-30", max_days=3)
+        self.assertEqual(len(asked), 3)
+        self.assertEqual(asked[0], ("2026-11-30", "2026-11-30"))
+        self.assertEqual(result["funnel_left"], 27)
+
+    def test_the_numbers_land_in_the_base(self):
+        self.collect("2026-11-01", "2026-11-01")
+        rows = db.funnel_by_day(self.conn, "2026-11-01", "2026-11-01")
+        self.assertEqual(rows[0]["orders"], 5)
+        self.assertEqual(rows[0]["orders_sum"], 500.0)

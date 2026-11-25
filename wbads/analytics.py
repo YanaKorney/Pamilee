@@ -54,38 +54,68 @@ def load_thresholds(conn: sqlite3.Connection, base: Thresholds) -> Thresholds:
 
 def _orders_index(conn: sqlite3.Connection, date_from: str, date_to: str,
                   price_field: str,
-                  include_cancelled: bool = False) -> dict[str, Any]:
+                  include_cancelled: bool = False,
+                  orders_source: str = "funnel") -> dict[str, Any]:
     """Заказы кабинета за период: по артикулам, по дням и итогом.
 
     Рекламный ДРР считается от заказов, которые WB атрибутировал рекламе.
     Общий — от всех заказов артикула, включая органику. Второй показывает
     нагрузку рекламы на оборот, первый — эффективность самой открутки.
+
+    Оборот берётся из воронки продаж: это те же числа, что в кабинете.
+    Метод заказов отдаёт строки заказа, а воронка считает товары, и
+    расхождение между ними доходит до двадцати процентов. За дни, которых
+    в воронке ещё нет, остаётся счёт по заказам.
     """
     rows = db.orders_by_nm(conn, date_from, date_to, price_field,
                            include_cancelled)
+    cells: dict[tuple[int, str], dict[str, float]] = {}
+    for row in rows:
+        key = (int(row["nm_id"]), str(row["date"])[:10])
+        cell = cells.setdefault(key, {"orders": 0.0, "revenue": 0.0})
+        cell["orders"] += float(row["orders"] or 0)
+        cell["revenue"] += float(row["revenue"] or 0)
+
+    funnel = (db.funnel_by_day(conn, date_from, date_to)
+              if orders_source != "orders" else [])
+    if funnel:
+        # День заменяется целиком: смешивать внутри одного дня числа
+        # двух методов нельзя — получился бы оборот, которого не было.
+        covered = {str(row["date"])[:10] for row in funnel}
+        cells = {key: cell for key, cell in cells.items()
+                 if key[1] not in covered}
+        for row in funnel:
+            key = (int(row["nm_id"]), str(row["date"])[:10])
+            cell = cells.setdefault(key, {"orders": 0.0, "revenue": 0.0})
+            cell["orders"] += float(row["orders"] or 0)
+            cell["revenue"] += float(row["orders_sum"] or 0)
+
     by_nm: dict[int, dict[str, float]] = {}
     by_nm_day: dict[tuple[int, str], float] = {}
     by_day: dict[str, float] = {}
-
-    for row in rows:
-        nm_id = int(row["nm_id"])
-        day = str(row["date"])[:10]
-        revenue = float(row["revenue"] or 0)
-        orders = float(row["orders"] or 0)
-
+    for (nm_id, day), cell in cells.items():
         item = by_nm.setdefault(nm_id, {"orders": 0.0, "revenue": 0.0})
-        item["orders"] += orders
-        item["revenue"] += revenue
-        by_nm_day[(nm_id, day)] = by_nm_day.get((nm_id, day), 0.0) + revenue
-        by_day[day] = by_day.get(day, 0.0) + revenue
+        item["orders"] += cell["orders"]
+        item["revenue"] += cell["revenue"]
+        by_nm_day[(nm_id, day)] = by_nm_day.get((nm_id, day), 0.0) + cell["revenue"]
+        by_day[day] = by_day.get(day, 0.0) + cell["revenue"]
+
+    totals = db.orders_totals(conn, date_from, date_to, price_field,
+                              include_cancelled)
+    if funnel:
+        totals = {
+            **totals,
+            "orders": round(sum(c["orders"] for c in cells.values()), 2),
+            "revenue": round(sum(c["revenue"] for c in cells.values()), 2),
+        }
 
     return {
         "by_nm": by_nm,
         "by_nm_day": by_nm_day,
         "by_day": by_day,
-        "totals": db.orders_totals(conn, date_from, date_to, price_field,
-                                   include_cancelled),
-        "available": bool(rows),
+        "totals": totals,
+        "available": bool(rows) or bool(funnel),
+        "source": "funnel" if funnel else "orders",
     }
 
 
@@ -186,7 +216,8 @@ def _nm_flag(kpi: Mapping[str, float], t: Thresholds) -> str:
 def build_report(conn: sqlite3.Connection, date_from: str, date_to: str,
                  thresholds: Thresholds, with_nm: bool = True,
                  price_field: str = "price_with_disc",
-                 include_cancelled: bool = False) -> dict[str, Any]:
+                 include_cancelled: bool = False,
+                 orders_source: str = "funnel") -> dict[str, Any]:
     """Главный отчёт: итоги, динамика и разбор каждой кампании."""
     prev_from, prev_to = shift_window(date_from, date_to)
 
@@ -195,9 +226,9 @@ def build_report(conn: sqlite3.Connection, date_from: str, date_to: str,
     campaigns = {int(c["advert_id"]): dict(c) for c in db.list_campaigns(conn)}
 
     orders = _orders_index(conn, date_from, date_to, price_field,
-                           include_cancelled)
+                           include_cancelled, orders_source)
     prev_orders = _orders_index(conn, prev_from, prev_to, price_field,
-                                include_cancelled)
+                                include_cancelled, orders_source)
     nm_spend = _campaign_nm_spend(conn, date_from, date_to)
     prev_nm_spend = _campaign_nm_spend(conn, prev_from, prev_to)
     article_spend: dict[int, float] = {}
@@ -267,6 +298,7 @@ def build_report(conn: sqlite3.Connection, date_from: str, date_to: str,
         "ad_share": safe_div(derive(totals_cur)["revenue"], orders["totals"]["revenue"]) * 100,
         "price_field": price_field,
         "orders_cancelled": include_cancelled,
+        "source": orders["source"],
     }
 
     return {
@@ -376,7 +408,8 @@ def _meta(conn: sqlite3.Connection) -> dict[str, Any]:
 def campaign_detail(conn: sqlite3.Connection, advert_id: int, date_from: str,
                     date_to: str, thresholds: Thresholds,
                     price_field: str = "price_with_disc",
-                    include_cancelled: bool = False) -> dict[str, Any] | None:
+                    include_cancelled: bool = False,
+                    orders_source: str = "funnel") -> dict[str, Any] | None:
     """Подробный разбор одной кампании."""
     prev_from, prev_to = shift_window(date_from, date_to)
     rows = [dict(r) for r in db.daily_rows(conn, date_from, date_to, [advert_id])]
@@ -388,9 +421,9 @@ def campaign_detail(conn: sqlite3.Connection, advert_id: int, date_from: str,
         return None
     meta = dict(meta_row) if meta_row else {"advert_id": advert_id}
     orders = _orders_index(conn, date_from, date_to, price_field,
-                           include_cancelled)
+                           include_cancelled, orders_source)
     prev_orders = _orders_index(conn, prev_from, prev_to, price_field,
-                                include_cancelled)
+                                include_cancelled, orders_source)
     nm_spend = _campaign_nm_spend(conn, date_from, date_to)
     prev_nm_spend = _campaign_nm_spend(conn, prev_from, prev_to)
     article_spend: dict[int, float] = {}

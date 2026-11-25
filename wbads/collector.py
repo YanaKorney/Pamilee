@@ -336,6 +336,82 @@ def normalize_rating(raw: dict[str, Any], day: str, now: str
     }
 
 
+def normalize_funnel(raw: dict[str, Any], day: str, now: str
+                     ) -> dict[str, Any] | None:
+    """Карточка воронки продаж → строка нашей таблицы.
+
+    Числа лежат внутри statistic.selected — это итог за тот период, что
+    мы запросили, а запрашиваем мы ровно один день.
+    """
+    product = raw.get("product") or {}
+    nm_id = _int(product.get("nmId") or product.get("nmID")
+                 or raw.get("nmId") or raw.get("nmID"))
+    if not nm_id:
+        return None
+    got = (raw.get("statistic") or {}).get("selected") or {}
+    return {
+        "date": day,
+        "nm_id": nm_id,
+        "orders": _int(got.get("orderCount")),
+        "orders_sum": _num(got.get("orderSum")),
+        "buyouts": _int(got.get("buyoutCount")),
+        "buyouts_sum": _num(got.get("buyoutSum")),
+        "cancels": _int(got.get("cancelCount")),
+        "cancels_sum": _num(got.get("cancelSum")),
+        "opens": _int(got.get("openCount")),
+        "carts": _int(got.get("cartCount")),
+        "collected_at": now,
+    }
+
+
+# Воронку WB отдаёт только за запрошенный период целиком, поэтому день
+# = один запрос, а запросов можно три в минуту. Собирать сразу месяц —
+# это десять минут ожидания, и за один сбор мы берём лишь часть: сначала
+# свежие дни, остальное доберётся следующими запусками.
+FUNNEL_DAYS_PER_RUN = 14
+# Два последних дня спрашиваем всегда: воронку WB досчитывает раз в два
+# часа, и вечернее число за сегодня к утру меняется.
+FUNNEL_REFRESH_DAYS = 2
+
+
+def collect_funnel(conn: sqlite3.Connection, token: str,
+                   start: date, end: date,
+                   on_progress: Progress | None = None,
+                   ca_bundle: str = "",
+                   max_days: int = FUNNEL_DAYS_PER_RUN) -> dict[str, Any]:
+    """Воронка продаж по дням — ровно те числа, что стоят в кабинете."""
+    now = datetime.now().isoformat(timespec="seconds")
+    span = (end - start).days + 1
+    all_days = [(end - timedelta(days=i)).isoformat() for i in range(span)]
+    known = db.funnel_days(conn, start.isoformat(), end.isoformat())
+    fresh = set(all_days[:FUNNEL_REFRESH_DAYS])
+
+    todo = [day for day in all_days if day in fresh or day not in known]
+    left = max(0, len(todo) - max_days)
+    todo = todo[:max_days]
+    if not todo:
+        return {"funnel_days": 0, "funnel_left": 0}
+
+    client = WBAnalyticsClient(token, ca_bundle=ca_bundle)
+    _log(on_progress, f"Забираем воронку продаж: дней {len(todo)}"
+                      + (f" (ещё {left} доберём следующим сбором)"
+                         if left else "") + ".")
+
+    saved = 0
+    for day in todo:
+        items = client.sales_funnel(day, day, on_progress=on_progress)
+        rows = [normalize_funnel(item, day, now) for item in items]
+        rows = [row for row in rows if row]
+        db.upsert_funnel(conn, rows)
+        conn.commit()
+        saved += 1
+        total = sum(row["orders"] for row in rows)
+        _log(on_progress, f"  {day}: заказано {total} шт по {len(rows)} "
+                          f"{plural(len(rows), 'товару', 'товарам', 'товарам')}.")
+
+    return {"funnel_days": saved, "funnel_left": left}
+
+
 def merge_stocks(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     """Складывает размеры одного товара на одном складе в одну строку."""
     merged: dict[tuple[str, int, int], dict[str, Any]] = {}
@@ -705,6 +781,21 @@ def collect(conn: sqlite3.Connection, token: str, days: int = 30,
             conn.rollback()
             _log(on_progress, f"Оценку товара получить не вышло: {exc}")
 
+        # Воронка продаж — то, что человек видит в кабинете. Самая
+        # долгая часть сбора: день = запрос, запросов три в минуту.
+        funnel_result: dict[str, Any] = {}
+        try:
+            funnel_result = collect_funnel(conn, token, start, end,
+                                           on_progress=on_progress,
+                                           ca_bundle=ca_bundle)
+        except WBError as exc:
+            conn.rollback()
+            if exc.status not in (401, 403):
+                _log(on_progress, f"Воронку продаж получить не вышло: {exc}")
+        except Exception as exc:
+            conn.rollback()
+            _log(on_progress, f"Воронку продаж получить не вышло: {exc}")
+
         db.finish_collect(conn, log_id, datetime.now().isoformat(timespec="seconds"),
                           len(campaign_rows), len(daily_all))
         conn.commit()
@@ -731,6 +822,8 @@ def collect(conn: sqlite3.Connection, token: str, days: int = 30,
             "sales": sales_result.get("sales", 0),
             "stocks": stocks_result.get("articles", 0),
             "ratings": rating_result.get("ratings", 0),
+            "funnel_days": funnel_result.get("funnel_days", 0),
+            "funnel_left": funnel_result.get("funnel_left", 0),
             "date_from": date_from,
             "date_to": date_to,
         }

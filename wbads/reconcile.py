@@ -64,6 +64,37 @@ def from_wb(rows: Sequence[dict[str, Any]], day: str) -> dict[str, Any]:
     }
 
 
+# Поля воронки продаж — так их называет WB в своём ответе.
+FUNNEL_FIELDS = (
+    ("orders", "orderCount"),
+    ("orders_sum", "orderSum"),
+    ("buyouts", "buyoutCount"),
+    ("buyouts_sum", "buyoutSum"),
+    ("cancels", "cancelCount"),
+    ("cancels_sum", "cancelSum"),
+    ("opens", "openCount"),
+    ("carts", "cartCount"),
+)
+
+
+def funnel_totals(items: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Складывает карточки воронки в итог за день.
+
+    Воронка считает товары, а не строки заказа, поэтому её итог и есть
+    то число, которое человек видит в кабинете. Складываем сами: WB
+    отдаёт её постранично и общей строки в ответе нет.
+    """
+    total: dict[str, Any] = {name: 0.0 for name, _ in FUNNEL_FIELDS}
+    total["cards"] = len(items)
+    for item in items:
+        got = ((item.get("statistic") or {}).get("selected")) or {}
+        for name, wb_name in FUNNEL_FIELDS:
+            total[name] += _num(got.get(wb_name))
+    for name, _ in FUNNEL_FIELDS:
+        total[name] = round(total[name], 2)
+    return total
+
+
 def from_base(conn: sqlite3.Connection, day: str) -> dict[str, Any]:
     """То же самое, но по нашей базе."""
     row = conn.execute(
