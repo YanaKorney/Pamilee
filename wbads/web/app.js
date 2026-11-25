@@ -1076,10 +1076,12 @@ function switchView(view) {
   document.getElementById('view-daily').hidden = view !== 'daily';
   document.getElementById('view-camps').hidden = view !== 'camps';
   document.getElementById('view-dyn').hidden = view !== 'dyn';
+  document.getElementById('view-glue').hidden = view !== 'glue';
   document.getElementById('view-journal').hidden = view !== 'journal';
   if (view === 'daily') loadDaily();
   if (view === 'camps') loadCamps();
   if (view === 'dyn') loadDyn();
+  if (view === 'glue') loadGlue();
   /* Период, цель ДРР и выгрузка относятся к аналитике. В журнале своё окно
      сравнения, и две пары настроек периода рядом только путают. */
   /* У сводки и журнала свои периоды, две пары настроек рядом путают. */
@@ -2975,3 +2977,305 @@ document.getElementById('dyn-compare').addEventListener('click', () => {
   dyn.showCompare = !dyn.showCompare;
   renderDynCompare();
 });
+
+
+/* ── ДРР склейки ──────────────────────────────────────────────────────────
+
+   Склейка — это одна карточка, на которой сидят несколько артикулов.
+   Реклама крутится на один цвет, а заказы приходят на соседний: внутри
+   карточки покупатель переключает цвет, и WB записывает заказ тому
+   артикулу, который в итоге купили. Поэтому ДРР отдельного артикула
+   склейки — число ни о чём: у одного расход без заказов, у другого
+   заказы без расхода. Правда здесь только общая, и собрать её может
+   лишь человек: какие артикулы в одной карточке, знает он, а не WB. */
+
+const glue = { days: 14, from: null, to: null, picked: new Set(),
+               query: '', data: null, said: '', loaded: false };
+
+function glueQuery() {
+  const p = new URLSearchParams();
+  if (glue.from && glue.to) { p.set('from', glue.from); p.set('to', glue.to); }
+  else p.set('days', String(glue.days));
+  if (glue.picked.size) p.set('nm', [...glue.picked].join(','));
+  return p.toString();
+}
+
+async function loadGlue() {
+  const empty = document.getElementById('glue-empty');
+  try {
+    const res = await fetch('/api/glue?' + glueQuery());
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    glue.data = data;
+    glue.loaded = true;
+    document.getElementById('glue-from').value = data.period.from;
+    document.getElementById('glue-to').value = data.period.to;
+    renderGlueSaved(data);
+    renderGlueList(data);
+    renderGlue(data);
+    empty.hidden = glue.picked.size > 0;
+    if (!glue.picked.size) {
+      empty.textContent = 'Отметьте галочками товары одной карточки — '
+        + 'ниже появится ДРР всей склейки.';
+    }
+  } catch (err) {
+    empty.hidden = false;
+    empty.textContent = 'Не удалось посчитать склейку: ' + err.message;
+  }
+}
+
+function renderGlueList(data) {
+  const host = document.getElementById('glue-list');
+  const needle = glue.query.trim().toLowerCase();
+  const all = data.catalog || [];
+  const shown = all.filter((row) => !needle
+    || String(row.nm_id).includes(needle)
+    || (row.name || '').toLowerCase().includes(needle)
+    /* Отмеченный товар не прячем никогда: иначе поиск выглядел бы как
+       снятие галочек. */
+    || glue.picked.has(row.nm_id));
+
+  host.innerHTML = shown.map((row) => {
+    const on = glue.picked.has(row.nm_id);
+    return `<li><label class="${on ? 'on' : ''}">`
+      + `<input type="checkbox" data-nm="${row.nm_id}"${on ? ' checked' : ''}>`
+      + `<span class="gname">${escapeHtml(row.name || ('Артикул ' + row.nm_id))}</span>`
+      + `<span class="gnm">${row.nm_id}</span>`
+      + `<span class="gsum">${money(row.revenue)}</span>`
+      + '</label></li>';
+  }).join('');
+
+  const count = document.getElementById('glue-count');
+  count.textContent = (glue.picked.size
+    ? `Отмечено ${glue.picked.size} ${plural(glue.picked.size, 'товар', 'товара', 'товаров')} из ${all.length}`
+    : `Товаров за период: ${all.length}`)
+    + ' · справа оборот за период';
+}
+
+function renderGlueSaved(data) {
+  const host = document.getElementById('glue-saved');
+  const saved = data.saved || [];
+  host.hidden = !saved.length;
+  if (!saved.length) { host.innerHTML = ''; return; }
+  host.innerHTML = '<span class="cap">Склейки</span>' + saved.map((g) =>
+    `<span class="gchip"><button type="button" data-apply="${escapeHtml(g.name)}">`
+    + `${escapeHtml(g.name)} · ${g.nm_ids.length}</button>`
+    + `<button type="button" class="gx" data-drop="${escapeHtml(g.name)}"`
+    + ` aria-label="Забыть склейку ${escapeHtml(g.name)}">×</button></span>`).join('');
+}
+
+function renderGlue(data) {
+  const t = data.totals || {};
+  const prev = data.prev_totals || {};
+  const tiles = [
+    { label: 'Расход на рекламу', value: money(t.spend),
+      delta: pctChange(t.spend, prev.spend), good: null },
+    { label: 'Заказы с рекламы', value: money(t.revenue),
+      delta: pctChange(t.revenue, prev.revenue), good: 'up',
+      note: `${num(t.orders)} ${plural(t.orders, 'заказ', 'заказа', 'заказов')}` },
+    { label: 'ДРР рекламный', value: t.revenue > 0 ? pct(t.drr) : '—',
+      delta: pctChange(t.drr, prev.drr), good: 'down',
+      note: 'от заказов с рекламы' },
+    { label: 'Весь оборот склейки', value: money(t.total_revenue),
+      delta: pctChange(t.total_revenue, prev.total_revenue), good: 'up',
+      note: `${num(t.total_orders)} ${plural(t.total_orders, 'заказ', 'заказа', 'заказов')} кабинета` },
+    { label: 'ДРР склейки', value: t.total_revenue > 0 ? pct(t.total_drr) : '—',
+      delta: pctChange(t.total_drr, prev.total_drr), good: 'down',
+      note: 'весь расход против всего оборота' },
+    { label: 'Реклама в обороте', value: t.total_revenue > 0 ? pct(t.ad_share, 0) : '—',
+      delta: pctChange(t.ad_share, prev.ad_share), good: null,
+      note: 'остальное — органика' },
+  ];
+
+  const host = document.getElementById('glue-kpis');
+  host.innerHTML = '';
+  if (!glue.picked.size) { host.innerHTML = ''; }
+  else tiles.forEach((tile) => {
+    const node = el('div', 'kpi');
+    node.appendChild(el('div', 'label', tile.label));
+    node.appendChild(el('div', 'value', tile.value));
+    let cls = '', arrow = '';
+    if (tile.delta !== null && tile.delta !== undefined && isFinite(tile.delta)) {
+      arrow = tile.delta >= 0 ? '▲' : '▼';
+      if (tile.good === 'up') cls = tile.delta >= 0 ? 'up' : 'down';
+      if (tile.good === 'down') cls = tile.delta <= 0 ? 'up' : 'down';
+    }
+    node.appendChild(el('div', 'delta',
+      `<span class="arrow ${cls}">${arrow}</span><span class="${cls}">${signed(tile.delta)}</span>`
+      + `<span class="target">${tile.note || 'к прошлому периоду'}</span>`));
+    host.appendChild(node);
+  });
+
+  renderGlueNote(data);
+  renderGlueItems(data);
+  renderGlueChart(data);
+}
+
+function renderGlueNote(data) {
+  const note = document.getElementById('glue-note');
+  const said = [];
+  if (glue.picked.size) {
+    const t = data.totals || {};
+    /* Главное, ради чего склейку считают вместе: по отдельности эти
+       числа разъезжаются, и видно это только рядом. */
+    if (t.ad_share > 0 && t.ad_share < 100) {
+      said.push(`Реклама принесла ${pct(t.ad_share, 0)} оборота склейки, `
+        + 'остальное пришло само.');
+    }
+    if ((data.silent || []).length) {
+      said.push(`Без открутки и заказов за период: `
+        + data.silent.join(', ') + '.');
+    }
+    if (data.source === 'orders') {
+      said.push('Оборот посчитан по строкам заказов — воронка продаж за '
+        + 'этот период ещё не собрана, и с кабинетом числа не сойдутся.');
+    }
+  }
+  note.hidden = !said.length;
+  note.textContent = said.join(' ');
+}
+
+function renderGlueItems(data) {
+  const table = document.getElementById('glue-items');
+  const items = glue.picked.size ? (data.items || []) : [];
+  if (!items.length) { table.innerHTML = ''; return; }
+
+  table.innerHTML =
+    '<thead><tr><th>Товар</th><th>Расход</th><th>Доля расхода</th>'
+    + '<th>Заказы с рекламы</th><th>ДРР рекламный</th>'
+    + '<th>Весь оборот</th><th>Доля оборота</th><th>ДРР по товару</th>'
+    + '</tr></thead><tbody>'
+    + items.map((it) => {
+      /* Строка с расходом, но без своих заказов — это и есть склейка в
+         чистом виде: товар отрабатывает на соседа. Красить её нечем,
+         поэтому называем словом. */
+      const lonely = it.spend > 0 && it.total_revenue <= 0;
+      return `<tr><td class="gcell"><b>${escapeHtml(it.name || ('Артикул ' + it.nm_id))}</b>`
+        + `<span class="gnm">${it.nm_id}</span>`
+        + (lonely ? '<span class="gtag">расход без заказов</span>' : '')
+        + '</td>'
+        + `<td>${money(it.spend)}</td><td>${pct(it.spend_share, 0)}</td>`
+        + `<td>${money(it.revenue)}</td>`
+        + `<td>${it.revenue > 0 ? pct(it.drr) : '—'}</td>`
+        + `<td>${money(it.total_revenue)}</td><td>${pct(it.revenue_share, 0)}</td>`
+        + `<td>${it.total_revenue > 0 ? pct(it.total_drr) : '—'}</td></tr>`;
+    }).join('')
+    + '</tbody>';
+}
+
+function renderGlueChart(data) {
+  const host = document.getElementById('glue-chart');
+  const legend = document.getElementById('glue-legend');
+  const series = glue.picked.size ? (data.series || []) : [];
+  host.hidden = !series.length;
+  legend.hidden = !series.length;
+  if (!series.length) { host.innerHTML = ''; return; }
+
+  const dates = series.map((p) => p.date);
+  const c1 = cssVar('--series-1'), c2 = cssVar('--series-2');
+  const fmt = (v) => pct(v, v < 10 ? 1 : 0);
+  /* Обе линии в процентах — значит, одна шкала и честное сравнение.
+     Рубли рядом с процентами потребовали бы второй оси, а две оси на
+     одном графике читаются неверно чаще, чем верно. */
+  legend.innerHTML = `<span><i class="swatch" style="background:${c1}"></i>`
+    + ' ДРР склейки — весь расход против всего оборота</span>  '
+    + `<span><i class="swatch" style="background:${c2}"></i>`
+    + ' ДРР рекламный — против заказов с рекламы</span>';
+
+  requestAnimationFrame(() => {
+    lineChart(host, {
+      dates, height: 190,
+      series: [
+        { name: 'ДРР склейки', values: series.map((p) => p.total_drr),
+          color: c1, fill: true },
+        { name: 'ДРР рекламный', values: series.map((p) => p.drr), color: c2 },
+      ],
+      format: fmt, axisFormat: fmt,
+      ariaLabel: 'ДРР склейки по дням',
+    });
+  });
+}
+
+function glueSaid(text) {
+  const said = document.getElementById('glue-said');
+  said.hidden = !text;
+  said.textContent = text || '';
+}
+
+async function glueStore(path, body) {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+  return data;
+}
+
+document.getElementById('glue-list').addEventListener('change', (e) => {
+  const box = e.target.closest('input[data-nm]');
+  if (!box) return;
+  const nm = Number(box.dataset.nm);
+  if (box.checked) glue.picked.add(nm); else glue.picked.delete(nm);
+  loadGlue();
+});
+
+document.getElementById('glue-search').addEventListener('input', (e) => {
+  glue.query = e.target.value;
+  if (glue.data) renderGlueList(glue.data);
+});
+
+document.getElementById('glue-clear').addEventListener('click', () => {
+  glue.picked.clear();
+  glueSaid('');
+  loadGlue();
+});
+
+document.getElementById('glue-save').addEventListener('click', async () => {
+  const name = document.getElementById('glue-name').value.trim();
+  if (!name) { glueSaid('Дайте склейке название — по нему вы её и найдёте.'); return; }
+  if (!glue.picked.size) { glueSaid('Сначала отметьте товары склейки.'); return; }
+  try {
+    const data = await glueStore('/api/glue/save',
+      { name, nm_ids: [...glue.picked] });
+    glue.data.saved = data.groups;
+    renderGlueSaved(glue.data);
+    glueSaid(`Склейка «${name}» запомнена — она останется и после перезапуска.`);
+  } catch (err) {
+    glueSaid('Не сохранилось: ' + err.message);
+  }
+});
+
+document.getElementById('glue-saved').addEventListener('click', async (e) => {
+  const drop = e.target.closest('button[data-drop]');
+  if (drop) {
+    try {
+      const data = await glueStore('/api/glue/delete', { name: drop.dataset.drop });
+      glue.data.saved = data.groups;
+      renderGlueSaved(glue.data);
+      glueSaid(`Склейка «${drop.dataset.drop}» забыта.`);
+    } catch (err) {
+      glueSaid('Не вышло удалить: ' + err.message);
+    }
+    return;
+  }
+  const apply = e.target.closest('button[data-apply]');
+  if (!apply) return;
+  const found = (glue.data.saved || []).find((g) => g.name === apply.dataset.apply);
+  if (!found) return;
+  glue.picked = new Set(found.nm_ids);
+  document.getElementById('glue-name').value = found.name;
+  glueSaid('');
+  loadGlue();
+});
+
+document.getElementById('glue-csv').addEventListener('click', () => {
+  if (!glue.picked.size) { glueSaid('Сначала отметьте товары склейки.'); return; }
+  const name = document.getElementById('glue-name').value.trim();
+  const p = new URLSearchParams(glueQuery());
+  if (name) p.set('name', name);
+  window.location = '/api/glue.csv?' + p.toString();
+});
+
+bindPeriod('glue', glue, loadGlue);

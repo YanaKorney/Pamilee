@@ -42,6 +42,7 @@
     <button role="tab" data-view="daily" aria-selected="false">Сводка по товарам</button>
     <button role="tab" data-view="camps" aria-selected="false">Сводка по кампаниям</button>
     <button role="tab" data-view="dyn" aria-selected="false">Динамика по дням</button>
+    <button role="tab" data-view="glue" aria-selected="false">ДРР склейки</button>
     <button role="tab" data-view="journal" aria-selected="false">Журнал изменений</button>
   </nav>
 
@@ -255,6 +256,67 @@
     </section>
 
   </div><!-- /view-dyn -->
+
+  <div id="view-glue" hidden>
+
+    <section class="card">
+      <div class="dhead">
+        <div>
+          <h2>ДРР склейки</h2>
+          <p class="hint">Отметьте товары, которые сидят на одной
+            карточке. Реклама крутится на один цвет, а заказы приходят
+            на соседний — по отдельности ДРР у них неправдивый, вместе
+            честный.</p>
+        </div>
+        <button class="btn" id="glue-csv" type="button">Выгрузить в Excel</button>
+      </div>
+
+      <div class="dfilter">
+        <div class="seg" id="glue-seg" role="group" aria-label="Период">
+          <button data-days="7" aria-pressed="false">7 дней</button>
+          <button data-days="14" aria-pressed="true">14 дней</button>
+          <button data-days="30" aria-pressed="false">30 дней</button>
+        </div>
+        <label><span class="cap">с</span>
+          <input type="date" id="glue-from"></label>
+        <label><span class="cap">по</span>
+          <input type="date" id="glue-to"></label>
+      </div>
+
+      <div class="gsaved" id="glue-saved" hidden></div>
+
+      <div class="gcols">
+        <div class="gpick">
+          <label class="gsearch"><span class="cap">Товары склейки</span>
+            <input type="search" id="glue-search" autocomplete="off"
+                   placeholder="поиск по номеру или названию"
+                   aria-label="Поиск товара"></label>
+          <p class="gcount" id="glue-count"></p>
+          <ul class="glist" id="glue-list" aria-label="Товары"></ul>
+          <div class="gactions">
+            <input type="text" id="glue-name" maxlength="80"
+                   placeholder="название склейки"
+                   aria-label="Название склейки">
+            <button class="btn" id="glue-save" type="button">Запомнить</button>
+            <button class="btn" id="glue-clear" type="button">Снять все</button>
+          </div>
+          <p class="gsaid" id="glue-said" hidden></p>
+        </div>
+
+        <div class="gresult">
+          <div class="kpis" id="glue-kpis"></div>
+          <p class="dgrid-note" id="glue-note" hidden></p>
+          <div id="glue-chart" hidden></div>
+          <p class="dgrid-note" id="glue-legend" hidden></p>
+          <div class="dgrid-scroll">
+            <table class="dgrid" id="glue-items"></table>
+          </div>
+          <p class="jempty" id="glue-empty" hidden></p>
+        </div>
+      </div>
+    </section>
+
+  </div><!-- /view-glue -->
 
   <div id="view-journal" hidden>
 

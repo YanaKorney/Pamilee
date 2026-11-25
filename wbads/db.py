@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
-from typing import Iterable, Iterator, Sequence
+from typing import Any, Iterable, Iterator, Sequence
 
 SCHEMA = """
 -- Справочник кампаний (обновляется на каждом сборе)
@@ -229,6 +230,17 @@ CREATE TABLE IF NOT EXISTS funnel_daily (
     PRIMARY KEY (date, nm_id)
 );
 CREATE INDEX IF NOT EXISTS idx_funnel_date ON funnel_daily(date);
+
+-- Склейки: товары, которые в кабинете сидят на одной карточке.
+-- WB считает их по отдельности, а продавец — вместе, и ДРР у склейки
+-- свой: реклама на один цвет приносит заказы другому. Набор товаров
+-- человек отмечает галочками, и его нужно помнить между запусками.
+CREATE TABLE IF NOT EXISTS glue_groups (
+    name       TEXT PRIMARY KEY,         -- как человек назвал склейку
+    nm_ids     TEXT NOT NULL,            -- артикулы через запятую
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 
 -- Пороги и настройки, изменённые из дашборда
 CREATE TABLE IF NOT EXISTS settings (
@@ -694,6 +706,42 @@ def funnel_by_day(conn: sqlite3.Connection, date_from: str, date_to: str
         FROM funnel_daily
         WHERE date BETWEEN ? AND ?
     """, (date_from, date_to)))
+
+
+def save_glue(conn: sqlite3.Connection, name: str,
+              nm_ids: Iterable[int]) -> dict[str, Any]:
+    """Сохраняет склейку под именем. Повтор имени заменяет набор."""
+    name = str(name or "").strip()[:80]
+    ids = sorted({int(nm) for nm in nm_ids if int(nm or 0) > 0})
+    if not name or not ids:
+        raise ValueError("Склейке нужны имя и хотя бы один товар")
+    now = datetime.now().isoformat(timespec="seconds")
+    conn.execute("""
+        INSERT INTO glue_groups (name, nm_ids, created_at, updated_at)
+        VALUES (?,?,?,?)
+        ON CONFLICT(name) DO UPDATE SET
+            nm_ids=excluded.nm_ids, updated_at=excluded.updated_at
+    """, (name, ",".join(str(nm) for nm in ids), now, now))
+    return {"name": name, "nm_ids": ids}
+
+
+def list_glue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Сохранённые склейки — свежие сверху."""
+    out = []
+    for row in conn.execute(
+            "SELECT name, nm_ids, updated_at FROM glue_groups"
+            " ORDER BY updated_at DESC"):
+        ids = [int(part) for part in str(row["nm_ids"] or "").split(",")
+               if part.strip().isdigit()]
+        out.append({"name": row["name"], "nm_ids": ids,
+                    "updated_at": row["updated_at"]})
+    return out
+
+
+def delete_glue(conn: sqlite3.Connection, name: str) -> bool:
+    cur = conn.execute("DELETE FROM glue_groups WHERE name = ?",
+                       (str(name or "").strip(),))
+    return cur.rowcount > 0
 
 
 def has_sales(conn: sqlite3.Connection) -> bool:

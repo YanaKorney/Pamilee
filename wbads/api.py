@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
-from . import analytics, changes, daily, db, dynamics
+from . import analytics, changes, daily, db, dynamics, glue
 from .config import APP_VERSION, ROOT, Config, Thresholds
 from .metrics import parse_date
 
@@ -485,6 +485,64 @@ def _campaign_names(conn: sqlite3.Connection) -> dict[int, str]:
             for row in conn.execute("SELECT advert_id, name FROM campaigns")}
 
 
+def _glue_ids(query: dict[str, list[str]]) -> list[int]:
+    """Артикулы склейки из адреса: «nm=1,2,3» или несколько «nm=»."""
+    out: list[int] = []
+    for chunk in query.get("nm") or []:
+        for part in str(chunk).replace(" ", "").split(","):
+            if part.isdigit():
+                out.append(int(part))
+    return out
+
+
+def _glue_data(conn: sqlite3.Connection, cfg: Config,
+               query: dict[str, list[str]]) -> dict[str, Any]:
+    """Сама склейка — без списков для выбора."""
+    date_from, date_to = _period(conn, query)
+    basis = _basis(conn, cfg)
+    return glue.table(conn, date_from, date_to, _glue_ids(query),
+                      basis["field"], basis["cancelled"])
+
+
+def handle_glue(conn: sqlite3.Connection, cfg: Config,
+                query: dict[str, list[str]]) -> dict[str, Any]:
+    """ДРР склейки: итог по отмеченным товарам и вклад каждого."""
+    date_from, date_to = _period(conn, query)
+    data = _glue_data(conn, cfg, query)
+    # Список для галочек и сохранённые склейки приходят вместе с
+    # расчётом: отдельный запрос на каждое означал бы мигающую вкладку.
+    data["catalog"] = glue.catalog(conn, date_from, date_to)
+    data["saved"] = db.list_glue(conn)
+    return data
+
+
+def handle_glue_csv(conn: sqlite3.Connection, cfg: Config,
+                    query: dict[str, list[str]]) -> tuple[str, str]:
+    """Та же склейка файлом для Excel."""
+    data = _glue_data(conn, cfg, query)
+    name = (query.get("name") or [""])[0].strip() or "склейка"
+    title = f"ДРР склейки · {name}"
+    stem = f"{name}-{data['period']['from']}-{data['period']['to']}"
+    return glue.to_csv(data, title), f"{stem}.csv"
+
+
+def handle_glue_save(conn: sqlite3.Connection,
+                     body: dict[str, Any]) -> dict[str, Any]:
+    """Запоминает набор товаров под именем."""
+    ids = [int(nm) for nm in (body.get("nm_ids") or [])
+           if str(nm).strip().isdigit()]
+    saved = db.save_glue(conn, str(body.get("name") or ""), ids)
+    conn.commit()
+    return {"ok": True, "saved": saved, "groups": db.list_glue(conn)}
+
+
+def handle_glue_delete(conn: sqlite3.Connection,
+                       body: dict[str, Any]) -> dict[str, Any]:
+    gone = db.delete_glue(conn, str(body.get("name") or ""))
+    conn.commit()
+    return {"ok": gone, "groups": db.list_glue(conn)}
+
+
 ROUTES: dict[str, Callable] = {
     "/api/report": handle_report,
     "/api/campaign": handle_campaign,
@@ -494,6 +552,7 @@ ROUTES: dict[str, Callable] = {
     "/api/dynamics": handle_dynamics,
     "/api/changes": handle_changes,
     "/api/articles": handle_articles,
+    "/api/glue": handle_glue,
 }
 
 
@@ -756,10 +815,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
 
             if route in ("/api/export.csv", "/api/changes.csv",
-                         "/api/daily.csv", "/api/campaign-daily.csv"):
+                         "/api/daily.csv", "/api/campaign-daily.csv",
+                         "/api/glue.csv"):
                 maker = {"/api/changes.csv": handle_changes_csv,
                          "/api/daily.csv": handle_daily_csv,
                          "/api/campaign-daily.csv": handle_campaign_daily_csv,
+                         "/api/glue.csv": handle_glue_csv,
                          }.get(route, handle_export)
                 with db.session(self.config.db_path) as conn:
                     content, filename = maker(conn, self.config, query)
@@ -811,6 +872,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 with db.session(self.config.db_path) as conn:
                     self._send_json(handle_settings(conn, self.config,
                                                     parse_qs(parsed.query), body))
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, 500)
+            return
+
+        if parsed.path in ("/api/glue/save", "/api/glue/delete"):
+            try:
+                with db.session(self.config.db_path) as conn:
+                    if parsed.path.endswith("/delete"):
+                        self._send_json(handle_glue_delete(conn, body))
+                    else:
+                        self._send_json(handle_glue_save(conn, body))
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, 400)
             except Exception as exc:
                 self._send_json({"error": str(exc)}, 500)
             return

@@ -10,7 +10,7 @@ import sqlite3
 from datetime import date, timedelta
 from typing import Any, Mapping, Sequence
 
-from . import db
+from . import cabinet, db
 from .config import APP_VERSION, ROOT, Thresholds
 from .metrics import (
     RAW_KEYS,
@@ -66,27 +66,9 @@ def _orders_index(conn: sqlite3.Connection, date_from: str, date_to: str,
     расхождение между ними доходит до двадцати процентов. По заказам
     считаются только дни, которых в воронке ещё нет.
     """
-    rows = db.orders_by_nm(conn, date_from, date_to, price_field,
-                           include_cancelled)
-    cells: dict[tuple[int, str], dict[str, float]] = {}
-    for row in rows:
-        key = (int(row["nm_id"]), str(row["date"])[:10])
-        cell = cells.setdefault(key, {"orders": 0.0, "revenue": 0.0})
-        cell["orders"] += float(row["orders"] or 0)
-        cell["revenue"] += float(row["revenue"] or 0)
-
-    funnel = db.funnel_by_day(conn, date_from, date_to)
-    if funnel:
-        # День заменяется целиком: смешивать внутри одного дня числа
-        # двух методов нельзя — получился бы оборот, которого не было.
-        covered = {str(row["date"])[:10] for row in funnel}
-        cells = {key: cell for key, cell in cells.items()
-                 if key[1] not in covered}
-        for row in funnel:
-            key = (int(row["nm_id"]), str(row["date"])[:10])
-            cell = cells.setdefault(key, {"orders": 0.0, "revenue": 0.0})
-            cell["orders"] += float(row["orders"] or 0)
-            cell["revenue"] += float(row["orders_sum"] or 0)
+    got = cabinet.order_cells(conn, date_from, date_to, price_field,
+                              include_cancelled)
+    cells = got["cells"]
 
     by_nm: dict[int, dict[str, float]] = {}
     by_nm_day: dict[tuple[int, str], float] = {}
@@ -100,7 +82,9 @@ def _orders_index(conn: sqlite3.Connection, date_from: str, date_to: str,
 
     totals = db.orders_totals(conn, date_from, date_to, price_field,
                               include_cancelled)
-    if funnel:
+    if got["source"] == "funnel":
+        # Отмены остаются от метода заказов: воронка считает их своим
+        # счётом, и подменять ими число заказов было бы путаницей.
         totals = {
             **totals,
             "orders": round(sum(c["orders"] for c in cells.values()), 2),
@@ -112,8 +96,8 @@ def _orders_index(conn: sqlite3.Connection, date_from: str, date_to: str,
         "by_nm_day": by_nm_day,
         "by_day": by_day,
         "totals": totals,
-        "available": bool(rows) or bool(funnel),
-        "source": "funnel" if funnel else "orders",
+        "available": bool(cells),
+        "source": got["source"],
     }
 
 

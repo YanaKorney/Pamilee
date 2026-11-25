@@ -944,3 +944,86 @@ table.data tr.star td:first-child { border-left: 3px solid var(--status-good); p
 }
 .dgrid tr.zone td { color: var(--text-secondary); }
 .dgrid tr.zone .m-total { color: var(--text-primary); }
+
+/* ── ДРР склейки ──────────────────────────────────────────────────────────
+
+   Слева список с галочками, справа результат. На узком экране список
+   уезжает наверх: выбирать всё равно сначала, а смотреть потом. */
+
+.gcols {
+  display: grid; grid-template-columns: minmax(260px, 340px) 1fr;
+  gap: 18px; align-items: start; margin-top: 14px;
+}
+@media (max-width: 900px) { .gcols { grid-template-columns: 1fr; } }
+
+.gpick {
+  border: 1px solid var(--border); border-radius: 10px; padding: 12px;
+  background: var(--surface-2);
+}
+.gsearch { display: block; }
+.gsearch input {
+  width: 100%; margin-top: 4px; padding: 7px 9px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface); color: var(--text-primary); font: inherit;
+}
+.gcount { margin: 8px 0 6px; color: var(--text-muted); font-size: 12.5px; }
+
+.glist {
+  list-style: none; margin: 0; padding: 0;
+  max-height: 420px; overflow-y: auto;
+}
+.glist label {
+  display: grid; gap: 2px 8px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: "box name sum" "box nm sum";
+  align-items: center; padding: 6px 7px; border-radius: 8px;
+  cursor: pointer; font-size: 13px;
+}
+.glist label:hover { background: var(--surface); }
+.glist label.on { background: var(--status-info-soft); }
+.glist input { grid-area: box; }
+.glist .gname {
+  grid-area: name; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.glist .gnm { grid-area: nm; color: var(--text-muted); font-size: 11.5px; }
+.glist .gsum {
+  grid-area: sum; align-self: center; color: var(--text-secondary);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+
+.gactions { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+.gactions input {
+  flex: 1 1 120px; min-width: 110px; padding: 7px 9px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface); color: var(--text-primary); font: inherit;
+}
+.gsaid { margin: 8px 0 0; color: var(--text-secondary); font-size: 12.5px; }
+
+.gsaved {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 10px;
+}
+.gchip {
+  display: inline-flex; align-items: stretch;
+  border: 1px solid var(--border); border-radius: 999px; overflow: hidden;
+  background: var(--surface-2);
+}
+.gchip button {
+  border: 0; background: transparent; color: var(--text-primary);
+  font: inherit; font-size: 12.5px; padding: 5px 11px; cursor: pointer;
+}
+.gchip button:hover { background: var(--surface); }
+.gchip .gx { color: var(--text-muted); padding: 5px 9px; }
+
+.gresult .kpis { margin-bottom: 12px; }
+.gresult .dgrid td { text-align: right; }
+.gresult .dgrid th { text-align: right; }
+.gresult .dgrid td.gcell, .gresult .dgrid th:first-child { text-align: left; }
+.gcell b { display: block; font-weight: 600; }
+.gcell .gnm { color: var(--text-muted); font-size: 11.5px; }
+.gcell .gtag {
+  display: inline-block; margin-left: 6px; padding: 1px 7px;
+  border-radius: 999px; background: var(--status-warning-soft);
+  color: var(--text-secondary); font-size: 11px;
+}

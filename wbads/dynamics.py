@@ -29,7 +29,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-from . import db
+from . import cabinet, db
 from .daily import raw_by_day, search_views_by_day
 from .metrics import RAW_KEYS, daterange, derive, safe_div, shift_window
 
@@ -534,14 +534,14 @@ def _cabinet_orders(conn: sqlite3.Connection, date_from: str, date_to: str,
                     ) -> dict[str, dict[str, float]]:
     """Заказы кабинета по дням: знаменатель общего ДРР и цены.
 
-    Штуки и рубли берём из воронки продаж — это ровно те числа, что
-    стоят в кабинете, и выбора здесь нет: метод заказов отдаёт строки
-    заказа, а воронка считает товары, и сходиться они не могут.
-    Цены и СПП всё равно считаются по заказам: в воронке их нет.
-
-    За дни, которых в воронке ещё нет, остаётся старый счёт по
-    заказам: ноль вместо данных читался бы как провал продаж.
+    Штуки и рубли считает cabinet: правило «день, который есть в
+    воронке, считает воронка» одно на всю программу. Цены и СПП всё
+    равно берутся из заказов — в воронке этих полей нет.
     """
+    got = cabinet.order_cells(
+        conn, date_from, date_to, price_field, include_cancelled,
+        nm_ids=[nm_id] if nm_id is not None else None)
+
     out: dict[str, dict[str, float]] = {}
 
     def slot(day: str) -> dict[str, float]:
@@ -550,34 +550,8 @@ def _cabinet_orders(conn: sqlite3.Connection, date_from: str, date_to: str,
                                     "with_spp": 0.0, "spp_sum": 0.0,
                                     "opens": 0.0, "carts": 0.0})
 
-    for row in db.orders_by_nm(conn, date_from, date_to, price_field,
-                               include_cancelled):
-        if nm_id is not None and int(row["nm_id"] or 0) != nm_id:
-            continue
-        here = slot(str(row["date"])[:10])
-        here["orders"] += float(row["orders"] or 0)
-        here["revenue"] += float(row["revenue"] or 0)
-
-    # Воронка кладётся поверх заказов: за день, который в ней есть,
-    # считает она.
-    funnel: dict[str, dict[str, float]] = {}
-    for row in db.funnel_by_day(conn, date_from, date_to):
-        if nm_id is not None and int(row["nm_id"] or 0) != nm_id:
-            continue
-        day = str(row["date"])[:10]
-        here = funnel.setdefault(day, {"orders": 0.0, "revenue": 0.0,
-                                       "opens": 0.0, "carts": 0.0})
-        here["orders"] += float(row["orders"] or 0)
-        here["revenue"] += float(row["orders_sum"] or 0)
-        here["opens"] += float(row["opens"] or 0)
-        here["carts"] += float(row["carts"] or 0)
-
-    for day, got in funnel.items():
-        here = slot(day)
-        here["opens"] = got["opens"]
-        here["carts"] = got["carts"]
-        here["orders"] = got["orders"]
-        here["revenue"] = got["revenue"]
+    for day, cell in cabinet.by_day(got["cells"]).items():
+        slot(day).update(cell)
 
     for row in db.prices_by_day(conn, date_from, date_to,
                                 include_cancelled):
